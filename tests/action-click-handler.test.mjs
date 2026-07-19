@@ -153,6 +153,7 @@ test('installed listener absorbs routing failures without returning a rejected p
   let registeredListener;
   let createAttempts = 0;
   let unhandledRejection;
+  const warnings = [];
   const chromeApi = {
     action: {
       onClicked: {
@@ -163,11 +164,11 @@ test('installed listener absorbs routing failures without returning a rejected p
     },
     tabs: {
       async sendMessage() {
-        throw new Error('no content-script receiver');
+        throw new Error('no receiver at https://private.example/?api_key=secret-key');
       },
       async create() {
         createAttempts += 1;
-        throw new Error('settings page failed to open');
+        throw new Error('settings page failed with provider response details');
       }
     },
     runtime: {
@@ -179,9 +180,11 @@ test('installed listener absorbs routing failures without returning a rejected p
   const onUnhandledRejection = (reason) => {
     unhandledRejection = reason;
   };
+  const originalConsoleWarn = console.warn;
 
   installActionClickHandler(chromeApi);
   process.once('unhandledRejection', onUnhandledRejection);
+  console.warn = (...args) => warnings.push(args);
   try {
     const listenerResult = registeredListener({ id: 42 });
     listenerResult?.catch(() => {});
@@ -190,7 +193,9 @@ test('installed listener absorbs routing failures without returning a rejected p
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(createAttempts, 1);
     assert.equal(unhandledRejection, undefined);
+    assert.deepEqual(warnings, [['[action] Promotion panel unavailable']]);
   } finally {
     process.removeListener('unhandledRejection', onUnhandledRejection);
+    console.warn = originalConsoleWarn;
   }
 });
