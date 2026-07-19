@@ -357,23 +357,17 @@
   }
 
   // ====== AI 生成配置 ======
-  const QWEN_API_BASE = 'https://jieyunsang.cn/api';
   const WEBSITE_URL_STORAGE_KEY = 'promotion_website_url';
   const WEBSITE_CONTENT_STORAGE_KEY = 'promotion_website_content';
   const USER_NAME_STORAGE_KEY = 'auto_fill_user_name';
   const USER_EMAIL_STORAGE_KEY = 'auto_fill_user_email';
   const USER_PASSWORD_STORAGE_KEY = 'auto_fill_user_password';
-  const USER_ID_STORAGE_KEY = 'auto_comment_user_id';
   const PROMPT_FIELD_VALUES_STORAGE_KEY = 'auto_fill_prompt_field_values';
   const SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY = 'show_export_outlinks_floating_button';
 
   // ====== 批量任务设置（从 storage.local 读取）======
   const BATCH_SETTINGS_KEY = 'batch_task_settings';
   const BATCH_URLS_KEY = 'batch_task_urls';
-
-  // ====== 积分系统配置 ======
-  const POINTS_API_BASE = 'https://jieyunsang.cn/api';
-  const POINTS_COST_PER_GENERATION = 1;
 
   // ====== 防重复生成配置 ======
   const DOMAIN_COOLDOWN_MS = 24 * 60 * 60 * 1000;
@@ -394,65 +388,6 @@
 
   function getCurrentDomain() {
     return extractDomain(window.location.href);
-  }
-
-  // ====== 积分系统函数 ======
-
-  // 从 chrome.storage.sync 读取用户ID（由管理员线下分配）
-  function getUserId() {
-    return new Promise((resolve) => {
-      if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.sync) {
-        resolve('');
-        return;
-      }
-      chrome.storage.sync.get([USER_ID_STORAGE_KEY], (result) => {
-        if (chrome.runtime && chrome.runtime.lastError) {
-          console.error('读取用户ID失败：', chrome.runtime.lastError);
-          resolve('');
-          return;
-        }
-        const userId = result && typeof result[USER_ID_STORAGE_KEY] === 'string'
-          ? result[USER_ID_STORAGE_KEY].trim()
-          : '';
-        resolve(userId);
-      });
-    });
-  }
-
-  // 查询积分余额
-  async function getPointsBalance() {
-    const userId = await getUserId();
-    if (!userId) {
-      return 0;
-    }
-    try {
-      const response = await fetch(`${POINTS_API_BASE}/get-points?userId=${encodeURIComponent(userId)}`);
-      const data = await response.json();
-      return data.success ? data.points : 0;
-    } catch (e) {
-      console.error('查询积分失败:', e);
-      return 0;
-    }
-  }
-
-  // 扣减积分
-  async function deductPoints(points) {
-    const userId = await getUserId();
-    if (!userId) {
-      return { success: false, error: '用户ID未配置，请在选项页面填写用户ID' };
-    }
-    try {
-      const response = await fetch(`${POINTS_API_BASE}/deduct-points`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId, points })
-      });
-      const data = await response.json();
-      return data;
-    } catch (e) {
-      console.error('扣减积分失败:', e);
-      return { success: false, error: e.message };
-    }
   }
 
   // 最近一次 AI 生成的推广文案（用于页面自动填充 & 浮动窗口回显）
@@ -1004,13 +939,7 @@
 
         // 生成 AI 文案
         console.log('[AutoComment] handleBatchTaskForAutoMode 生成AI文案...');
-        promotionText = await generatePromotionCopyWithQwen();
-        if (!promotionText) {
-          console.log('[AutoComment] handleBatchTaskForAutoMode blocked generated copy, skip current URL');
-          await writePendingResult(batchId, urlIndex, url, 'skipped', null, 'blocked_keyword');
-          await reportBatchResult(batchId, urlIndex, 'skipped', null, 'blocked_keyword', url);
-          return;
-        }
+        promotionText = await generatePromotionCopyWithLlm();
         console.log('[AutoComment] handleBatchTaskForAutoMode AI文案生成成功，长度:', promotionText.length);
       }
 
@@ -3073,26 +3002,9 @@
     return { success: missingFields.length === 0, missingFields };
   }
 
-  // 收集当前页面内容 + 调用后端生成推广文案
-  async function generatePromotionCopyWithQwen() {
-    const QWEN_SKILL_TEMPLATE = await getQwenSkillTemplate();
-
-    // 检查用户ID是否配置
-    const userId = await getUserId();
-    if (!userId) {
-      throw new Error(
-        '尚未配置用户 ID，请在扩展选项页面填写由管理员分配的用户 ID。'
-      );
-    }
-
-    // 扣减积分（在后端一并完成，此处仅做友好提示）
-    const currentPoints = await getPointsBalance();
-    if (currentPoints < POINTS_COST_PER_GENERATION) {
-      throw new Error(
-        `积分不足！当前积分: ${currentPoints}，生成一次需要 ${POINTS_COST_PER_GENERATION} 积分。请联系管理员充值。`
-      );
-    }
-
+  // 收集当前页面内容，再由后台服务生成推广文案。
+  async function generatePromotionCopyWithLlm() {
+    const systemPrompt = await getQwenSkillTemplate();
     const websiteUrl = window.location.href || '';
     const title = document.title || '';
     const descriptionMeta =
@@ -3100,44 +3012,14 @@
       document.querySelector('meta[name="Description"]');
     const description = descriptionMeta ? descriptionMeta.content || '' : '';
 
-    let bodyText = '';
-    if (document.body) {
-      bodyText = document.body.innerText || '';
-      bodyText = bodyText.replace(/\s+/g, ' ').trim();
-      const MAX_LEN = 4000;
-      if (bodyText.length > MAX_LEN) {
-        bodyText = bodyText.slice(0, MAX_LEN) + ' …（内容已截断）';
-      }
-    }
-
-    const response = await fetch(`${QWEN_API_BASE}/generate-copy`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        userId,
-        websiteUrl,
-        title,
-        description,
-        bodyText,
-        skillTemplate: QWEN_SKILL_TEMPLATE
-      })
+    const bodyText = document.body ? document.body.innerText || '' : '';
+    const userPrompt = globalThis.AutoCommentLlmBridge.buildPageUserPrompt({
+      websiteUrl,
+      title,
+      description,
+      bodyText
     });
-
-    const data = await response.json();
-
-    if (!response.ok || !data.success) {
-      const msg = data && data.error
-        ? `生成失败: ${data.error}`
-        : '后端返回异常，请稍后重试。';
-      throw new Error(msg);
-    }
-
-    const aiText = Object.prototype.hasOwnProperty.call(data, 'text')
-      ? String(data.text || '')
-      : '未能从响应中解析出文案内容。';
-
-    console.log('AI 生成的网站推广文案：\n', aiText);
-    return aiText;
+    return globalThis.AutoCommentLlmBridge.generate(chrome.runtime, { systemPrompt, userPrompt });
   }
 
   // ====== 页面内浮动窗口 UI ======
@@ -3325,15 +3207,7 @@
       setCopyEnabled(false);
       setGenerateLoading(true);
       try {
-        const text = await generatePromotionCopyWithQwen();
-        if (!text) {
-          lastGeneratedPromotionCopy = '';
-          textarea.value = '';
-          setStatus('当前页面命中黑名单，已跳过生成并退回积分。', '#f59e0b');
-          setCopyEnabled(false);
-          setGenerateLoading(false);
-          return;
-        }
+        const text = await generatePromotionCopyWithLlm();
         lastGeneratedPromotionCopy = text;
         textarea.value = text;
         await recordGenerationTime(text);
@@ -3920,7 +3794,6 @@
 
   async function handleBatchTask(batchId, urlIndex, url, originalIndex) {
     console.log('[content] handleBatchTask 开始 >>>', { batchId, urlIndex, url, time: new Date().toISOString() });
-    let aiGenerated = false; // 标记AI是否已生成（用于失败时补偿）
     const taskKey = getBatchTaskKey(batchId, urlIndex);
     if (runningBatchTaskKey === taskKey) {
       console.warn('[content] handleBatchTask 跳过重复执行:', taskKey);
@@ -3988,7 +3861,7 @@
         form = manualTargets.form;
         ta = manualTargets.textarea;
       }
-      // 关键：确认找到评论框后再生成 AI 文案，避免浪费积分
+      // 关键：确认找到评论框后再生成 AI 文案，避免无用请求。
       if (!form || !ta) {
         console.log('[content] 未找到评论框，跳过AI生成，结束任务');
         throw new Error('__NO_COMMENT_BOX__');
@@ -4003,15 +3876,7 @@
         console.log('[content] 4/6 复用已有推广文案，跳过AI生成，长度:', aiContent.length);
       } else {
         console.log('[content] 4/6 生成AI文案...');
-        aiGenerated = true; // AI即将生成，标记用于失败时补偿
-        aiContent = await generatePromotionCopyWithQwen();
-        if (!aiContent) {
-          aiGenerated = false;
-          console.log('[content] AI文案命中黑名单，已由后端退回积分，跳过当前URL');
-          await writePendingResult(batchId, urlIndex, url, 'skipped', null, 'blocked_keyword');
-          await reportBatchResult(batchId, urlIndex, 'skipped', null, 'blocked_keyword', url);
-          return;
-        }
+        aiContent = await generatePromotionCopyWithLlm();
       }
       console.log('[content] AI文案生成完成，长度:', aiContent ? aiContent.length : 0, aiContent ? aiContent.substring(0, 80) + '...' : 'null');
       console.log('[content] 5/6 填充表单字段...');
@@ -4057,11 +3922,6 @@
       await writePendingResult(batchId, urlIndex, url, 'success', aiContent, null);
       await persistBatchSubmitContext(batchId, urlIndex, url, 'success', aiContent, null);
       console.log('[content] pending结果写入完成');
-      // 用 sendBeacon 异步发后台，sendBeacon 在页面卸载前一定会发出
-      console.log('[content] 发送 sendBeacon...');
-      sendBeaconReport(batchId, urlIndex, 'success', aiContent, null);
-      console.log('[content] sendBeacon 已发出');
-
       console.log('[content] 7/7 点击提交按钮...');
       const clickResult = await clickCommentSubmitButton();
       console.log('[content] 点击结果:', clickResult);
@@ -4113,33 +3973,6 @@
     } catch (err) {
       console.warn('[content] handleBatchTask 捕获错误:', err.message);
       clearBatchSubmitContext();
-
-      // AI已生成但失败，尝试补偿积分
-      if (aiGenerated) {
-        const userId = await getUserId();
-        if (userId) {
-          try {
-            const refundRes = await fetch('https://jieyunsang.cn/api/refund-points', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                userId,
-                batchId,
-                url,
-                reason: err.message || 'AI生成后提交失败'
-              })
-            });
-            const refundData = await refundRes.json();
-            if (refundData.success) {
-              console.log('[content] 积分补偿成功: +' + refundData.refundedPoints + ', 剩余: ' + refundData.remainingPoints);
-            } else {
-              console.warn('[content] 积分补偿失败:', refundData.error);
-            }
-          } catch (refundErr) {
-            console.error('[content] 调用积分补偿接口失败:', refundErr);
-          }
-        }
-      }
 
       // 特殊错误：未找到评论框
       if (err.message === '__NO_COMMENT_BOX__') {
@@ -4261,7 +4094,6 @@
    */
   async function reportAlreadyCommented(batchId, urlIndex, url, aiContent) {
     await writePendingResult(batchId, urlIndex, url, 'skipped', aiContent, 'already_commented');
-    sendBeaconReport(batchId, urlIndex, 'skipped', aiContent, 'already_commented');
     if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
       await new Promise((resolve) => {
         chrome.runtime.sendMessage({
@@ -4438,7 +4270,6 @@
   async function reportManualRequiredAndClose(batchId, urlIndex, url, aiContent) {
     console.log('[content] 检测到需手动处理，上报 manual_required 并关闭网页:', { batchId, urlIndex, url });
     await writePendingResult(batchId, urlIndex, url, 'manual_required', aiContent || null, MANUAL_REQUIRED_MESSAGE);
-    sendBeaconReport(batchId, urlIndex, 'manual_required', aiContent || null, MANUAL_REQUIRED_MESSAGE);
 
     if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
       await new Promise((resolve) => {
@@ -4504,21 +4335,6 @@
     }
   }
 
-  /**
-   * 用 navigator.sendBeacon 发后台（不受页面刷新影响，在 beforeunload 之前一定发出）
-   */
-  function sendBeaconReport(batchId, urlIndex, result, aiContent, errorMessage) {
-    const payload = JSON.stringify({ urlIndex, result, aiContent, errorMessage });
-    const url = `https://jieyunsang.cn/api/batch/${encodeURIComponent(batchId)}/report`;
-    try {
-      if (navigator.sendBeacon) {
-        const sent = navigator.sendBeacon(url, payload);
-        console.log('[AutoComment] sendBeacon →', sent ? '已入队' : '同步失败');
-      }
-    } catch (e) {
-      console.warn('[AutoComment] sendBeacon 失败:', e);
-    }
-  }
   async function reportBatchResult(batchId, urlIndex, result, aiContent, errorMessage, pageUrl) {
     const payload = {
       type: 'BATCH_REPORT_RESULT',
