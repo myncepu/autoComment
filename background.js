@@ -1,3 +1,19 @@
+import { handleLlmMessage, isAllowedLlmSender, LLM_MESSAGE_TYPES } from './lib/llm-service.mjs';
+
+const LLM_MESSAGE_TYPE_SET = new Set(Object.values(LLM_MESSAGE_TYPES));
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (!LLM_MESSAGE_TYPE_SET.has(message?.type)) return false;
+  if (!isAllowedLlmSender(sender, chrome.runtime.id)) {
+    sendResponse({ success: false, error: { code: 'FORBIDDEN_SENDER', message: '拒绝外部模型请求。' } });
+    return false;
+  }
+  handleLlmMessage(message, { storage: chrome.storage })
+    .then(sendResponse)
+    .catch(() => sendResponse({ success: false, error: { code: 'UNKNOWN_ERROR', message: '模型请求失败。' } }));
+  return true;
+});
+
 // 点击扩展图标时，在当前标签页内打开/关闭浮动窗口
 chrome.action.onClicked.addListener((tab) => {
   // 打开选项页面
