@@ -1,171 +1,172 @@
-# Self-Owned OpenAI-Compatible API Design
+# 自有 OpenAI 兼容 API 改造设计
 
-**Date:** 2026-07-19
+**日期：** 2026-07-19
 
-## Goal
+## 目标
 
-Convert the browser extension from the author's points-backed Qwen service into a self-contained extension that calls the user's own OpenAI-compatible API. OpenRouter is the default provider, `qwen/qwen-plus` is the default model, and the model field remains editable so any OpenRouter model ID can be used.
+将浏览器插件从依赖原作者积分系统和 Qwen 服务，改造成能够直接调用用户自有 OpenAI 兼容 API 的独立插件。默认服务商为 OpenRouter，默认模型为 `qwen/qwen-plus`；模型字段保持可编辑，因此可使用任意有效的 OpenRouter 模型 ID。
 
-## Current-State Findings
+## 现状分析
 
-The existing model path is coupled to the author's service in several places:
+现有模型调用链在多个位置与原作者服务耦合：
 
-- `options.html` and `options.js` require an administrator-assigned user ID and query points and purchase status from `jieyunsang.cn`.
-- `content.js` checks the author's points balance before posting page content and the generated prompt to the author's `/api/generate-copy` endpoint.
-- The author's backend deducts points and calls DashScope with a server-side `DASHSCOPE_API_KEY` and `qwen-plus`.
-- Batch failures call the author's refund endpoint, and the batch UI derives validation information from points differences.
-- The batch page also uploads run statistics to the author's service.
-- `manifest.json` grants access to the author's domains instead of a user-configurable OpenAI-compatible provider.
+- `options.html` 和 `options.js` 要求填写管理员线下分配的用户 ID，并向 `jieyunsang.cn` 查询积分和购买状态。
+- `content.js` 先查询原作者积分余额，再把页面内容和生成提示词提交给原作者的 `/api/generate-copy` 接口。
+- 原作者后端负责扣积分，并使用服务端 `DASHSCOPE_API_KEY` 和 `qwen-plus` 调用 DashScope。
+- 批量任务失败时会调用原作者的退积分接口，批量页面还会通过积分差值辅助校验结果。
+- 批量页面会把运行统计上传到原作者服务。
+- `manifest.json` 授权的是原作者相关域名，而不是用户可配置的 OpenAI 兼容服务商。
 
-Changing only the generation URL would leave the user-ID, points, refund, batch, permission, and credential flows broken. The extension-facing path must be replaced end to end.
+因此，仅替换一个生成接口 URL 会遗留用户 ID、积分、退款、批量任务、浏览器权限和密钥管理等故障。必须整体替换插件侧的完整生成调用链。
 
-## Selected Approach
+## 选定方案
 
-The Manifest V3 background service worker will be the only component allowed to call the model API. Page content scripts send a typed generation message to the service worker. The service worker loads locally stored credentials, constructs an OpenAI-compatible chat-completions request, performs the cross-origin request, validates the response, and returns only the generated text or a safe error.
+Manifest V3 后台 Service Worker 是唯一允许调用模型 API 的组件。页面内容脚本向 Service Worker 发送带类型的生成消息；Service Worker 从插件本地存储读取配置和密钥，构造 OpenAI 兼容的 Chat Completions 请求，完成跨域调用、响应校验和错误转换，最后只向内容脚本返回生成文本或安全的错误信息。
 
-This approach was selected over direct content-script requests because it keeps credentials out of the page-facing execution path and centralizes permissions and error handling. A self-hosted proxy was rejected because it would preserve an unnecessary backend deployment requirement.
+没有采用内容脚本直接请求 API，是因为后台统一调用能让密钥远离页面侧执行路径，并集中管理权限和错误。没有采用自建后端代理，是因为该方案仍要求部署和维护服务器，不符合完全自用、无需后端的目标。
 
-## Components and Responsibilities
+## 组件及职责
 
-### OpenAI-Compatible Client
+### OpenAI 兼容客户端
 
-A focused client module will:
+新增一个职责单一的客户端模块，负责：
 
-- normalize an API base URL and append `/chat/completions` exactly once;
-- build a non-streaming request with `model` and `messages`;
-- support arbitrary OpenRouter model IDs without provider-specific branching;
-- parse `choices[0].message.content` and reject empty or malformed responses;
-- map common HTTP and network failures to stable extension error codes;
-- avoid logging API keys, authorization headers, or complete provider responses.
+- 规范化 API Base URL，确保 `/chat/completions` 只追加一次；
+- 构造包含 `model` 和 `messages` 的非流式请求；
+- 支持任意 OpenRouter 模型 ID，不写 Qwen 专属分支；
+- 解析 `choices[0].message.content`，拒绝空内容或格式错误的响应；
+- 将常见 HTTP 和网络错误转换为稳定的插件错误码；
+- 不记录 API Key、Authorization 请求头或完整服务商响应。
 
-The defaults are:
+默认配置为：
 
-- API base URL: `https://openrouter.ai/api/v1`
-- model: `qwen/qwen-plus`
+- API Base URL：`https://openrouter.ai/api/v1`
+- 模型：`qwen/qwen-plus`
 
-The defaults are conveniences only. Users can replace the model with any valid OpenRouter model slug or replace the base URL with another OpenAI-compatible service.
+这些值只是默认选项。用户可以改成任何有效的 OpenRouter 模型标识，也可以把 Base URL 改成其他 OpenAI 兼容服务。
 
-### Background Service Worker
+### 后台 Service Worker
 
-`background.js` will handle two extension-internal message types:
+`background.js` 处理两类插件内部消息：
 
-- configuration connection test;
-- promotion-copy generation.
+- 测试模型配置连接；
+- 生成推广评论文案。
 
-It will validate the sender, message shape, and input size before calling the client. It will read the API key from local extension storage at request time. The service worker will not expose an externally connectable API.
+后台在调用客户端前校验消息来源、消息结构和输入长度，并在每次请求时从插件本地存储读取 API Key。Service Worker 不提供可供外部网页连接的接口。
 
-### Content Script
+### 内容脚本
 
-`content.js` will keep the existing page extraction, prompt construction, form detection, form filling, cooldown, and batch orchestration behavior. The generation function will stop reading a user ID or points balance and will stop calling `jieyunsang.cn`. It will send the system prompt and page-derived user prompt to the background service worker and record cooldown state only after successful generation.
+`content.js` 保留现有的页面内容提取、提示词构造、评论表单识别、自动填充、冷却记录和批量任务编排。生成函数不再读取用户 ID 或积分余额，也不再请求 `jieyunsang.cn`，而是把系统提示词和由页面生成的用户提示词发送给后台 Service Worker。只有生成成功后才记录冷却时间。
 
-Batch failures will report the model error as a normal failed result. They will not call a points-refund endpoint.
+批量任务中的模型调用失败将作为普通失败结果记录，不再调用积分补偿接口。
 
-### Options Page
+### 设置页
 
-The author account, points balance, purchase status, CSV purchase, and contact-author areas will be removed from the self-use settings experience. A new model configuration section will provide:
+自用版设置页移除原作者账户、积分余额、购买状态、CSV 购买和联系作者区域，新增“自有模型 API”配置区，包含：
 
-- editable API base URL;
-- masked API key field;
-- editable model ID;
-- save action;
-- real connection-test action with visible success or failure status.
+- 可编辑的 API Base URL；
+- 密码形式显示的 API Key 输入框；
+- 可编辑的模型 ID；
+- 保存配置按钮；
+- 真实调用模型的连接测试按钮及清晰的成功或失败状态。
 
-Website profile and automatic form-fill settings remain unchanged.
+推广网站资料和自动填表个人信息继续保留。
 
-### Batch Page
+### 批量处理页
 
-The batch page will remove points balance, expected point cost, user-ID loading, points-difference checks, and author-hosted run-stat uploads. Starting a batch will require a valid saved model configuration rather than an administrator user ID. Existing local CSV parsing, tab sequencing, result collection, and local export behavior remain in scope.
+批量页移除积分余额、预计积分消耗、用户 ID 加载、积分差值校验和原作者运行统计上传。启动批量任务时检查的是本地模型配置是否完整，而不是管理员用户 ID。现有的本地 CSV 解析、标签页顺序处理、结果收集和本地导出继续保留。
 
-## Configuration Storage and Export
+## 配置存储与导入导出
 
-- The API key is stored only in `chrome.storage.local`.
-- The API key is never stored in `chrome.storage.sync`.
-- Base URL and model ID may be stored in synchronized extension settings.
-- Configuration export includes the base URL and model ID but excludes the API key.
-- Configuration import never invents or clears an existing local API key. Imported provider settings require a later save/test action if new host permission is needed.
-- No secret is committed to Git, printed to logs, included in fixtures, or sent through the chat.
+- API Key 只保存在 `chrome.storage.local`。
+- API Key 不写入 `chrome.storage.sync`，不会跟随 Chrome 账号同步。
+- Base URL 和模型 ID 可以保存在插件同步设置中。
+- 配置导出包含 Base URL 和模型 ID，但明确排除 API Key。
+- 配置导入不会伪造或清空现有本地 API Key。若导入了新的服务商地址，需要用户之后点击保存或测试来申请对应域名权限。
+- 密钥不得写入 Git、日志、测试夹具或聊天内容。
 
-## Host Permissions
+## 域名权限
 
-OpenRouter is supported by default. The manifest will include the OpenRouter API origin and remove the author-service origins that are no longer used by active extension code.
+插件默认支持 OpenRouter。`manifest.json` 添加 OpenRouter API 域名权限，并移除活动插件代码已不再使用的原作者服务域名。
 
-To preserve support for other OpenAI-compatible endpoints, the settings page may request the configured HTTP or HTTPS origin as an optional host permission in direct response to the user's save or test action. The requested permission is limited to the configured origin rather than silently granting every host.
+为了继续支持其他 OpenAI 兼容接口，用户在设置页点击保存或测试时，插件可以为当前配置的 HTTP 或 HTTPS 域名申请可选主机权限。权限范围只覆盖配置的目标域名，不静默申请所有网站的网络访问权限。
 
-## Request Flow
+## 请求数据流
 
-1. The content script extracts the current page title, description, URL, and a bounded body-text excerpt.
-2. It combines that page context with the existing promotion-site prompt template.
-3. It sends a typed generation message to the background service worker.
-4. The service worker loads base URL, model ID, and local API key.
-5. The client sends a non-streaming OpenAI-compatible request using Bearer authentication.
-6. The service worker returns generated text or a stable error object.
-7. On success, the content script fills the local page form and records generation cooldown state.
-8. On failure, the UI reports the model error and leaves cooldown state unchanged.
+1. 内容脚本提取当前页面标题、描述、URL 和受长度限制的正文节选。
+2. 内容脚本把页面信息与现有推广网站提示词模板组合起来。
+3. 内容脚本向后台 Service Worker 发送带类型的生成消息。
+4. Service Worker 读取 Base URL、模型 ID 和本地 API Key。
+5. 客户端使用 Bearer 鉴权发送非流式 OpenAI 兼容请求。
+6. Service Worker 返回生成文本或稳定的错误对象。
+7. 成功时，内容脚本填充当前页面的评论表单并记录生成冷却时间。
+8. 失败时，界面显示模型错误，并保持冷却记录不变。
 
-The connection-test flow uses the same configuration, permission, client, and response parser as real generation. It makes a small real model request so successful testing proves the configured provider can generate a valid chat-completions response.
+连接测试与正式生成共用相同的配置、权限、客户端和响应解析逻辑。连接测试会发送一次较小的真实模型请求，以证明当前配置能够获得有效的 Chat Completions 响应。
 
-## Error Handling
+## 错误处理
 
-The user-facing layer distinguishes:
+界面需要区分以下错误：
 
-- missing or incomplete local configuration;
-- host permission denied;
-- invalid API key (`401`);
-- insufficient provider credits (`402`);
-- forbidden or moderated request (`403`);
-- request timeout (`408` or local timeout);
-- rate limiting (`429`);
-- unavailable model/provider (`502` or `503`);
-- malformed JSON, missing completion text, and other protocol errors;
-- general network failure.
+- 本地模型配置缺失或不完整；
+- 用户拒绝目标域名权限；
+- API Key 无效（`401`）；
+- 服务商余额不足（`402`）；
+- 权限不足或内容被拦截（`403`）；
+- 服务端或本地请求超时（`408` 或本地超时）；
+- 请求被限流（`429`）；
+- 模型或上游服务不可用（`502` 或 `503`）；
+- JSON 格式错误、缺少生成文本或其他协议异常；
+- 一般网络故障。
 
-Provider messages may be displayed in bounded, sanitized form when useful, but secrets and raw headers are never included. Billable generation requests are not automatically retried, preventing duplicate costs after ambiguous network failures.
+在确有帮助时，可以显示经过长度限制和清理的服务商错误信息，但不得包含密钥或原始请求头。收费生成请求不自动重试，避免网络结果不确定时产生重复费用。
 
-## Testing Strategy
+## 测试策略
 
-### Automated Tests
+### 自动化测试
 
-Implementation follows red-green-refactor. Deterministic unit tests cover URL normalization, request construction, response parsing, error mapping, configuration sanitization, export secret exclusion, and background message validation. These are logic tests, not a fake claim that a provider is reachable.
+实现遵循红—绿—重构流程。确定性单元测试覆盖 URL 规范化、请求构造、响应解析、错误映射、配置清理、导出时排除密钥以及后台消息校验。这些属于本地逻辑测试，不冒充真实服务商连通性测试。
 
-The existing repository suite is run after dependency installation to establish the baseline and again after changes. JavaScript syntax checks cover all changed extension scripts.
+安装依赖后先运行现有仓库测试以建立基线，修改完成后再次运行完整测试。所有改动过的插件脚本还需通过 JavaScript 语法检查。
 
-### Real Chrome Acceptance Test
+### 真实 Chrome 验收
 
-The unpacked extension from the feature worktree will be loaded into the user's Chrome browser. The user enters the OpenRouter API key directly into the extension settings page; the key is not shared in chat or copied into source files.
+把功能 worktree 中的未打包插件加载到用户的 Chrome。用户直接在插件设置页输入 OpenRouter API Key；密钥不发送到聊天，也不复制到源文件。
 
-Acceptance steps are:
+验收步骤如下：
 
-1. save the default OpenRouter base URL and `qwen/qwen-plus`, then pass the real connection test;
-2. reload the settings page and verify the masked key remains locally available;
-3. use a locally hosted blog fixture to request a real Qwen-Plus comment and verify automatic form filling;
-4. submit once to the local fixture to exercise the extension's automatic-submit path without posting spam to a third-party site;
-5. verify the batch page starts without a user ID or points balance and can process the local fixture;
-6. verify active extension files do not request `jieyunsang.cn` and exported configuration does not contain the API key.
+1. 保存默认 OpenRouter Base URL 和 `qwen/qwen-plus`，通过真实连接测试；
+2. 刷新设置页，确认被遮罩的 Key 仍在本地有效；
+3. 打开本地博客测试页面，真实调用 Qwen-Plus 生成评论并验证自动填充；
+4. 只向本地测试表单提交一次，覆盖自动提交路径，不向第三方博客发布测试垃圾评论；
+5. 验证批量页无需用户 ID 或积分即可启动，并能处理本地测试页面；
+6. 验证活动插件文件不再请求 `jieyunsang.cn`，导出的配置中不包含 API Key；
+7. 把模型改成另一个用户选择的有效 OpenRouter 模型 ID，确认客户端没有 Qwen 专属限制并能完成真实连接测试。
 
-No test comment will be posted to a public third-party blog.
+测试过程中不向任何公开第三方博客发布评论。
 
-## Git Workflow
+## Git 开发流程
 
-- Development occurs in `.worktrees/codex-self-owned-openai-api` on branch `codex/self-owned-openai-api`.
-- The clean baseline is established before production-code changes.
-- The design, tests, client, settings integration, content-script integration, and batch cleanup use reviewable commits.
-- Full automated verification and Chrome acceptance testing are required before merge.
-- Before merging, the primary checkout must be clean and `master` must not contain unreviewed conflicting changes.
-- The feature branch is merged locally into `master` with a non-fast-forward merge.
-- Full verification is repeated on merged `master`.
-- After successful merged verification, the worktree and merged local feature branch are removed.
-- Remote push or pull-request creation is outside this task unless separately requested.
+- 在 `.worktrees/codex-self-owned-openai-api` 的 `codex/self-owned-openai-api` 分支中开发。
+- 修改产品代码前先建立并记录干净的测试基线。
+- 设计文档、测试、模型客户端、设置页接入、内容脚本接入和批量流程清理分别形成便于审查的提交。
+- 合并前必须通过完整自动化测试和 Chrome 真实验收。
+- 合并前确认主工作区干净，并确认 `master` 没有尚未审查的冲突改动。
+- 使用非快进合并把功能分支合并到本地 `master`。
+- 在合并后的 `master` 上再次运行完整验证。
+- 合并验证成功后删除 worktree 和已合并的本地功能分支。
+- 除非用户另行要求，本任务不推送远端，也不创建 Pull Request。
 
-## Scope Boundaries
+## 范围边界
 
-The existing backend and payment source files remain in the repository as historical/server code, but the browser extension no longer loads or calls them. Deleting the entire backend, redesigning CSV acquisition, publishing to the Chrome Web Store, and posting test comments to public sites are outside this change.
+现有后端和支付源文件作为历史代码继续保留在仓库中，但浏览器插件不再加载或调用它们。删除全部后端、重新设计 CSV 获取方式、发布到 Chrome Web Store，以及向公开网站发布测试评论，均不属于本次改造范围。
 
-## Acceptance Criteria
+## 验收标准
 
-- A user can configure an OpenRouter API key, base URL, and arbitrary OpenRouter model ID.
-- The default configuration uses `qwen/qwen-plus` and successfully generates through OpenRouter with a valid funded key.
-- Active extension code has no user-ID, points, purchase, deduction, refund, author-statistics, or other author-service dependency.
-- API calls originate only from the extension background service worker.
-- API keys remain local and are excluded from configuration export and logs.
-- Single-page and batch comment flows work against the local browser fixture.
-- Automated tests and post-merge verification pass.
+- 用户可以配置 OpenRouter API Key、Base URL 和任意 OpenRouter 模型 ID。
+- 默认配置为 `qwen/qwen-plus`，使用有效且有余额的 Key 时能够通过 OpenRouter 成功生成。
+- 活动插件代码不再依赖用户 ID、积分、购买、扣分、退款、作者统计或其他原作者服务。
+- 模型 API 请求只从插件后台 Service Worker 发出。
+- API Key 只保存在本地，并从配置导出和日志中排除。
+- 单页评论和批量评论流程都能在本地浏览器测试页面工作。
+- 自动化测试和合并后的完整验证全部通过。
