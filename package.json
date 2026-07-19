@@ -4,7 +4,8 @@
   "description": "Auto Comment Filler Backend API",
   "main": "server.js",
   "scripts": {
-    "test": "node --test tests/*.test.js",
+    "test": "node --test tests/*.test.js tests/*.test.mjs",
+    "test:fixture": "node scripts/serve-extension-fixture.js",
     "start": "node server.js",
     "dev": "node server.js",
     "csv:export": "node scripts/run-csv-export.js",
