@@ -45,3 +45,25 @@ test('sends bearer auth and maps 402 without exposing the key', async () => {
   assert.equal(captured.init.headers.Authorization, 'Bearer sk-secret');
   assert.equal(JSON.stringify(toPublicLlmError(new Error('sk-secret'))).includes('sk-secret'), false);
 });
+
+test('does not expose a configured key echoed by 401 or 402 providers', async () => {
+  const apiKey = 'sk-current-secret';
+  for (const [status, code] of [[401, 'INVALID_API_KEY'], [402, 'INSUFFICIENT_CREDITS']]) {
+    const fetchImpl = async () => new Response(JSON.stringify({
+      error: { message: `Provider received key: ${apiKey}` }
+    }), { status, headers: { 'Content-Type': 'application/json' } });
+    await assert.rejects(
+      requestChatCompletion({
+        config: { apiBaseUrl: 'https://openrouter.ai/api/v1', model: 'openrouter/auto', apiKey },
+        messages: [{ role: 'user', content: 'test' }],
+        fetchImpl
+      }),
+      (error) => {
+        const publicError = toPublicLlmError(error);
+        assert.equal(publicError.code, code);
+        assert.equal(JSON.stringify(publicError).includes(apiKey), false);
+        return true;
+      }
+    );
+  }
+});
