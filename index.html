@@ -152,7 +152,7 @@
     The remote service returns a plain‑text comment suggestion. The extension does <strong>not</strong> execute arbitrary remote code; it only uses the remote API to generate text.
   </p>
   <p>
-    Your AI API key is stored only in <code>chrome.storage.local</code> and sent only as an authorization header to your configured API provider when you request a generation.
+    Your AI API key is stored only in <code>chrome.storage.local</code> and sent as an authorization header to your configured API provider only when you request a generation or actively test the connection. Only generation requests include the limited current-page summary listed above.
   </p>
   <p>
     Please refer to the AI API provider's own privacy policy to understand how they handle data sent to their service.
@@ -258,7 +258,7 @@
     <p>
       API 返回的仅是纯文本文案。扩展不会执行远程代码，也不会下载远程脚本。
     </p>
-    <p>API Key 仅保存在 <code>chrome.storage.local</code>，只会在你请求生成时作为授权信息发送给所配置的服务商。</p>
+    <p>API Key 仅保存在 <code>chrome.storage.local</code>，只会在你请求生成或主动测试连接时作为授权信息发送给所配置的服务商；只有生成请求会携带上述有限的当前页面摘要。</p>
 
     <h2>五、我们不会做的事情</h2>
     <ul>

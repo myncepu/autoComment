@@ -87,3 +87,16 @@ test('removes the saved key from a rejected connection message', async () => {
     return true;
   });
 });
+
+test('redacts the normalized key when a failed connection echoes a spaced input key', async () => {
+  const fixture = dependencies({
+    response: { success: false, error: { code: 'UPSTREAM_ERROR', message: 'Request rejected: sk-trimmed' } }
+  });
+  const spacedConfig = { ...config, apiKey: ' sk-trimmed ' };
+  await assert.rejects(testOptionsModelConfig(fixture.value, spacedConfig), (error) => {
+    assert.equal(error.code, 'UPSTREAM_ERROR');
+    assert.equal(error.message.includes('sk-trimmed'), false);
+    return true;
+  });
+  assert.equal(fixture.local.llm_api_key, 'sk-trimmed');
+});
