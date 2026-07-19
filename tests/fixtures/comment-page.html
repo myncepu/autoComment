@@ -20,11 +20,7 @@
     </form>
     <output id="submit-result"></output>
   </main>
-  <script>
-    document.getElementById('commentform').addEventListener('submit', (event) => {
-      event.preventDefault();
-      document.getElementById('submit-result').textContent = 'LOCAL_SUBMIT_OK';
-    });
-  </script>
+  <!-- LOCAL_SUBMIT_HANDLER -->
+  <script>LocalFixtureSubmit.installLocalSubmitHandler(document);</script>
 </body>
 </html>

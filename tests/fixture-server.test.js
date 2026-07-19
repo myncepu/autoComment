@@ -1,7 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const vm = require('node:vm');
 
 const { createFixtureServer } = require('../scripts/serve-extension-fixture.js');
+const { installLocalSubmitHandler } = require('./fixtures/comment-page-submit.js');
 
 async function withFixtureServer(t, callback) {
   const server = createFixtureServer();
@@ -39,12 +41,66 @@ test('serves the same fixture from the root path and rejects unknown paths', asy
   });
 });
 
-test('fixture submission stays in the page and contains no external target', async (t) => {
+test('local submit handler prevents navigation and writes only the success state', () => {
+  let submitHandler;
+  const result = { textContent: '' };
+  const form = {
+    addEventListener(type, handler) {
+      assert.equal(type, 'submit');
+      submitHandler = handler;
+    }
+  };
+  const document = {
+    getElementById(id) {
+      return { commentform: form, 'submit-result': result }[id];
+    }
+  };
+  let prevented = false;
+
+  installLocalSubmitHandler(document);
+  submitHandler({ preventDefault() { prevented = true; } });
+
+  assert.equal(prevented, true);
+  assert.equal(result.textContent, 'LOCAL_SUBMIT_OK');
+});
+
+test('fixture scripts register and execute a local-only form submission', async (t) => {
   await withFixtureServer(t, async (origin) => {
     const html = await (await fetch(`${origin}/comment-page.html`)).text();
+    const handlers = new Map();
+    const result = { textContent: '' };
+    const form = {
+      addEventListener(type, handler) {
+        handlers.set(type, handler);
+      },
+      dispatchEvent(event) {
+        handlers.get(event.type)(event);
+      }
+    };
+    const document = {
+      getElementById(id) {
+        return { commentform: form, 'submit-result': result }[id];
+      }
+    };
+    let networkCalls = 0;
+    const context = vm.createContext({
+      document,
+      fetch() {
+        networkCalls += 1;
+        throw new Error('network access is forbidden');
+      }
+    });
 
-    assert.match(html, /event\.preventDefault\(\)/);
-    assert.match(html, /submit-result[\s\S]*LOCAL_SUBMIT_OK/);
+    for (const [, script] of html.matchAll(/<script>([\s\S]*?)<\/script>/g)) {
+      vm.runInContext(script, context);
+    }
+
+    let prevented = false;
+    form.dispatchEvent({ type: 'submit', preventDefault() { prevented = true; } });
+
+    assert.equal(prevented, true);
+    assert.equal(result.textContent, 'LOCAL_SUBMIT_OK');
+    assert.equal(networkCalls, 0);
     assert.doesNotMatch(html, /<form[^>]+\saction=/i);
     assert.doesNotMatch(html, /https?:\/\//i);
   });

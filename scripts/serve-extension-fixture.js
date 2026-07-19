@@ -3,6 +3,10 @@ const http = require('node:http');
 const path = require('node:path');
 
 const fixturePath = path.join(__dirname, '..', 'tests', 'fixtures', 'comment-page.html');
+const submitHandlerPath = path.join(__dirname, '..', 'tests', 'fixtures', 'comment-page-submit.js');
+const fixtureHtml = fs.readFileSync(fixturePath, 'utf8');
+const submitHandler = fs.readFileSync(submitHandlerPath, 'utf8');
+const renderedFixtureHtml = fixtureHtml.replace('<!-- LOCAL_SUBMIT_HANDLER -->', `<script>${submitHandler}</script>`);
 
 function createFixtureServer() {
   return http.createServer((request, response) => {
@@ -12,7 +16,7 @@ function createFixtureServer() {
     }
 
     response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    fs.createReadStream(fixturePath).pipe(response);
+    response.end(renderedFixtureHtml);
   });
 }
 
