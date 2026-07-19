@@ -2449,6 +2449,9 @@
       return { success: false, error: '提交按钮不可见或被禁用' };
     }
 
+    // 必须在触发点击前安装监听。部分站点会同步派发 submit，点击后再监听会漏报成功。
+    const submitDetection = waitForSubmitOrNavigate(10000);
+
     function tryRequestSubmit(formEl, submitter) {
       if (!formEl) return false;
       if (typeof formEl.requestSubmit === 'function') {
@@ -2525,7 +2528,7 @@
         recordFormSubmit();
 
         console.log('[AutoComment] 提交按钮点击成功 (pointer/mousedown→mouseup→click)');
-        const submitResult = await waitForSubmitOrNavigate(10000);
+        const submitResult = await submitDetection;
         console.log('[AutoComment] waitForSubmitOrNavigate 结果:', submitResult);
         return { success: true, button: button, submitResult: submitResult };
       } catch (e) {
@@ -2534,7 +2537,7 @@
           button.click();
           recordFormSubmit();
           console.log('[AutoComment] button.click() 点击成功');
-          const submitResult = await waitForSubmitOrNavigate(10000);
+          const submitResult = await submitDetection;
           console.log('[AutoComment] waitForSubmitOrNavigate 结果:', submitResult);
           return { success: true, button: button, submitResult: submitResult };
         } catch (e2) {
@@ -2544,7 +2547,7 @@
           if (tryRequestSubmit(formEl, button)) {
             recordFormSubmit();
             console.log('[AutoComment] form.requestSubmit(submitter) 成功');
-            const submitResult = await waitForSubmitOrNavigate(10000);
+            const submitResult = await submitDetection;
             console.log('[AutoComment] waitForSubmitOrNavigate 结果:', submitResult);
             return { success: true, button: button, submitResult: submitResult };
           }
@@ -2553,7 +2556,7 @@
               console.log('[AutoComment] 降级 form.submit()（无 submit 事件）');
               formEl.submit();
               recordFormSubmit();
-              const submitResult = await waitForSubmitOrNavigate(10000);
+              const submitResult = await submitDetection;
               console.log('[AutoComment] waitForSubmitOrNavigate 结果:', submitResult);
               return { success: true, button: button, submitResult: submitResult };
             }
@@ -2576,7 +2579,7 @@
         button.dispatchEvent(event);
         recordFormSubmit();
         console.log('[AutoComment] 使用 dispatchEvent 点击成功');
-        const submitResult = await waitForSubmitOrNavigate(10000);
+        const submitResult = await submitDetection;
         console.log('[AutoComment] waitForSubmitOrNavigate 结果:', submitResult);
         return { success: true, button: button, submitResult: submitResult };
       } catch (e2) {
@@ -2586,7 +2589,7 @@
         if (tryRequestSubmit(formEl, button)) {
           recordFormSubmit();
           console.log('[AutoComment] form.requestSubmit(submitter) 成功');
-          const submitResult = await waitForSubmitOrNavigate(10000);
+          const submitResult = await submitDetection;
           console.log('[AutoComment] waitForSubmitOrNavigate 结果:', submitResult);
           return { success: true, button: button, submitResult: submitResult };
         }
@@ -2595,7 +2598,7 @@
             console.log('[AutoComment] 尝试 form.submit()');
             formEl.submit();
             recordFormSubmit();
-            const submitResult = await waitForSubmitOrNavigate(10000);
+            const submitResult = await submitDetection;
             console.log('[AutoComment] waitForSubmitOrNavigate 结果:', submitResult);
             return { success: true, button: button, submitResult: submitResult };
           }
