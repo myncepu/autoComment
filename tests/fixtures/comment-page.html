@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="description" content="A local browser-extension test article about practical website accessibility." />
+  <title>Local Accessibility Article</title>
+</head>
+<body>
+  <main>
+    <article>
+      <h1>Practical accessibility checks</h1>
+      <p>Use clear labels, keyboard navigation, readable contrast, and useful alternative text.</p>
+    </article>
+    <form id="commentform">
+      <label>Name <input id="author" name="author" /></label>
+      <label>Email <input id="email" name="email" type="email" /></label>
+      <label>Website <input id="url" name="url" type="url" /></label>
+      <label>Comment <textarea id="comment" name="comment"></textarea></label>
+      <button id="submit" type="submit">Post Comment</button>
+    </form>
+    <output id="submit-result"></output>
+  </main>
+  <script>
+    document.getElementById('commentform').addEventListener('submit', (event) => {
+      event.preventDefault();
+      document.getElementById('submit-result').textContent = 'LOCAL_SUBMIT_OK';
+    });
+  </script>
+</body>
+</html>
