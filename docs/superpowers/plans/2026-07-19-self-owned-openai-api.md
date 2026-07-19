@@ -24,7 +24,9 @@
 - `lib/llm-config.mjs`：模型配置键、默认值、规范化、校验、分层存储、导出清理和主机权限模式。
 - `lib/openai-client.mjs`：Chat Completions URL、请求体、网络调用、响应解析和错误映射。
 - `lib/llm-service.mjs`：后台消息类型、消息校验、连接测试和正式生成编排。
+- `lib/llm-options-controller.mjs`：设置页保存、域名授权和真实连接测试的可测试控制器。
 - `lib/llm-content-bridge.js`：经典内容脚本可用的 Runtime 消息桥，并提供 CommonJS 导出供 Node 测试。
+- `lib/batch-readiness.mjs`：批量任务启动前的模型配置和 URL 校验。
 - `background.js`：接入模型服务消息监听，保留原有批量结果持久化监听。
 - `options.html` / `options.js`：自有 API 配置、真实测试连接、密钥隔离及安全导入导出。
 - `content.js`：移除积分调用，通过内容脚本桥请求后台模型服务。
@@ -33,7 +35,9 @@
 - `tests/llm-config.test.mjs`：配置和权限逻辑单元测试。
 - `tests/openai-client.test.mjs`：OpenAI 兼容协议和错误单元测试。
 - `tests/llm-service.test.mjs`：后台服务消息与存储隔离测试。
+- `tests/llm-options-controller.test.mjs`：设置页权限、保存和连接测试控制器测试。
 - `tests/llm-content-bridge.test.js`：内容脚本桥成功/失败行为测试。
+- `tests/batch-readiness.test.mjs`：批量启动门禁测试。
 - `tests/fixtures/comment-page.html`：本地评论表单和提交结果页内夹具。
 - `scripts/serve-extension-fixture.js`：使用 Node 内置 HTTP 服务提供本地浏览器夹具。
 
@@ -426,7 +430,7 @@ git commit -m "feat: add OpenAI-compatible model client"
 // tests/llm-service.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { handleLlmMessage, LLM_MESSAGE_TYPES } from '../lib/llm-service.mjs';
+import { handleLlmMessage, isAllowedLlmSender, LLM_MESSAGE_TYPES } from '../lib/llm-service.mjs';
 
 function storageFixture() {
   return {
@@ -461,6 +465,12 @@ test('generation rejects oversized page messages before network access', async (
   assert.equal(called, false);
   assert.equal(result.error.code, 'INVALID_REQUEST');
 });
+
+test('accepts only messages sent by this extension', () => {
+  assert.equal(isAllowedLlmSender({ id: 'extension-id' }, 'extension-id'), true);
+  assert.equal(isAllowedLlmSender({ id: 'other-extension' }, 'extension-id'), false);
+  assert.equal(isAllowedLlmSender({}, 'extension-id'), false);
+});
 ```
 
 - [ ] **Step 2：运行测试并确认缺少服务模块**
@@ -480,6 +490,10 @@ export const LLM_MESSAGE_TYPES = Object.freeze({
   test: 'LLM_TEST_CONNECTION',
   generate: 'LLM_GENERATE_COPY'
 });
+
+export function isAllowedLlmSender(sender, extensionId) {
+  return Boolean(sender && sender.id && sender.id === extensionId);
+}
 
 export async function handleLlmMessage(message, { storage, fetchImpl = fetch }) {
   try {
@@ -525,13 +539,13 @@ export async function handleLlmMessage(message, { storage, fetchImpl = fetch }) 
 - [ ] **Step 4：在 background.js 顶部导入服务并增加来源校验监听**
 
 ```js
-import { handleLlmMessage, LLM_MESSAGE_TYPES } from './lib/llm-service.mjs';
+import { handleLlmMessage, isAllowedLlmSender, LLM_MESSAGE_TYPES } from './lib/llm-service.mjs';
 
 const LLM_MESSAGE_TYPE_SET = new Set(Object.values(LLM_MESSAGE_TYPES));
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!LLM_MESSAGE_TYPE_SET.has(message?.type)) return false;
-  if (sender.id !== chrome.runtime.id) {
+  if (!isAllowedLlmSender(sender, chrome.runtime.id)) {
     sendResponse({ success: false, error: { code: 'FORBIDDEN_SENDER', message: '拒绝外部模型请求。' } });
     return false;
   }
@@ -560,6 +574,8 @@ git commit -m "feat: route model requests through extension background"
 ### Task 4：设置页模型配置、真实连接测试和安全导出
 
 **Files:**
+- Create: `lib/llm-options-controller.mjs`
+- Create: `tests/llm-options-controller.test.mjs`
 - Modify: `options.html:170-212,320-328,349`
 - Modify: `options.js:1-613`
 - Modify: `manifest.json:6-29`
@@ -567,7 +583,7 @@ git commit -m "feat: route model requests through extension background"
 
 **Interfaces:**
 - Consumes: `loadLlmConfig`、`saveLlmConfig`、`getHostPermissionPattern`、`LLM_SYNC_KEYS` 和 `LLM_TEST_CONNECTION`。
-- Produces: 保存 Base URL/模型/本地 Key、按目标 Origin 申请权限、真实测试连接、导出不含 Key。
+- Produces: `saveOptionsModelConfig(dependencies, values)` 和 `testOptionsModelConfig(dependencies, values)`；保存 Base URL/模型/本地 Key、按目标 Origin 申请权限、真实测试连接、导出不含 Key。
 
 - [ ] **Step 1：扩展配置测试，先证明导出键只包含 Base URL 和模型**
 
@@ -584,13 +600,106 @@ test('export payload never exposes local key storage name', () => {
 });
 ```
 
+同时创建设置控制器的失败测试：
+
+```js
+// tests/llm-options-controller.test.mjs
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { saveOptionsModelConfig, testOptionsModelConfig } from '../lib/llm-options-controller.mjs';
+
+function dependencies({ granted = true, response = { success: true, text: 'OK' } } = {}) {
+  const sync = {};
+  const local = {};
+  return {
+    sync,
+    local,
+    value: {
+      storage: {
+        sync: { async get() { return sync; }, async set(values) { Object.assign(sync, values); } },
+        local: { async get() { return local; }, async set(values) { Object.assign(local, values); } }
+      },
+      permissions: {
+        async contains() { return false; },
+        async request(request) {
+          assert.deepEqual(request, { origins: ['https://openrouter.ai/*'] });
+          return granted;
+        }
+      },
+      runtime: { async sendMessage(message) {
+        assert.deepEqual(message, { type: 'LLM_TEST_CONNECTION' });
+        return response;
+      } }
+    }
+  };
+}
+
+const config = { apiBaseUrl: 'https://openrouter.ai/api/v1', model: 'qwen/qwen-plus', apiKey: 'sk-test' };
+
+test('requests only the configured origin then saves split storage', async () => {
+  const fixture = dependencies();
+  await saveOptionsModelConfig(fixture.value, config);
+  assert.equal(fixture.sync.llm_model, 'qwen/qwen-plus');
+  assert.equal(fixture.local.llm_api_key, 'sk-test');
+});
+
+test('does not save when the user denies host permission', async () => {
+  const fixture = dependencies({ granted: false });
+  await assert.rejects(saveOptionsModelConfig(fixture.value, config), { code: 'PERMISSION_DENIED' });
+  assert.deepEqual(fixture.sync, {});
+  assert.deepEqual(fixture.local, {});
+});
+
+test('saves then runs the real connection message contract', async () => {
+  const fixture = dependencies();
+  assert.equal(await testOptionsModelConfig(fixture.value, config), 'OK');
+});
+```
+
 - [ ] **Step 2：运行新增测试并确认当前导出集成尚不存在**
 
-Run: `node --test tests/llm-config.test.mjs`
+Run: `node --test tests/llm-config.test.mjs tests/llm-options-controller.test.mjs`
 
-Expected: 单元断言 PASS；随后 `rg -n "llm_api_base_url|llm_model" options.js options.html` 无匹配，证明 UI 集成仍缺失。
+Expected: 配置测试 PASS；控制器测试因 `lib/llm-options-controller.mjs` 不存在而 FAIL；`rg -n "llm_api_base_url|llm_model" options.js options.html` 无匹配。
 
-- [ ] **Step 3：用模型配置卡替换用户 ID、积分和购买卡，并删除联系作者卡**
+- [ ] **Step 3：实现设置页控制器并让失败测试转绿**
+
+```js
+// lib/llm-options-controller.mjs
+import { getHostPermissionPattern, saveLlmConfig } from './llm-config.mjs';
+
+async function ensurePermission(permissions, apiBaseUrl) {
+  const origins = [getHostPermissionPattern(apiBaseUrl)];
+  if (await permissions.contains({ origins })) return;
+  if (!await permissions.request({ origins })) {
+    const error = new Error('未授予模型 API 域名访问权限。');
+    error.code = 'PERMISSION_DENIED';
+    throw error;
+  }
+}
+
+export async function saveOptionsModelConfig({ storage, permissions }, values) {
+  await ensurePermission(permissions, values.apiBaseUrl);
+  return saveLlmConfig(storage, values);
+}
+
+export async function testOptionsModelConfig(dependencies, values) {
+  await saveOptionsModelConfig(dependencies, values);
+  const response = await dependencies.runtime.sendMessage({ type: 'LLM_TEST_CONNECTION' });
+  if (!response?.success) {
+    const error = new Error(response?.error?.message || '连接测试失败。');
+    error.code = response?.error?.code || 'UNKNOWN_ERROR';
+    throw error;
+  }
+  return String(response.text || '').trim();
+}
+```
+
+Run: `node --test tests/llm-config.test.mjs tests/llm-options-controller.test.mjs`
+
+Expected: 全部测试 PASS，0 failures。
+
+- [ ] **Step 4：用模型配置卡替换用户 ID、积分和购买卡，并删除联系作者卡**
 
 ```html
 <div style="margin-bottom:20px;padding:14px 16px;background:#eff6ff;border-radius:10px;border:1px solid #bfdbfe;">
@@ -616,43 +725,29 @@ Expected: 单元断言 PASS；随后 `rg -n "llm_api_base_url|llm_model" options
 <script type="module" src="options.js"></script>
 ```
 
-- [ ] **Step 4：在 options.js 导入配置模块并实现权限、保存与真实测试**
+- [ ] **Step 5：在 options.js 导入控制器并绑定保存与真实测试**
 
 ```js
 import {
   DEFAULT_LLM_CONFIG,
   LLM_SYNC_KEYS,
-  getHostPermissionPattern,
-  loadLlmConfig,
-  saveLlmConfig
+  loadLlmConfig
 } from './lib/llm-config.mjs';
-import { LLM_MESSAGE_TYPES } from './lib/llm-service.mjs';
+import { saveOptionsModelConfig, testOptionsModelConfig } from './lib/llm-options-controller.mjs';
 
-async function ensureModelHostPermission(baseUrl) {
-  const origins = [getHostPermissionPattern(baseUrl)];
-  if (await chrome.permissions.contains({ origins })) return true;
-  return chrome.permissions.request({ origins });
-}
-
-function readModelForm() {
-  return {
-    apiBaseUrl: llmApiBaseUrlInput.value,
-    apiKey: llmApiKeyInput.value,
-    model: llmModelInput.value
-  };
-}
-
-async function persistModelForm() {
-  const values = readModelForm();
-  if (!await ensureModelHostPermission(values.apiBaseUrl)) {
-    throw new Error('未授予模型 API 域名访问权限。');
-  }
-  return saveLlmConfig(chrome.storage, values);
-}
+const modelDependencies = {
+  storage: chrome.storage,
+  permissions: chrome.permissions,
+  runtime: chrome.runtime
+};
 
 saveLlmConfigBtn.addEventListener('click', async () => {
   try {
-    await persistModelForm();
+    await saveOptionsModelConfig(modelDependencies, {
+      apiBaseUrl: llmApiBaseUrlInput.value,
+      apiKey: llmApiKeyInput.value,
+      model: llmModelInput.value
+    });
     showStatus(llmStatusEl, '模型配置已保存');
   } catch (error) {
     showStatus(llmStatusEl, error.message || '模型配置保存失败', 3000);
@@ -663,10 +758,12 @@ testLlmConnectionBtn.addEventListener('click', async () => {
   testLlmConnectionBtn.disabled = true;
   showStatus(llmStatusEl, '正在真实调用模型…', 60000);
   try {
-    await persistModelForm();
-    const response = await chrome.runtime.sendMessage({ type: LLM_MESSAGE_TYPES.test });
-    if (!response?.success) throw new Error(response?.error?.message || '连接测试失败');
-    showStatus(llmStatusEl, `连接成功：${response.text}`, 5000);
+    const text = await testOptionsModelConfig(modelDependencies, {
+      apiBaseUrl: llmApiBaseUrlInput.value,
+      apiKey: llmApiKeyInput.value,
+      model: llmModelInput.value
+    });
+    showStatus(llmStatusEl, `连接成功：${text}`, 5000);
   } catch (error) {
     showStatus(llmStatusEl, error.message || '连接测试失败', 5000);
   } finally {
@@ -684,7 +781,7 @@ llmApiKeyInput.value = modelConfig.apiKey;
 
 把 `CONFIG_VERSION` 从 `2` 升到 `3`。`mergeCurrentFormValues` 可以合并当前 Base URL 和模型输入值，但不得读取或合并 API Key。
 
-- [ ] **Step 5：更新 manifest 权限和模块加载**
+- [ ] **Step 6：更新 manifest 权限和模块加载**
 
 ```json
 {
@@ -701,7 +798,7 @@ llmApiKeyInput.value = modelConfig.apiKey;
 
 保留现有 `background`、`action`、`options_page` 和内容脚本字段；内容桥在 Task 5 文件创建后再加入加载顺序。删除 DashScope、Vercel 和 `jieyunsang.cn` 主机权限。
 
-- [ ] **Step 6：同步更新隐私说明**
+- [ ] **Step 7：同步更新隐私说明**
 
 在 `index.html` 的中英文隐私说明中删除用户 ID、积分和内置作者模型服务描述，并明确说明：
 
@@ -721,16 +818,16 @@ llmApiKeyInput.value = modelConfig.apiKey;
 </ul>
 ```
 
-- [ ] **Step 7：运行单元测试、HTML 引用检查和语法检查**
+- [ ] **Step 8：运行单元测试、HTML 引用检查和语法检查**
 
-Run: `node --test tests/llm-config.test.mjs && node --input-type=module --check < options.js && node -e "JSON.parse(require('node:fs').readFileSync('manifest.json','utf8'))" && ! rg -n "userId|积分|购买 CSV|jieyunsang|openPaymentBtn" options.html options.js index.html`
+Run: `node --test tests/llm-config.test.mjs tests/llm-options-controller.test.mjs && node --input-type=module --check < options.js && node -e "JSON.parse(require('node:fs').readFileSync('manifest.json','utf8'))" && ! rg -n "userId|积分|购买 CSV|jieyunsang|openPaymentBtn" options.html options.js index.html`
 
 Expected: 全部命令退出 0；敏感/旧服务检索无匹配。
 
-- [ ] **Step 8：提交设置页改造**
+- [ ] **Step 9：提交设置页改造**
 
 ```bash
-git add manifest.json options.html options.js index.html tests/llm-config.test.mjs
+git add lib/llm-options-controller.mjs tests/llm-options-controller.test.mjs manifest.json options.html options.js index.html tests/llm-config.test.mjs
 git commit -m "feat: add self-owned model settings"
 ```
 
@@ -753,7 +850,7 @@ git commit -m "feat: add self-owned model settings"
 // tests/llm-content-bridge.test.js
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { generate } = require('../lib/llm-content-bridge.js');
+const { buildPageUserPrompt, generate } = require('../lib/llm-content-bridge.js');
 
 test('returns generated text from the background service', async () => {
   const runtime = { async sendMessage(message) {
@@ -774,6 +871,18 @@ test('rejects empty successful text', async () => {
   const runtime = { async sendMessage() { return { success: true, text: '' }; } };
   await assert.rejects(generate(runtime, { systemPrompt: 'system', userPrompt: 'page' }), { code: 'INVALID_RESPONSE' });
 });
+
+test('builds a bounded page prompt without provider-specific fields', () => {
+  const prompt = buildPageUserPrompt({
+    websiteUrl: 'https://example.test/post',
+    title: 'Article',
+    description: 'Description',
+    bodyText: 'x'.repeat(5000)
+  });
+  assert.match(prompt, /Article/);
+  assert.match(prompt, /https:\/\/example\.test\/post/);
+  assert.equal(prompt.includes('x'.repeat(4001)), false);
+});
 ```
 
 - [ ] **Step 2：运行测试并确认缺少桥接模块**
@@ -791,6 +900,18 @@ Expected: FAIL，`MODULE_NOT_FOUND`。
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.AutoCommentLlmBridge = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function createBridge() {
+  function buildPageUserPrompt({ websiteUrl, title, description, bodyText }) {
+    const excerpt = String(bodyText || '').replace(/\s+/g, ' ').trim().slice(0, 4000);
+    return [
+      '下面是当前网站的内容，请根据系统提示词生成一份推广评论：',
+      `【网站标题】${title || '(无标题)'}`,
+      `【网站 URL】${websiteUrl || '(无URL)'}`,
+      description ? `【网站描述】${description}` : '',
+      '【页面正文节选】',
+      excerpt || '(当前页面正文内容为空或无法提取)'
+    ].filter(Boolean).join('\n');
+  }
+
   async function generate(runtime, payload) {
     const response = await runtime.sendMessage({ type: 'LLM_GENERATE_COPY', payload });
     if (!response?.success) {
@@ -806,7 +927,7 @@ Expected: FAIL，`MODULE_NOT_FOUND`。
     }
     return text;
   }
-  return { generate };
+  return { buildPageUserPrompt, generate };
 });
 ```
 
@@ -827,16 +948,13 @@ async function generatePromotionCopyWithLlm() {
   const title = document.title || '';
   const descriptionMeta = document.querySelector('meta[name="description"], meta[name="Description"]');
   const description = descriptionMeta ? descriptionMeta.content || '' : '';
-  let bodyText = document.body ? document.body.innerText || '' : '';
-  bodyText = bodyText.replace(/\s+/g, ' ').trim().slice(0, 4000);
-  const userPrompt = [
-    '下面是当前网站的内容，请根据系统提示词生成一份推广评论：',
-    `【网站标题】${title || '(无标题)'}`,
-    `【网站 URL】${websiteUrl || '(无URL)'}`,
-    description ? `【网站描述】${description}` : '',
-    '【页面正文节选】',
-    bodyText || '(当前页面正文内容为空或无法提取)'
-  ].filter(Boolean).join('\n');
+  const bodyText = document.body ? document.body.innerText || '' : '';
+  const userPrompt = globalThis.AutoCommentLlmBridge.buildPageUserPrompt({
+    websiteUrl,
+    title,
+    description,
+    bodyText
+  });
   return globalThis.AutoCommentLlmBridge.generate(chrome.runtime, { systemPrompt, userPrompt });
 }
 ```
@@ -847,7 +965,7 @@ async function generatePromotionCopyWithLlm() {
 
 Run: `node --test tests/llm-content-bridge.test.js && node --check lib/llm-content-bridge.js && node --check content.js && ! rg -n "jieyunsang|POINTS_API_BASE|getPointsBalance|refund-points|auto_comment_user_id" content.js lib/llm-content-bridge.js`
 
-Expected: 3 tests PASS；语法检查通过；旧服务扫描无匹配。
+Expected: 4 tests PASS；语法检查通过；旧服务扫描无匹配。
 
 - [ ] **Step 6：提交内容脚本迁移**
 
@@ -861,38 +979,70 @@ git commit -m "feat: generate comments with the configured model"
 ### Task 6：批量流程本地化和作者服务清理
 
 **Files:**
+- Create: `lib/batch-readiness.mjs`
+- Create: `tests/batch-readiness.test.mjs`
 - Modify: `batch.html:618-631,729-740,873-875`
 - Modify: `batch.js:1-17,76-78,141-179,474-513,842,889-951,1035-1065`
 
 **Interfaces:**
-- Consumes: `loadLlmConfig(chrome.storage)` 与 `validateLlmConfig(config)`。
-- Produces: 无用户 ID、积分或作者统计依赖的本地批量启动与结果统计。
+- Consumes: `loadLlmConfig(chrome.storage)` 与 `getBatchStartError(config, urlCount)`。
+- Produces: 可测试的批量启动门禁，以及无用户 ID、积分或作者统计依赖的本地批量处理。
 
 - [ ] **Step 1：增加批量启动所用配置校验回归测试**
 
 ```js
-// 追加到 tests/llm-config.test.mjs
+// tests/batch-readiness.test.mjs
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { getBatchStartError } from '../lib/batch-readiness.mjs';
+
 test('batch readiness accepts any complete OpenRouter model', () => {
-  const result = validateLlmConfig({
+  const config = {
     apiBaseUrl: 'https://openrouter.ai/api/v1',
     model: 'openrouter/auto',
     apiKey: 'sk-test'
-  });
-  assert.equal(result.valid, true);
-  assert.equal(result.config.model, 'openrouter/auto');
+  };
+  assert.equal(getBatchStartError(config, 1), '');
+});
+
+test('batch readiness explains missing model config before URL errors', () => {
+  assert.equal(getBatchStartError({ apiKey: '' }, 0), '请先在设置页面中保存完整的模型 API 配置');
+});
+
+test('batch readiness rejects an empty URL list', () => {
+  const config = { apiBaseUrl: 'https://openrouter.ai/api/v1', model: 'qwen/qwen-plus', apiKey: 'sk-test' };
+  assert.equal(getBatchStartError(config, 0), '请先上传有效的 CSV 文件');
 });
 ```
 
 - [ ] **Step 2：运行回归测试，再用扫描证明批量页仍依赖旧服务**
 
-Run: `node --test tests/llm-config.test.mjs && rg -n "jieyunsang|userId|积分|BLOG_RUN_STATS" batch.js batch.html`
+Run: `node --test tests/batch-readiness.test.mjs`
 
-Expected: 单元测试 PASS；扫描返回旧依赖位置，因此该清理任务处于 RED。
+Expected: FAIL，`ERR_MODULE_NOT_FOUND` 指向 `lib/batch-readiness.mjs`。
 
-- [ ] **Step 3：把 batch.js 转成模块并按本地模型配置启动**
+- [ ] **Step 3：实现最小批量启动门禁并转绿**
 
 ```js
-import { loadLlmConfig, validateLlmConfig } from './lib/llm-config.mjs';
+// lib/batch-readiness.mjs
+import { validateLlmConfig } from './llm-config.mjs';
+
+export function getBatchStartError(config, urlCount) {
+  if (!validateLlmConfig(config).valid) return '请先在设置页面中保存完整的模型 API 配置';
+  if (!Number.isInteger(urlCount) || urlCount <= 0) return '请先上传有效的 CSV 文件';
+  return '';
+}
+```
+
+Run: `node --test tests/batch-readiness.test.mjs && rg -n "jieyunsang|userId|积分|BLOG_RUN_STATS" batch.js batch.html`
+
+Expected: 3 tests PASS；扫描仍返回旧依赖位置，证明批量集成清理尚未完成。
+
+- [ ] **Step 4：把 batch.js 转成模块并按本地模型配置启动**
+
+```js
+import { loadLlmConfig } from './lib/llm-config.mjs';
+import { getBatchStartError } from './lib/batch-readiness.mjs';
 
 async function init() {
   await loadTimeoutSetting();
@@ -903,12 +1053,9 @@ async function init() {
 
 async function startBatch() {
   const modelConfig = await loadLlmConfig(chrome.storage);
-  if (!validateLlmConfig(modelConfig).valid) {
-    alert('请先在设置页面中保存完整的模型 API 配置');
-    return;
-  }
-  if (parsedUrls.length === 0) {
-    alert('请先上传有效的 CSV 文件');
+  const startError = getBatchStartError(modelConfig, parsedUrls.length);
+  if (startError) {
+    alert(startError);
     return;
   }
   // 保留现有清理上下文、保存设置、创建 batchId 和打开标签页逻辑。
@@ -917,7 +1064,7 @@ async function startBatch() {
 
 删除 `API_BASE`、`BLOG_RUN_STATS_ENDPOINT`、`userId`、`initialPoints`、积分 DOM 引用、`loadUserId`、`loadPoints`、`updateCostHint`、积分差值校验、`reportBlogRunStatsIfNeeded` 调用及其 payload/normalize 辅助函数。`resetFile` 不再调用 `updateCostHint`，`onAllCompleted` 关闭标签页后直接更新统计 UI。
 
-- [ ] **Step 4：把 batch.html 的积分卡改成纯本地状态卡并使用模块脚本**
+- [ ] **Step 5：把 batch.html 的积分卡改成纯本地状态卡并使用模块脚本**
 
 ```html
 <div class="card">
@@ -935,16 +1082,16 @@ async function startBatch() {
 <script type="module" src="batch.js"></script>
 ```
 
-- [ ] **Step 5：运行全部本地测试、语法检查和活动文件服务扫描**
+- [ ] **Step 6：运行全部本地测试、语法检查和活动文件服务扫描**
 
-Run: `npm test && node --test tests/llm-config.test.mjs tests/openai-client.test.mjs tests/llm-service.test.mjs tests/llm-content-bridge.test.js && node --input-type=module --check < batch.js && ! rg -n "jieyunsang|dashscope|auto_comment_user_id|refund-points|BLOG_RUN_STATS_ENDPOINT" manifest.json background.js content.js options.js options.html batch.js batch.html`
+Run: `npm test && node --test tests/batch-readiness.test.mjs tests/llm-config.test.mjs tests/openai-client.test.mjs tests/llm-service.test.mjs tests/llm-content-bridge.test.js && node --input-type=module --check < batch.js && ! rg -n "jieyunsang|dashscope|auto_comment_user_id|refund-points|BLOG_RUN_STATS_ENDPOINT" manifest.json background.js content.js options.js options.html batch.js batch.html`
 
 Expected: 所有测试 PASS；语法检查通过；活动插件文件旧服务扫描无匹配。
 
-- [ ] **Step 6：提交批量流程清理**
+- [ ] **Step 7：提交批量流程清理**
 
 ```bash
-git add batch.html batch.js tests/llm-config.test.mjs
+git add lib/batch-readiness.mjs tests/batch-readiness.test.mjs batch.html batch.js
 git commit -m "refactor: remove author services from batch flow"
 ```
 
