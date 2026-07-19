@@ -65,3 +65,13 @@ test('stores key locally and exports only non-secret settings', async () => {
   assert.deepEqual(await loadLlmConfig(fixture.storage), config);
   assert.equal(JSON.stringify(toExportableLlmSettings(config)).includes(config.apiKey), false);
 });
+
+test('export payload never exposes local key storage name', () => {
+  const exported = toExportableLlmSettings({
+    apiBaseUrl: 'https://openrouter.ai/api/v1',
+    model: 'anthropic/claude-sonnet-4',
+    apiKey: 'sk-private'
+  });
+  assert.deepEqual(Object.keys(exported).sort(), Object.values(LLM_SYNC_KEYS).sort());
+  assert.equal(JSON.stringify(exported).includes('llm_api_key'), false);
+});

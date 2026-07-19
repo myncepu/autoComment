@@ -52,7 +52,7 @@
 </head>
 <body>
   <h1>Privacy Policy – AutoComment Chrome Extension</h1>
-  <p class="muted">Last updated: <span id="last-updated">2026-03-18</span></p>
+  <p class="muted">Last updated: <span id="last-updated">2026-07-19</span></p>
 
   <p>
     This privacy policy explains how the <strong>AutoComment</strong> Chrome extension
@@ -86,20 +86,18 @@
     </li>
     <li><strong>AI API configuration</strong>:
       <ul>
-        <li>Your AI API key</li>
-        <li>Your custom AI prompt / skill template (if you configure one)</li>
+        <li>Your configured API Base URL and model ID, stored in <code>chrome.storage.sync</code>.</li>
+        <li>Your AI API key, stored only in <code>chrome.storage.local</code>; it is not synced or included in configuration exports.</li>
       </ul>
     </li>
     <li><strong>Preference settings</strong>:
       <ul>
         <li>Whether to auto‑open the floating panel on page load</li>
-        <li>Whether to automatically call the AI on page load to generate a comment</li>
+        <li>Whether to show the optional outbound-link export control</li>
       </ul>
     </li>
-    <li><strong>Technical identifiers and usage metadata</strong> (non‑personal as designed):
+    <li><strong>Short-term local usage records</strong>:
       <ul>
-        <li>An internal device identifier / "user id" generated from browser / device characteristics (used only to identify a user for the built‑in points system and rate‑limit comment generation).</li>
-        <li>Basic points / credits information (for example how many generations are available).</li>
         <li>Short‑term records about which domains recently had comments generated, to avoid re‑generating content too frequently for the same site.</li>
       </ul>
     </li>
@@ -141,7 +139,7 @@
 
   <h2>4. Data sent to third‑party services (AI API)</h2>
   <p>
-    When you ask the extension to generate a promotional comment (or when you enable auto‑generation on page load), it sends a minimal summary of the current page to the AI API endpoint:
+    Only when you request a promotional comment, the extension sends a minimal summary of the current page directly to the OpenAI-compatible API provider you configured:
   </p>
   <ul>
     <li>Current page URL</li>
@@ -154,7 +152,7 @@
     The remote service returns a plain‑text comment suggestion. The extension does <strong>not</strong> execute arbitrary remote code; it only uses the remote API to generate text.
   </p>
   <p>
-    Your AI API key is stored locally in <code>chrome.storage</code> and sent only as an authorization header to the AI API endpoint when you request a generation.
+    Your AI API key is stored only in <code>chrome.storage.local</code> and sent only as an authorization header to your configured API provider when you request a generation.
   </p>
   <p>
     Please refer to the AI API provider's own privacy policy to understand how they handle data sent to their service.
@@ -172,9 +170,8 @@
   <h2>6. Permissions explained</h2>
   <ul>
     <li><strong><code>activeTab</code></strong>: Used to access and modify the current active tab's DOM (forms and textareas) when you interact with the extension.</li>
-    <li><strong>Host permissions</strong>: Required so that the content script can run on the websites where you want to use auto‑fill, comment generation, and outlink analysis.</li>
-    <li><strong><code>scripting</code></strong>: Used to inject the content script and the floating UI panel into the current page.</li>
-    <li><strong><code>storage</code></strong>: Used to store your profile data, API key, preferences, and internal usage metadata as described above.</li>
+    <li><strong>Host permissions</strong>: OpenRouter is available by default. When you save or test another HTTP(S) API Base URL, the extension asks for permission only for that configured origin.</li>
+    <li><strong><code>storage</code></strong>: Used to store your profile data, API Base URL, model ID, locally stored API key, preferences, and cooldown records as described above.</li>
   </ul>
 
   <h2>7. Data retention</h2>
@@ -238,9 +235,10 @@
     <p>扩展只会在本地（通过 <code>chrome.storage</code>）存储实现功能所必需的数据：</p>
     <ul>
       <li>你在扩展中手动填写的资料：姓名/昵称、邮箱、密码、网站 URL。</li>
-      <li>用于调用 AI 的 API Key 以及可选的自定义提示词模板。</li>
-      <li>开关类偏好设置：是否自动打开浮窗、是否在页面加载时自动调用 AI 等。</li>
-      <li>内部技术标识和使用记录：例如设备指纹式的用户 ID、积分/使用次数、以及用于避免在同一域名过于频繁生成文案的冷却记录（会定期清理）。</li>
+      <li>API Base URL 和模型 ID（保存在 <code>chrome.storage.sync</code>）。</li>
+      <li>用于调用 AI 的 API Key（仅保存在 <code>chrome.storage.local</code>，不会同步或导出）。</li>
+      <li>开关类偏好设置：是否自动打开浮窗、是否显示可选的外链导出控件等。</li>
+      <li>用于避免在同一域名过于频繁生成文案的短期本地冷却记录（会定期清理）。</li>
     </ul>
     <p>这些数据仅保存在你的浏览器中，不会出售，不用于投放广告。</p>
 
@@ -255,11 +253,12 @@
 
     <h2>四、发送到第三方 AI 服务的数据</h2>
     <p>
-      当你主动点击生成推广文案（或在你开启自动生成功能时），扩展会向上述 AI 接口发送当前页面的精简摘要（URL、标题、描述、截断后的正文内容）以及提示词模板，以便生成一段评论文案。
+      仅当你主动请求生成推广文案时，扩展才会将当前页面的精简摘要（URL、标题、描述、截断后的正文内容）以及提示词模板直接发送给你配置的 OpenAI 兼容 API 服务商，以便生成一段评论文案。
     </p>
     <p>
       API 返回的仅是纯文本文案。扩展不会执行远程代码，也不会下载远程脚本。
     </p>
+    <p>API Key 仅保存在 <code>chrome.storage.local</code>，只会在你请求生成时作为授权信息发送给所配置的服务商。</p>
 
     <h2>五、我们不会做的事情</h2>
     <ul>
