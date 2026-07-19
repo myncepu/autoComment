@@ -2,7 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { saveOptionsModelConfig, testOptionsModelConfig } from '../lib/llm-options-controller.mjs';
 
-function dependencies({ granted = true, response = { success: true, text: 'OK' }, sendError } = {}) {
+function dependencies({
+  granted = true,
+  response = { success: true, text: 'OK' },
+  sendError,
+  expectedRequest = { origins: ['https://openrouter.ai/*'] }
+} = {}) {
   const sync = {};
   const local = {};
   return {
@@ -16,7 +21,7 @@ function dependencies({ granted = true, response = { success: true, text: 'OK' }
       permissions: {
         async contains() { return false; },
         async request(request) {
-          assert.deepEqual(request, { origins: ['https://openrouter.ai/*'] });
+          assert.deepEqual(request, expectedRequest);
           return granted;
         }
       },
@@ -43,6 +48,19 @@ test('requests only the configured origin then saves split storage', async () =>
   assert.equal(fixture.sync.llm_api_base_url, 'https://openrouter.ai/api/v1');
   assert.equal(fixture.sync.llm_model, 'qwen/qwen-plus');
   assert.equal(fixture.local.llm_api_key, 'sk-test');
+});
+
+test('requests a port-free localhost permission while preserving the complete saved Base URL', async () => {
+  const fixture = dependencies({ expectedRequest: { origins: ['http://127.0.0.1/*'] } });
+  const localConfig = {
+    apiBaseUrl: 'http://127.0.0.1:11434/v1',
+    model: 'openrouter/auto',
+    apiKey: 'sk-local-test'
+  };
+  await saveOptionsModelConfig(fixture.value, localConfig);
+  assert.equal(fixture.sync.llm_api_base_url, localConfig.apiBaseUrl);
+  assert.equal(fixture.sync.llm_model, localConfig.model);
+  assert.equal(fixture.local.llm_api_key, localConfig.apiKey);
 });
 
 test('does not save when the user denies host permission', async () => {

@@ -45,16 +45,17 @@ test('validates only http(s) OpenAI-compatible configuration', () => {
   assert.equal(validateLlmConfig({ apiBaseUrl: 'file:///tmp/api', model: 'x', apiKey: 'y' }).code, 'INVALID_API_URL');
 });
 
-test('creates an origin-scoped permission pattern', () => {
+test('creates a port-free origin-scoped permission pattern', () => {
   assert.equal(getHostPermissionPattern('https://openrouter.ai/api/v1'), 'https://openrouter.ai/*');
-  assert.equal(getHostPermissionPattern('http://127.0.0.1:3000/v1'), 'http://127.0.0.1:3000/*');
+  assert.equal(getHostPermissionPattern('http://127.0.0.1:3000/v1'), 'http://127.0.0.1/*');
+  assert.equal(getHostPermissionPattern('http://[::1]:11434/v1'), 'http://[::1]/*');
 });
 
 test('stores key locally and exports only non-secret settings', async () => {
   const fixture = createStorage();
   const config = {
     apiBaseUrl: 'https://openrouter.ai/api/v1',
-    model: 'qwen/qwen-plus',
+    model: 'openrouter/auto',
     apiKey: 'sk-or-private'
   };
   await saveLlmConfig(fixture.storage, config);

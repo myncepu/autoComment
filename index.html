@@ -134,7 +134,7 @@
     </li>
   </ul>
   <p>
-    The extension does <strong>not</strong> read your full browsing history and does not track you across websites. It only works on the active tab where it is allowed to run.
+    The extension does <strong>not</strong> read your full browsing history and does not track you across websites. Static content scripts match <code>&lt;all_urls&gt;</code> and run on matching pages after they load, including tabs opened for batch processing.
   </p>
 
   <h2>4. Data sent to third‑party services (AI API)</h2>
@@ -152,7 +152,7 @@
     The remote service returns a plain‑text comment suggestion. The extension does <strong>not</strong> execute arbitrary remote code; it only uses the remote API to generate text.
   </p>
   <p>
-    Your AI API key is stored only in <code>chrome.storage.local</code> and sent as an authorization header to your configured API provider only when you request a generation or actively test the connection. Only generation requests include the limited current-page summary listed above.
+    The API key is sent as authorization only to your configured provider when you generate text or actively test the connection; only generation sends the limited page context listed above.
   </p>
   <p>
     Please refer to the AI API provider's own privacy policy to understand how they handle data sent to their service.
@@ -169,8 +169,9 @@
 
   <h2>6. Permissions explained</h2>
   <ul>
-    <li><strong><code>activeTab</code></strong>: Used to access and modify the current active tab's DOM (forms and textareas) when you interact with the extension.</li>
-    <li><strong>Host permissions</strong>: OpenRouter is available by default. When you save or test another HTTP(S) API Base URL, the extension asks for permission only for that configured origin.</li>
+    <li><strong><code>activeTab</code></strong>: Available for user-initiated tab interactions; it does not grant or describe the static content scripts' page access.</li>
+    <li><strong>Content-script matches</strong>: Static content scripts use <code>&lt;all_urls&gt;</code> to run on matching loaded pages, including user-initiated batch tabs, where they read the page data and fill recognized form fields described above.</li>
+    <li><strong>Model API host permissions</strong>: OpenRouter has default model API host permission; saving or testing another HTTP(S) API Base URL requests optional permission only for that provider host.</li>
     <li><strong><code>storage</code></strong>: Used to store your profile data, API Base URL, model ID, locally stored API key, preferences, and cooldown records as described above.</li>
   </ul>
 
@@ -249,7 +250,7 @@
       <li>页面基础信息：URL、标题、描述标签（如有）、以及经过截断和清洗的一小部分正文文本。</li>
       <li>外链分析功能下：页面中的链接 URL、域名以及是否带有 nofollow 属性。</li>
     </ul>
-    <p>扩展不会读取你的全局浏览历史，也不会跨站跟踪你，仅在当前激活标签页上工作。</p>
+    <p>扩展不会读取你的全局浏览历史，也不会跨站跟踪你。静态内容脚本通过 <code>&lt;all_urls&gt;</code> 在匹配的已加载页面运行，包括用户发起的批量处理标签页。</p>
 
     <h2>四、发送到第三方 AI 服务的数据</h2>
     <p>
@@ -258,7 +259,7 @@
     <p>
       API 返回的仅是纯文本文案。扩展不会执行远程代码，也不会下载远程脚本。
     </p>
-    <p>API Key 仅保存在 <code>chrome.storage.local</code>，只会在你请求生成或主动测试连接时作为授权信息发送给所配置的服务商；只有生成请求会携带上述有限的当前页面摘要。</p>
+    <p>API Key 只会在你请求生成文案或主动测试连接时作为授权信息发送给你配置的服务商；只有生成请求会发送上述有限的页面上下文。</p>
 
     <h2>五、我们不会做的事情</h2>
     <ul>
@@ -268,14 +269,22 @@
       <li>不会篡改第三方网站的脚本逻辑。</li>
     </ul>
 
-    <h2>六、你的选择</h2>
+    <h2>六、权限说明</h2>
+    <ul>
+      <li><strong><code>activeTab</code></strong>：可用于用户发起的标签页交互；它不授予也不描述静态内容脚本对页面 DOM 的访问。</li>
+      <li><strong>内容脚本匹配范围</strong>：静态内容脚本通过 <code>&lt;all_urls&gt;</code> 在匹配的已加载页面运行，包括用户发起的批量处理标签页；它们会读取上述页面数据并填写识别到的表单字段。</li>
+      <li><strong>模型 API 主机权限</strong>：OpenRouter 默认拥有模型 API 主机权限；保存或测试其他 HTTP(S) API Base URL 时，只会为该服务商主机请求可选权限。</li>
+      <li><strong><code>storage</code></strong>：用于保存上述资料、API Base URL、模型 ID、仅本地保存的 API Key、偏好设置和冷却记录。</li>
+    </ul>
+
+    <h2>七、你的选择</h2>
     <ul>
       <li>你可以随时在浏览器中禁用或卸载本扩展。</li>
       <li>你可以在扩展选项页中随时修改或清空存储的数据。</li>
       <li>如果你不填写 API Key，则不会调用 AI，文案生成功能将保持关闭。</li>
     </ul>
 
-    <h2>七、联系方式</h2>
+    <h2>八、联系方式</h2>
     <p>
       如对本隐私政策有任何问题，可通过以下邮箱联系开发者：<br />
       <strong>邮箱：</strong> <a href="mailto:cloudhu2000@gmail.com">cloudhu2000@gmail.com</a>

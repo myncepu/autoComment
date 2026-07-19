@@ -67,3 +67,34 @@ test('does not expose a configured key echoed by 401 or 402 providers', async ()
     );
   }
 });
+
+test('maps non-JSON HTTP errors by status without exposing provider text or retrying', async () => {
+  const apiKey = 'sk-non-json-secret';
+  for (const [status, code, providerText] of [
+    [401, 'INVALID_API_KEY', '<html>invalid key sk-non-json-secret</html>'],
+    [429, 'RATE_LIMITED', 'too many requests: sk-non-json-secret'],
+    [503, 'PROVIDER_UNAVAILABLE', '<h1>service unavailable</h1>']
+  ]) {
+    let calls = 0;
+    const fetchImpl = async () => {
+      calls += 1;
+      return new Response(providerText, { status, headers: { 'Content-Type': 'text/html' } });
+    };
+    await assert.rejects(
+      requestChatCompletion({
+        config: { apiBaseUrl: 'https://openrouter.ai/api/v1', model: 'openrouter/auto', apiKey },
+        messages: [{ role: 'user', content: 'test' }],
+        fetchImpl
+      }),
+      (error) => {
+        const publicError = toPublicLlmError(error);
+        assert.equal(publicError.code, code);
+        assert.equal(publicError.status, status);
+        assert.equal(JSON.stringify(publicError).includes(providerText), false);
+        assert.equal(JSON.stringify(publicError).includes(apiKey), false);
+        return true;
+      }
+    );
+    assert.equal(calls, 1);
+  }
+});
