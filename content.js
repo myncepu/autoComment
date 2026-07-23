@@ -806,6 +806,7 @@
   // 批处理模式上下文（由 BATCH_HANDLE 消息注入）
   let _batchCtx = null; // { batchId, urlIndex, url }
   let runningBatchTaskKey = null;
+  let historyRevisionSequence = 0;
 
   function setBatchContext(batchId, urlIndex, url) {
     _batchCtx = { batchId, urlIndex, url };
@@ -815,14 +816,57 @@
     return `${batchId}:${urlIndex}`;
   }
 
+  function createHistoryUniqueId() {
+    if (typeof globalThis.crypto?.randomUUID === 'function') {
+      return globalThis.crypto.randomUUID();
+    }
+    historyRevisionSequence += 1;
+    return [
+      Date.now().toString(36),
+      historyRevisionSequence.toString(36),
+      Math.random().toString(36).slice(2)
+    ].join('-');
+  }
+
+  function hasHistoryRevision(history) {
+    const revision = history?.historyRevision;
+    return Boolean(
+      revision
+      && Number.isFinite(revision.capturedAt)
+      && Number.isFinite(revision.recordedAt)
+      && Number.isInteger(revision.sequence)
+      && revision.sequence >= 0
+      && typeof revision.id === 'string'
+      && revision.id
+    );
+  }
+
+  function ensureHistoryRevision(history) {
+    if (!history || hasHistoryRevision(history)) return history;
+    const capturedAt = Number.isFinite(history.submittedAt)
+      ? history.submittedAt
+      : Date.now();
+    historyRevisionSequence += 1;
+    return {
+      ...history,
+      historyRevision: {
+        capturedAt,
+        recordedAt: Date.now(),
+        sequence: historyRevisionSequence,
+        id: createHistoryUniqueId()
+      }
+    };
+  }
+
   async function captureCurrentCommentHistory(editor, pageUrl) {
     const promotedWebsiteUrl = await getWebsiteUrl();
-    return globalThis.AutoCommentHistoryCapture.captureSubmission({
+    const history = globalThis.AutoCommentHistoryCapture.captureSubmission({
       editor,
       pageUrl: pageUrl || location.href,
       promotedWebsiteUrl,
       now: Date.now()
     });
+    return ensureHistoryRevision(history);
   }
 
   async function persistBatchSubmitContext(batchId, urlIndex, url, result, aiContent, errorMessage, history) {
@@ -908,7 +952,15 @@
         resolve(false);
         return;
       }
-      const pendingKey = `historyPending:${message.batchId}:${message.urlIndex}`;
+      const entryId = createHistoryUniqueId();
+      const pendingKey = `historyPending:v2:${entryId}`;
+      const pendingEntry = {
+        queueVersion: 2,
+        entryId,
+        commentId: `${message.batchId}:${message.urlIndex}`,
+        revision: message.history?.historyRevision || null,
+        message
+      };
       let settled = false;
       const finish = (saved) => {
         if (settled) return;
@@ -917,7 +969,7 @@
       };
       try {
         const pendingWrite = chrome.storage.local.set({
-          [pendingKey]: message
+          [pendingKey]: pendingEntry
         }, () => {
           finish(!chrome.runtime?.lastError);
         });
@@ -931,16 +983,22 @@
   }
 
   async function confirmBatchHistoryDurably(message) {
+    const versionedMessage = message?.history
+      ? {
+          ...message,
+          history: ensureHistoryRevision(message.history)
+        }
+      : message;
     let acknowledgement = null;
     if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
       try {
-        acknowledgement = await chrome.runtime.sendMessage(message);
+        acknowledgement = await chrome.runtime.sendMessage(versionedMessage);
       } catch (_) {
         acknowledgement = null;
       }
     }
-    let durable = isAcknowledgedBatchHistoryConfirmation(message, acknowledgement);
-    if (!durable) durable = await persistHistoryPendingFallback(message);
+    let durable = isAcknowledgedBatchHistoryConfirmation(versionedMessage, acknowledgement);
+    if (!durable) durable = await persistHistoryPendingFallback(versionedMessage);
     if (durable) clearBatchSubmitContext();
     return { durable, acknowledgement };
   }

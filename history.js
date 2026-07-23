@@ -477,6 +477,14 @@ export function bootHistoryPage(documentRef = document, {
   });
 
   function renderPendingQueue(pendingCount) {
+    if (!Number.isInteger(pendingCount)) {
+      elements.historyPendingBanner.hidden = false;
+      setStoredText(
+        elements.historyPendingBanner,
+        '评论历史待保存数量暂时无法刷新，请稍后重试。'
+      );
+      return;
+    }
     const count = Number.isInteger(pendingCount) && pendingCount > 0
       ? pendingCount
       : 0;

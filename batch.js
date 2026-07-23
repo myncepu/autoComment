@@ -25,6 +25,7 @@ let manualRequiredCount = 0;
 let blockedIllegalCount = 0;
 let pendingCount = 0;
 let historyPendingCount = null;
+let historyPendingCountUnavailable = false;
 
 // 本地结果存储
 let localResults = [];              // [{originalIndex, url, result, aiContent, errorMessage, timestamp}]
@@ -184,7 +185,8 @@ function renderHistorySaveWarning() {
     );
   const hasHistorySaveWarning = historyPendingCount > 0
     || hasFailedWrite
-    || hasUnrefreshedQueuedWrite;
+    || hasUnrefreshedQueuedWrite
+    || historyPendingCountUnavailable;
   historySaveWarning.textContent = historyPendingCount > 0
     ? `仍有 ${historyPendingCount} 条评论历史等待后台重试保存。`
     : '部分评论历史尚未保存，请稍后重试或检查扩展存储。';
@@ -194,8 +196,16 @@ function renderHistorySaveWarning() {
 function retryPendingHistoryWrites() {
   chrome.runtime.sendMessage({ type: 'HISTORY_RETRY_PENDING' }, (response) => {
     if (chrome.runtime.lastError || !response?.ok) return;
+    if (response.data?.pending === null) {
+      historyPendingCount = null;
+      historyPendingCountUnavailable = true;
+      renderHistorySaveWarning();
+      if (localResults.length > 0) renderStats();
+      return;
+    }
     if (!Number.isInteger(response.data?.pending)) return;
     historyPendingCount = response.data.pending;
+    historyPendingCountUnavailable = false;
     if (historyPendingCount === 0) {
       let changed = false;
       for (const result of localResults) {
@@ -211,8 +221,14 @@ function retryPendingHistoryWrites() {
   });
 }
 
-function updateHistoryPendingCount(value) {
-  if (Number.isInteger(value)) historyPendingCount = value;
+function updateHistoryPendingCount(value, saveStatus) {
+  if (Number.isInteger(value)) {
+    historyPendingCount = value;
+    historyPendingCountUnavailable = false;
+  } else if (value === null || saveStatus === 'queued') {
+    historyPendingCount = null;
+    historyPendingCountUnavailable = true;
+  }
 }
 
 async function loadTimeoutSetting() {
@@ -930,7 +946,7 @@ function handleTabConfirmed(
   historyPendingCount
 ) {
   console.log('[batch] handleTabConfirmed >>>', { urlIndex, result, aiContentLen: aiContent ? aiContent.length : 0, errorMessage, historySaveStatus, tabsPendingConfirmBefore: [...tabsPendingConfirm.entries()] });
-  updateHistoryPendingCount(historyPendingCount);
+  updateHistoryPendingCount(historyPendingCount, historySaveStatus);
 
   // 如果已经记录过结果（标签页可能已被 onRemoved 提前关闭清理），跳过 handleTabResult
   const existingResult = localResults.find((r) => r.originalIndex === urlIndex);

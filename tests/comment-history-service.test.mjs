@@ -26,6 +26,45 @@ function makeMessage(overrides = {}) {
   };
 }
 
+function makeRevision(capturedAt, id, sequence = 1) {
+  return {
+    capturedAt,
+    recordedAt: capturedAt + sequence,
+    sequence,
+    id
+  };
+}
+
+function withRevision(message, revision) {
+  return {
+    ...message,
+    history: {
+      ...message.history,
+      historyRevision: revision
+    }
+  };
+}
+
+function makePendingEnvelope(entryId, message) {
+  return {
+    queueVersion: 2,
+    entryId,
+    commentId: `${message.batchId}:${message.urlIndex}`,
+    revision: message.history.historyRevision,
+    message
+  };
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 function createStorage(initial = {}) {
   const data = structuredClone(initial);
   return {
@@ -51,8 +90,9 @@ function createStorage(initial = {}) {
 test('stores exactly one normalized bundle for a confirmed success', async () => {
   const writes = [];
   const repository = {
-    async upsertRecord(bundle) {
+    async upsertIfFresher(bundle) {
       writes.push(bundle);
+      return true;
     }
   };
   const storageLocal = createStorage();
@@ -75,7 +115,7 @@ test('stores exactly one normalized bundle for a confirmed success', async () =>
 test('skips history writes for every non-success result', async () => {
   let writeCount = 0;
   const service = createCommentHistoryService({
-    repository: { async upsertRecord() { writeCount += 1; } },
+    repository: { async upsertIfFresher() { writeCount += 1; } },
     storageLocal: createStorage()
   });
 
@@ -91,7 +131,7 @@ test('skips history writes for every non-success result', async () => {
 test('defaults only nullish results to success and preserves explicit falsey results', async () => {
   let writeCount = 0;
   const service = createCommentHistoryService({
-    repository: { async upsertRecord() { writeCount += 1; } },
+    repository: { async upsertIfFresher() { writeCount += 1; } },
     storageLocal: createStorage()
   });
 
@@ -108,7 +148,7 @@ test('treats only marked pre-upgrade success contexts without history as not app
   let writeCount = 0;
   const storageLocal = createStorage();
   const service = createCommentHistoryService({
-    repository: { async upsertRecord() { writeCount += 1; } },
+    repository: { async upsertIfFresher() { writeCount += 1; } },
     storageLocal
   });
 
@@ -130,19 +170,281 @@ test('treats only marked pre-upgrade success contexts without history as not app
   assert.deepEqual(storageLocal.data, {});
 });
 
-test('queues a repository failure under the independent record key', async () => {
+test('queues a repository failure under a unique versioned entry key', async () => {
   const storageLocal = createStorage();
-  const message = makeMessage();
+  const message = withRevision(
+    makeMessage(),
+    makeRevision(1721000000000, 'revision-queued')
+  );
   const service = createCommentHistoryService({
-    repository: { async upsertRecord() { throw new Error('db down'); } },
-    storageLocal
+    repository: { async upsertIfFresher() { throw new Error('db down'); } },
+    storageLocal,
+    createPendingEntryId: () => 'queued-entry'
   });
 
   assert.deepEqual(await service.saveConfirmedSuccess(message), {
     historySaveStatus: 'queued',
     pendingCount: 1
   });
-  assert.deepEqual(storageLocal.data['historyPending:batch-a:7'], message);
+  assert.deepEqual(
+    storageLocal.data['historyPending:v2:queued-entry'],
+    makePendingEnvelope('queued-entry', message)
+  );
+});
+
+test('repository failures create immutable versioned queue entries for the same comment ID', async () => {
+  const storageLocal = createStorage();
+  const entryIds = ['entry-old', 'entry-fresh'];
+  const service = createCommentHistoryService({
+    repository: {
+      async upsertIfFresher() {
+        throw new Error('db down');
+      }
+    },
+    storageLocal,
+    createPendingEntryId: () => entryIds.shift()
+  });
+  const oldMessage = withRevision(
+    makeMessage({
+      history: {
+        ...makeMessage().history,
+        submittedAt: 1721000000000,
+        commentHtml: 'old exact body',
+        commentText: 'old exact body'
+      }
+    }),
+    makeRevision(1721000000000, 'revision-old')
+  );
+  const freshMessage = withRevision(
+    makeMessage({
+      history: {
+        ...makeMessage().history,
+        submittedAt: 1721000001000,
+        commentHtml: 'fresh exact body',
+        commentText: 'fresh exact body'
+      }
+    }),
+    makeRevision(1721000001000, 'revision-fresh')
+  );
+
+  assert.deepEqual(await service.saveConfirmedSuccess(oldMessage), {
+    historySaveStatus: 'queued',
+    pendingCount: 1
+  });
+  assert.deepEqual(await service.saveConfirmedSuccess(freshMessage), {
+    historySaveStatus: 'queued',
+    pendingCount: 2
+  });
+  assert.deepEqual(
+    Object.keys(storageLocal.data).sort(),
+    ['historyPending:v2:entry-fresh', 'historyPending:v2:entry-old']
+  );
+  assert.deepEqual(storageLocal.data['historyPending:v2:entry-old'], {
+    queueVersion: 2,
+    entryId: 'entry-old',
+    commentId: 'batch-a:7',
+    revision: oldMessage.history.historyRevision,
+    message: oldMessage
+  });
+  assert.deepEqual(storageLocal.data['historyPending:v2:entry-fresh'], {
+    queueVersion: 2,
+    entryId: 'entry-fresh',
+    commentId: 'batch-a:7',
+    revision: freshMessage.history.historyRevision,
+    message: freshMessage
+  });
+});
+
+test('a direct newer revision retires an older v2 entry without downgrading exact data', async () => {
+  const oldMessage = withRevision(
+    makeMessage({
+      history: {
+        ...makeMessage().history,
+        submittedAt: 1721000000000,
+        commentHtml: 'old pending body',
+        commentText: 'old pending body'
+      }
+    }),
+    makeRevision(1721000000000, 'revision-old')
+  );
+  const freshMessage = withRevision(
+    makeMessage({
+      history: {
+        ...makeMessage().history,
+        submittedAt: 1721000001000,
+        commentHtml: 'fresh direct body',
+        commentText: 'fresh direct body'
+      }
+    }),
+    makeRevision(1721000001000, 'revision-fresh')
+  );
+  const oldKey = 'historyPending:v2:old-entry';
+  const storageLocal = createStorage({
+    [oldKey]: makePendingEnvelope('old-entry', oldMessage)
+  });
+  let persisted = null;
+  const service = createCommentHistoryService({
+    repository: {
+      async upsertIfFresher(bundle) {
+        if (
+          persisted
+          && bundle.comment.historyRevision.capturedAt
+            <= persisted.comment.historyRevision.capturedAt
+        ) {
+          return false;
+        }
+        persisted = structuredClone(bundle);
+        return true;
+      }
+    },
+    storageLocal
+  });
+
+  assert.deepEqual(await service.saveConfirmedSuccess(freshMessage), {
+    historySaveStatus: 'saved',
+    pendingCount: 0
+  });
+  assert.equal(persisted.comment.commentHtml, 'fresh direct body');
+  assert.equal(persisted.comment.historyRevision.id, 'revision-fresh');
+  assert.equal(Object.hasOwn(storageLocal.data, oldKey), false);
+});
+
+test('same-ID enqueue during a paused retry survives and later converges to the freshest body', async () => {
+  const oldRevision = makeRevision(1721000000000, 'revision-old');
+  const freshRevision = makeRevision(1721000001000, 'revision-fresh');
+  const oldMessage = withRevision(
+    makeMessage({
+      history: {
+        ...makeMessage().history,
+        submittedAt: oldRevision.capturedAt,
+        commentHtml: 'old exact body',
+        commentText: 'old exact body'
+      }
+    }),
+    oldRevision
+  );
+  const freshMessage = withRevision(
+    makeMessage({
+      history: {
+        ...makeMessage().history,
+        submittedAt: freshRevision.capturedAt,
+        commentHtml: 'fresh exact body',
+        commentText: 'fresh exact body'
+      }
+    }),
+    freshRevision
+  );
+  const oldKey = 'historyPending:v2:old-entry';
+  const storageLocal = createStorage({
+    [oldKey]: makePendingEnvelope('old-entry', oldMessage)
+  });
+  const oldStarted = deferred();
+  const releaseOld = deferred();
+  let persisted = null;
+  let failFreshDirect = true;
+
+  async function applyByRevision(bundle) {
+    const revision = bundle.comment.historyRevision;
+    if (bundle.comment.commentHtml === 'old exact body' && !persisted) {
+      oldStarted.resolve();
+      await releaseOld.promise;
+    }
+    if (
+      !persisted
+      || revision.capturedAt > persisted.comment.historyRevision.capturedAt
+    ) {
+      persisted = structuredClone(bundle);
+      return true;
+    }
+    return false;
+  }
+
+  const repository = {
+    async upsertIfFresher(bundle) {
+      if (bundle.comment.commentHtml === 'fresh exact body' && failFreshDirect) {
+        failFreshDirect = false;
+        throw new Error('fresh direct write temporarily failed');
+      }
+      return applyByRevision(bundle);
+    }
+  };
+  const service = createCommentHistoryService({
+    repository,
+    storageLocal,
+    createPendingEntryId: () => 'fresh-entry'
+  });
+
+  const firstRetryPromise = service.retryPendingWrites();
+  await oldStarted.promise;
+  assert.deepEqual(await service.saveConfirmedSuccess(freshMessage), {
+    historySaveStatus: 'queued',
+    pendingCount: 2
+  });
+  releaseOld.resolve();
+  assert.deepEqual(await firstRetryPromise, {
+    retried: 1,
+    saved: 1,
+    pending: 1
+  });
+  assert.equal(persisted.comment.commentHtml, 'old exact body');
+
+  assert.deepEqual(await service.retryPendingWrites(), {
+    retried: 1,
+    saved: 1,
+    pending: 0
+  });
+  assert.equal(persisted.comment.commentHtml, 'fresh exact body');
+  assert.deepEqual(storageLocal.data, {});
+});
+
+test('retry recount includes a different-ID entry enqueued after its storage snapshot', async () => {
+  const first = withRevision(
+    makeMessage({ batchId: 'batch-first', urlIndex: 1 }),
+    makeRevision(1721000000000, 'revision-first')
+  );
+  const concurrent = withRevision(
+    makeMessage({ batchId: 'batch-concurrent', urlIndex: 2 }),
+    makeRevision(1721000001000, 'revision-concurrent')
+  );
+  const firstKey = 'historyPending:v2:first-entry';
+  const concurrentKey = 'historyPending:v2:concurrent-entry';
+  const storageLocal = createStorage({
+    [firstKey]: makePendingEnvelope('first-entry', first)
+  });
+  const retryStarted = deferred();
+  const releaseRetry = deferred();
+  let firstAttempt = true;
+  const service = createCommentHistoryService({
+    repository: {
+      async upsertIfFresher() {
+        if (firstAttempt) {
+          firstAttempt = false;
+          retryStarted.resolve();
+          await releaseRetry.promise;
+        }
+        return true;
+      }
+    },
+    storageLocal
+  });
+
+  const retryPromise = service.retryPendingWrites();
+  await retryStarted.promise;
+  await storageLocal.set({
+    [concurrentKey]: makePendingEnvelope('concurrent-entry', concurrent)
+  });
+  releaseRetry.resolve();
+
+  assert.deepEqual(await retryPromise, {
+    retried: 1,
+    saved: 1,
+    pending: 1
+  });
+  assert.equal(Object.hasOwn(storageLocal.data, firstKey), false);
+  assert.deepEqual(
+    storageLocal.data[concurrentKey],
+    makePendingEnvelope('concurrent-entry', concurrent)
+  );
 });
 
 test('retry removes only successful pending keys and leaves failures isolated', async () => {
@@ -156,7 +458,7 @@ test('retry removes only successful pending keys and leaves failures isolated', 
   const attempts = [];
   const service = createCommentHistoryService({
     repository: {
-      async upsertPendingUnlessLive(bundle) {
+      async upsertIfFresher(bundle) {
         attempts.push(bundle.comment.id);
         if (bundle.comment.id === 'batch-a:2') throw new Error('still down');
         return true;
@@ -188,7 +490,7 @@ test('bounds each retry trigger and reports the full remaining pending count', a
   const attempts = [];
   const service = createCommentHistoryService({
     repository: {
-      async upsertPendingUnlessLive(bundle) {
+      async upsertIfFresher(bundle) {
         attempts.push(bundle.comment.id);
         return true;
       }
@@ -209,7 +511,7 @@ test('bounds each retry trigger and reports the full remaining pending count', a
   );
 });
 
-test('direct save removes its stale key and non-recursively retries other pending records', async () => {
+test('direct save retires an older queued version through the bounded freshness retry', async () => {
   const direct = makeMessage({ batchId: 'batch-live', urlIndex: 7 });
   const pending = {
     'historyPending:batch-live:7': {
@@ -229,13 +531,16 @@ test('direct save removes its stale key and non-recursively retries other pendin
   }
   const storageLocal = createStorage(pending);
   const attempts = [];
+  const storedSubmittedAt = new Map();
   const service = createCommentHistoryService({
     repository: {
-      async upsertRecord(bundle) {
+      async upsertIfFresher(bundle) {
         attempts.push(bundle.comment.id);
-      },
-      async upsertPendingUnlessLive(bundle) {
-        attempts.push(bundle.comment.id);
+        const existing = storedSubmittedAt.get(bundle.comment.id);
+        if (existing != null && bundle.comment.submittedAt <= existing) {
+          return false;
+        }
+        storedSubmittedAt.set(bundle.comment.id, bundle.comment.submittedAt);
         return true;
       }
     },
@@ -244,10 +549,10 @@ test('direct save removes its stale key and non-recursively retries other pendin
 
   assert.deepEqual(await service.saveConfirmedSuccess(direct), {
     historySaveStatus: 'saved',
-    pendingCount: 2
+    pendingCount: 3
   });
   assert.equal(attempts[0], 'batch-live:7');
-  assert.equal(attempts.filter((id) => id === 'batch-live:7').length, 1);
+  assert.equal(attempts.filter((id) => id === 'batch-live:7').length, 2);
   assert.equal(attempts.length, 26);
   assert.equal(
     Object.hasOwn(storageLocal.data, 'historyPending:batch-live:7'),
@@ -256,7 +561,7 @@ test('direct save removes its stale key and non-recursively retries other pendin
   assert.equal(
     Object.keys(storageLocal.data)
       .filter((key) => key.startsWith('historyPending:')).length,
-    2
+    3
   );
 });
 
@@ -291,17 +596,17 @@ test('direct save preserves fresh data and reports the queue when stale-key remo
     return originalRemove(key);
   };
   const storedBodies = new Map();
-  const directAttempts = [];
-  const pendingAttempts = [];
+  const storedSubmittedAt = new Map();
+  const attempts = [];
   const service = createCommentHistoryService({
     repository: {
-      async upsertRecord(bundle) {
-        directAttempts.push(bundle.comment.id);
-        storedBodies.set(bundle.comment.id, bundle.comment.commentHtml);
-      },
-      async upsertPendingUnlessLive(bundle) {
-        pendingAttempts.push(bundle.comment.id);
-        if (storedBodies.has(bundle.comment.id)) return false;
+      async upsertIfFresher(bundle) {
+        attempts.push(bundle.comment.id);
+        const existing = storedSubmittedAt.get(bundle.comment.id);
+        if (existing != null && bundle.comment.submittedAt <= existing) {
+          return false;
+        }
+        storedSubmittedAt.set(bundle.comment.id, bundle.comment.submittedAt);
         storedBodies.set(bundle.comment.id, bundle.comment.commentHtml);
         return true;
       }
@@ -311,21 +616,26 @@ test('direct save preserves fresh data and reports the queue when stale-key remo
 
   assert.deepEqual(await service.saveConfirmedSuccess(direct), {
     historySaveStatus: 'saved',
-    pendingCount: 2
+    pendingCount: 1
   });
-  assert.deepEqual(directAttempts, ['batch-live:7']);
+  assert.deepEqual(attempts, ['batch-live:7', 'batch-live:7', 'batch-other:1']);
   assert.equal(storedBodies.get('batch-live:7'), 'fresh direct body');
   assert.equal(Object.hasOwn(storageLocal.data, staleKey), true);
-  assert.equal(Object.hasOwn(storageLocal.data, otherKey), true);
+  assert.equal(Object.hasOwn(storageLocal.data, otherKey), false);
 
   storageLocal.remove = originalRemove;
   assert.deepEqual(await service.retryPendingWrites(), {
-    retried: 2,
-    saved: 1,
+    retried: 1,
+    saved: 0,
     discarded: 1,
     pending: 0
   });
-  assert.deepEqual(pendingAttempts, ['batch-live:7', 'batch-other:1']);
+  assert.deepEqual(attempts, [
+    'batch-live:7',
+    'batch-live:7',
+    'batch-other:1',
+    'batch-live:7'
+  ]);
   assert.equal(storedBodies.get('batch-live:7'), 'fresh direct body');
   assert.equal(Object.hasOwn(storageLocal.data, staleKey), false);
   assert.equal(Object.hasOwn(storageLocal.data, otherKey), false);
@@ -355,7 +665,7 @@ test('retry consumes reachable not-applicable and malformed pending entries', as
   let writeCount = 0;
   const service = createCommentHistoryService({
     repository: {
-      async upsertRecord() {
+      async upsertIfFresher() {
         writeCount += 1;
       }
     },
@@ -390,7 +700,7 @@ test('bounded retries eventually reach valid entries behind more than 25 poison 
   const attempts = [];
   const service = createCommentHistoryService({
     repository: {
-      async upsertPendingUnlessLive(bundle) {
+      async upsertIfFresher(bundle) {
         attempts.push(bundle.comment.id);
         return true;
       }
@@ -442,10 +752,7 @@ test('terminal cleanup failures cannot consume the valid write-attempt budget', 
   const attempts = [];
   const service = createCommentHistoryService({
     repository: {
-      async upsertRecord() {
-        throw new Error('retry must use the atomic pending path');
-      },
-      async upsertPendingUnlessLive(bundle) {
+      async upsertIfFresher(bundle) {
         attempts.push(bundle.comment.id);
         return true;
       }
@@ -466,8 +773,9 @@ test('queue maintenance failures never downgrade an already durable direct save'
   let writeCount = 0;
   const service = createCommentHistoryService({
     repository: {
-      async upsertRecord() {
+      async upsertIfFresher() {
         writeCount += 1;
+        return true;
       }
     },
     storageLocal: {
@@ -489,9 +797,108 @@ test('queue maintenance failures never downgrade an already durable direct save'
   assert.equal(writeCount, 1);
 });
 
+test('a durable queue set stays queued when its advisory recount fails', async () => {
+  let pendingWrite;
+  const message = withRevision(
+    makeMessage(),
+    makeRevision(1721000000000, 'revision-count-failure')
+  );
+  const service = createCommentHistoryService({
+    repository: {
+      async upsertIfFresher() {
+        throw new Error('db down');
+      }
+    },
+    storageLocal: {
+      async set(value) {
+        pendingWrite = structuredClone(value);
+      },
+      async get() {
+        throw new Error('count unavailable');
+      }
+    },
+    createPendingEntryId: () => 'count-failure-entry'
+  });
+
+  assert.deepEqual(await service.saveConfirmedSuccess(message), {
+    historySaveStatus: 'queued',
+    pendingCount: null
+  });
+  assert.deepEqual(
+    pendingWrite,
+    {
+      'historyPending:v2:count-failure-entry': makePendingEnvelope(
+        'count-failure-entry',
+        message
+      )
+    }
+  );
+});
+
+test('retry reports an unknown count when a concurrent enqueue outlives a failed recount', async () => {
+  const message = withRevision(
+    makeMessage(),
+    makeRevision(1721000000000, 'revision-recount-failure')
+  );
+  const concurrent = withRevision(
+    makeMessage({ batchId: 'batch-concurrent', urlIndex: 2 }),
+    makeRevision(1721000001000, 'revision-concurrent-recount')
+  );
+  const key = 'historyPending:v2:recount-failure-entry';
+  const concurrentKey = 'historyPending:v2:concurrent-recount-entry';
+  const data = {
+    [key]: makePendingEnvelope('recount-failure-entry', message)
+  };
+  let getCount = 0;
+  const retryStarted = deferred();
+  const releaseRetry = deferred();
+  const service = createCommentHistoryService({
+    repository: {
+      async upsertIfFresher() {
+        retryStarted.resolve();
+        await releaseRetry.promise;
+        return true;
+      }
+    },
+    storageLocal: {
+      async get() {
+        getCount += 1;
+        if (getCount > 1) throw new Error('fresh recount unavailable');
+        return structuredClone(data);
+      },
+      async remove(keyToRemove) {
+        delete data[keyToRemove];
+      }
+    }
+  });
+
+  const retryPromise = service.retryPendingWrites();
+  await retryStarted.promise;
+  data[concurrentKey] = makePendingEnvelope(
+    'concurrent-recount-entry',
+    concurrent
+  );
+  releaseRetry.resolve();
+
+  assert.deepEqual(await retryPromise, {
+    retried: 1,
+    saved: 1,
+    pending: null
+  });
+  assert.deepEqual(
+    data,
+    {
+      [concurrentKey]: makePendingEnvelope(
+        'concurrent-recount-entry',
+        concurrent
+      )
+    }
+  );
+});
+
 test('returns failed when both repository and retry storage fail', async () => {
   const service = createCommentHistoryService({
-    repository: { async upsertRecord() { throw new Error('db down'); } },
+    repository: { async upsertIfFresher() { throw new Error('db down'); } },
     storageLocal: {
       async set() { throw new Error('storage down'); }
     }

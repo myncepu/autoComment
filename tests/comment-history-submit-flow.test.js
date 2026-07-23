@@ -33,12 +33,19 @@ test('captures the fixture editor value and promoted URL at the submission bound
   );
   vm.runInContext(captureSource, context);
   vm.runInContext('async function getWebsiteUrl() { return "https://promo.test/"; }', context);
+  context.Date.now = () => 1721000000000;
+  Object.defineProperty(context.crypto, 'randomUUID', {
+    configurable: true,
+    value: () => 'revision-capture-1'
+  });
 
   const functionSource = sourceBetween(
-    'async function captureCurrentCommentHistory',
+    'function createHistoryUniqueId',
     '\n  async function persistBatchSubmitContext'
   );
-  vm.runInContext(`${functionSource}\nglobalThis.captureCurrentCommentHistory = captureCurrentCommentHistory;`, context);
+  vm.runInContext(`let historyRevisionSequence = 0;
+${functionSource}
+globalThis.captureCurrentCommentHistory = captureCurrentCommentHistory;`, context);
 
   const editor = dom.window.document.getElementById('comment');
   editor.value = 'Actual <a href="/submitted">submitted value</a>';
@@ -48,6 +55,12 @@ test('captures the fixture editor value and promoted URL at the submission bound
   assert.equal(history.promotedWebsiteUrl, 'https://promo.test/');
   assert.equal(history.targetPageUrl, 'https://target.test/post');
   assert.equal(history.anchors[0].hrefResolved, 'https://target.test/submitted');
+  assert.deepEqual(plain(history.historyRevision), {
+    capturedAt: 1721000000000,
+    recordedAt: 1721000000000,
+    sequence: 1,
+    id: 'revision-capture-1'
+  });
 });
 
 test('captures the final editor before pending context persistence and synthetic click', () => {
@@ -201,13 +214,21 @@ function createConfirmationHarness({
   response,
   rejection,
   fallbackLastError,
-  fallbackThrows = false
+  fallbackThrows = false,
+  pendingEntryIds = []
 } = {}) {
   const dom = new JSDOM('<!doctype html><body></body>', {
     url: 'https://target.test/post',
     runScripts: 'outside-only'
   });
   const context = dom.getInternalVMContext();
+  if (pendingEntryIds.length > 0) {
+    const entryIds = [...pendingEntryIds];
+    Object.defineProperty(context.crypto, 'randomUUID', {
+      configurable: true,
+      value: () => entryIds.shift()
+    });
+  }
   const sentMessages = [];
   const storageWrites = [];
   const storageRemovals = [];
@@ -238,10 +259,11 @@ function createConfirmationHarness({
   };
   context.console = { log() {}, warn() {}, error() {} };
   const confirmationSource = sourceBetween(
-    'function clearBatchSubmitContext',
+    'function createHistoryUniqueId',
     '\n  // 从 storage 恢复提交后上下文'
   );
-  vm.runInContext(`${confirmationSource}
+  vm.runInContext(`let historyRevisionSequence = 0;
+${confirmationSource}
 globalThis.confirmBatchHistoryDurably = confirmBatchHistoryDurably;
 globalThis.confirmRestoredBatchSubmit = confirmRestoredBatchSubmit;`, context);
   return {
@@ -265,9 +287,27 @@ function exactConfirmationMessage(overrides = {}) {
       promotedWebsiteUrl: 'https://promo.test/',
       commentHtml: 'Exact submitted body',
       commentText: 'Exact submitted body',
-      anchors: []
+      anchors: [],
+      historyRevision: {
+        capturedAt: 1721000000000,
+        recordedAt: 1721000000001,
+        sequence: 1,
+        id: 'revision-exact-default'
+      }
     },
     ...overrides
+  };
+}
+
+function expectedPendingWrite(entryId, message) {
+  return {
+    [`historyPending:v2:${entryId}`]: {
+      queueVersion: 2,
+      entryId,
+      commentId: `${message.batchId}:${message.urlIndex}`,
+      revision: message.history.historyRevision,
+      message
+    }
   };
 }
 
@@ -276,7 +316,10 @@ test('rejected and closed confirmation messages durably transfer the exact paylo
     new Error('background rejected'),
     new Error('The message channel closed before a response was received.')
   ]) {
-    const harness = createConfirmationHarness({ rejection });
+    const harness = createConfirmationHarness({
+      rejection,
+      pendingEntryIds: ['rejected-entry']
+    });
     const message = exactConfirmationMessage();
 
     assert.deepEqual(
@@ -284,16 +327,86 @@ test('rejected and closed confirmation messages durably transfer the exact paylo
       { durable: true, acknowledgement: null }
     );
     assert.deepEqual(harness.sentMessages, [message]);
-    assert.deepEqual(harness.storageWrites, [{
-      'historyPending:batch-a:7': message
-    }]);
+    assert.deepEqual(
+      harness.storageWrites,
+      [expectedPendingWrite('rejected-entry', message)]
+    );
     assert.deepEqual(harness.storageRemovals, ['batchSubmitCtx']);
   }
 });
 
+test('content fallback creates immutable queue entries for same-ID exact revisions', async () => {
+  const harness = createConfirmationHarness({
+    rejection: new Error('background unavailable'),
+    pendingEntryIds: ['content-entry-first', 'content-entry-second']
+  });
+  const first = exactConfirmationMessage({
+    history: {
+      ...exactConfirmationMessage().history,
+      submittedAt: 1721000000000,
+      historyRevision: {
+        capturedAt: 1721000000000,
+        recordedAt: 1721000000001,
+        sequence: 1,
+        id: 'revision-first'
+      }
+    }
+  });
+  const second = exactConfirmationMessage({
+    history: {
+      ...exactConfirmationMessage().history,
+      submittedAt: 1721000001000,
+      commentHtml: 'New exact submitted body',
+      commentText: 'New exact submitted body',
+      historyRevision: {
+        capturedAt: 1721000001000,
+        recordedAt: 1721000001001,
+        sequence: 2,
+        id: 'revision-second'
+      }
+    }
+  });
+
+  await harness.context.confirmBatchHistoryDurably(first);
+  await harness.context.confirmBatchHistoryDurably(second);
+
+  const keys = harness.storageWrites.map((write) => Object.keys(write)[0]);
+  assert.deepEqual(keys, [
+    'historyPending:v2:content-entry-first',
+    'historyPending:v2:content-entry-second'
+  ]);
+  const queued = harness.storageWrites.map((write, index) => write[keys[index]]);
+  assert.deepEqual(
+    queued.map(({ queueVersion, entryId, commentId, revision, message }) => ({
+      queueVersion,
+      entryId,
+      commentId,
+      revision,
+      message
+    })),
+    [
+      {
+        queueVersion: 2,
+        entryId: 'content-entry-first',
+        commentId: 'batch-a:7',
+        revision: first.history.historyRevision,
+        message: first
+      },
+      {
+        queueVersion: 2,
+        entryId: 'content-entry-second',
+        commentId: 'batch-a:7',
+        revision: second.history.historyRevision,
+        message: second
+      }
+    ]
+  );
+});
+
 test('failed acknowledgement falls back, while a fallback write failure preserves submit context', async () => {
   const failedAck = createConfirmationHarness({
-    response: { ok: true, historySaveStatus: 'failed' }
+    response: { ok: true, historySaveStatus: 'failed' },
+    pendingEntryIds: ['failed-ack-entry']
   });
   const message = exactConfirmationMessage();
   assert.deepEqual(
@@ -303,9 +416,10 @@ test('failed acknowledgement falls back, while a fallback write failure preserve
       acknowledgement: { ok: true, historySaveStatus: 'failed' }
     }
   );
-  assert.deepEqual(failedAck.storageWrites, [{
-    'historyPending:batch-a:7': message
-  }]);
+  assert.deepEqual(
+    failedAck.storageWrites,
+    [expectedPendingWrite('failed-ack-entry', message)]
+  );
   assert.deepEqual(failedAck.storageRemovals, ['batchSubmitCtx']);
 
   for (const failureOptions of [

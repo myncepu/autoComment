@@ -218,7 +218,7 @@ test('legacy insert-if-absent never downgrades live data across reruns or concur
   assert.deepEqual(await repo.getRecord('batch-concurrent:2'), liveFirst);
 });
 
-test('pending recovery atomically preserves live data while upgrading legacy data', async (t) => {
+test('freshness upsert atomically preserves newer live data while upgrading legacy data', async (t) => {
   const { repo } = await openRepo(t);
   const live = makeBundle({
     id: 'batch-pending-live:1',
@@ -234,7 +234,7 @@ test('pending recovery atomically preserves live data while upgrading legacy dat
   stalePending.comment.commentText = 'stale queued body';
   await repo.upsertRecord(live);
 
-  assert.equal(await repo.upsertPendingUnlessLive(stalePending), false);
+  assert.equal(await repo.upsertIfFresher(stalePending), false);
   assert.deepEqual(await repo.getRecord(live.comment.id), live);
 
   const legacy = makeBundle({
@@ -254,8 +254,190 @@ test('pending recovery atomically preserves live data while upgrading legacy dat
   exactPending.comment.commentText = 'exact pending body';
   await repo.upsertRecord(legacy);
 
-  assert.equal(await repo.upsertPendingUnlessLive(exactPending), true);
+  assert.equal(await repo.upsertIfFresher(exactPending), true);
   assert.deepEqual(await repo.getRecord(legacy.comment.id), exactPending);
+});
+
+test('freshness revisions converge to the newest exact record in either arrival order', async (t) => {
+  const { repo } = await openRepo(t);
+  function versionedBundle(id, submittedAt, revisionId, body) {
+    const bundle = makeBundle({
+      id,
+      submittedAt,
+      anchors: [{ anchorText: body, hrefDomain: `${revisionId}.test` }]
+    });
+    bundle.comment.commentHtml = body;
+    bundle.comment.commentText = body;
+    bundle.comment.historyRevision = {
+      capturedAt: submittedAt,
+      recordedAt: submittedAt + 1,
+      sequence: 1,
+      id: revisionId
+    };
+    return bundle;
+  }
+
+  const oldFirst = versionedBundle(
+    'batch-version-order:1',
+    100,
+    'revision-old-first',
+    'old first body'
+  );
+  const freshSecond = versionedBundle(
+    'batch-version-order:1',
+    200,
+    'revision-fresh-second',
+    'fresh second body'
+  );
+  assert.equal(await repo.upsertIfFresher(oldFirst), true);
+  assert.equal(await repo.upsertIfFresher(freshSecond), true);
+  assert.deepEqual(await repo.getRecord(oldFirst.comment.id), freshSecond);
+
+  const freshFirst = versionedBundle(
+    'batch-version-order:2',
+    400,
+    'revision-fresh-first',
+    'fresh first body'
+  );
+  const oldSecond = versionedBundle(
+    'batch-version-order:2',
+    300,
+    'revision-old-second',
+    'old second body'
+  );
+  assert.equal(await repo.upsertIfFresher(freshFirst), true);
+  assert.equal(await repo.upsertIfFresher(oldSecond), false);
+  assert.deepEqual(await repo.getRecord(freshFirst.comment.id), freshFirst);
+});
+
+test('freshness comparison uses the complete revision tuple and never mutates an equal revision', async (t) => {
+  const { repo } = await openRepo(t);
+  function versionedBundle({
+    id = 'batch-revision-ties:1',
+    recordedAt,
+    sequence,
+    revisionId,
+    body
+  }) {
+    const bundle = makeBundle({
+      id,
+      submittedAt: 500,
+      anchors: [{ anchorText: body, hrefDomain: `${revisionId}.test` }]
+    });
+    bundle.comment.commentHtml = body;
+    bundle.comment.commentText = body;
+    bundle.comment.historyRevision = {
+      capturedAt: 500,
+      recordedAt,
+      sequence,
+      id: revisionId
+    };
+    return bundle;
+  }
+
+  const base = versionedBundle({
+    recordedAt: 501,
+    sequence: 1,
+    revisionId: 'revision-a',
+    body: 'base'
+  });
+  const newerRecordedAt = versionedBundle({
+    recordedAt: 502,
+    sequence: 0,
+    revisionId: 'revision-a',
+    body: 'newer recordedAt'
+  });
+  const newerSequence = versionedBundle({
+    recordedAt: 502,
+    sequence: 2,
+    revisionId: 'revision-a',
+    body: 'newer sequence'
+  });
+  const newerId = versionedBundle({
+    recordedAt: 502,
+    sequence: 2,
+    revisionId: 'revision-z',
+    body: 'newer id'
+  });
+  const equalConflict = structuredClone(newerId);
+  equalConflict.comment.commentHtml = 'must not replace equal revision';
+  equalConflict.comment.commentText = 'must not replace equal revision';
+  equalConflict.anchors = makeBundle({
+    id: newerId.comment.id,
+    anchors: [{ anchorText: 'Conflict', hrefDomain: 'conflict.test' }]
+  }).anchors;
+
+  assert.equal(await repo.upsertIfFresher(base), true);
+  assert.equal(await repo.upsertIfFresher(newerRecordedAt), true);
+  assert.equal(await repo.upsertIfFresher(newerSequence), true);
+  assert.equal(await repo.upsertIfFresher(newerId), true);
+  assert.equal(await repo.upsertIfFresher(equalConflict), false);
+  assert.deepEqual(await repo.getRecord(newerId.comment.id), newerId);
+
+  const reverseId = 'batch-revision-ties:2';
+  const reverseFresh = versionedBundle({
+    id: reverseId,
+    recordedAt: 502,
+    sequence: 2,
+    revisionId: 'revision-z',
+    body: 'fresh first'
+  });
+  const reverseOld = versionedBundle({
+    id: reverseId,
+    recordedAt: 502,
+    sequence: 2,
+    revisionId: 'revision-a',
+    body: 'old second'
+  });
+  assert.equal(await repo.upsertIfFresher(reverseFresh), true);
+  assert.equal(await repo.upsertIfFresher(reverseOld), false);
+  assert.deepEqual(await repo.getRecord(reverseId), reverseFresh);
+});
+
+test('exact data upgrades legacy regardless of timestamps and a failed fresh write rolls back atomically', async (t) => {
+  const { repo } = await openRepo(t);
+  const legacy = makeBundle({
+    id: 'batch-source-order:1',
+    submittedAt: 900,
+    anchors: [{ anchorText: 'Legacy', hrefDomain: 'legacy.test' }]
+  });
+  legacy.comment.source = 'legacy';
+  legacy.comment.commentHtml = 'legacy approximation';
+  legacy.comment.commentText = 'legacy approximation';
+
+  const exact = makeBundle({
+    id: legacy.comment.id,
+    submittedAt: 100,
+    anchors: [{ anchorText: 'Exact', hrefDomain: 'exact.test' }]
+  });
+  exact.comment.historyRevision = {
+    capturedAt: 100,
+    recordedAt: 101,
+    sequence: 1,
+    id: 'revision-exact'
+  };
+
+  assert.equal(await repo.upsertIfFresher(legacy), true);
+  assert.equal(await repo.upsertIfFresher(exact), true);
+  assert.equal(await repo.upsertIfFresher(legacy), false);
+  assert.deepEqual(await repo.getRecord(exact.comment.id), exact);
+
+  const invalidFresh = structuredClone(exact);
+  invalidFresh.comment.commentHtml = 'must roll back';
+  invalidFresh.comment.commentText = 'must roll back';
+  invalidFresh.comment.historyRevision = {
+    capturedAt: 200,
+    recordedAt: 201,
+    sequence: 2,
+    id: 'revision-invalid'
+  };
+  invalidFresh.anchors.push({
+    ...invalidFresh.anchors[0],
+    id: undefined,
+    position: 1
+  });
+  await assert.rejects(repo.upsertIfFresher(invalidFresh));
+  assert.deepEqual(await repo.getRecord(exact.comment.id), exact);
 });
 
 test('paginates comments in descending submission order with a stable cursor', async (t) => {

@@ -24,11 +24,9 @@ async function callCommentHistoryRepository(method, args) {
 
 const commentHistoryRepository = {
   upsertRecord: (...args) => callCommentHistoryRepository('upsertRecord', args),
+  upsertIfFresher: (...args) => callCommentHistoryRepository('upsertIfFresher', args),
   insertLegacyIfAbsent: (...args) => (
     callCommentHistoryRepository('insertLegacyIfAbsent', args)
-  ),
-  upsertPendingUnlessLive: (...args) => (
-    callCommentHistoryRepository('upsertPendingUnlessLive', args)
   ),
   getRecord: (...args) => callCommentHistoryRepository('getRecord', args),
   queryRecords: (...args) => callCommentHistoryRepository('queryRecords', args),
@@ -147,7 +145,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           aiContent: message.aiContent || null,
           errorMessage: message.errorMessage || null,
           historySaveStatus,
-          ...(Number.isInteger(historyPendingCount) ? { historyPendingCount } : {})
+          ...(Number.isInteger(historyPendingCount) || historyPendingCount === null
+            ? { historyPendingCount }
+            : {})
         }).then(() => {
           console.log('[background] BATCH_CONFIRMED 发送成功');
         }).catch((e) => {
@@ -161,7 +161,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({
           ok: true,
           historySaveStatus,
-          ...(Number.isInteger(historyPendingCount) ? { historyPendingCount } : {})
+          ...(Number.isInteger(historyPendingCount) || historyPendingCount === null
+            ? { historyPendingCount }
+            : {})
         });
         console.log('[background] BATCH_HANDLE_CONFIRM <<< sendResponse({ok:true})');
       } catch (e) {

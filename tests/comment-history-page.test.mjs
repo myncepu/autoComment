@@ -217,6 +217,33 @@ test('history startup retries a live worker queue before loading and displays re
   assert.match(document.getElementById('historyPendingBanner').textContent, /2/);
 });
 
+test('history keeps a warning visible when the post-retry count is unknown', async () => {
+  const document = historyDocument();
+  const requestMessage = async (message) => {
+    if (message.type === 'HISTORY_RETRY_PENDING') {
+      return { retried: 1, saved: 1, pending: null };
+    }
+    if (message.type === 'HISTORY_SUMMARY') return {};
+    if (message.type === 'HISTORY_ARCHIVE_EVENTS') return [];
+    if (message.type === 'HISTORY_LIST') return { records: [], nextCursor: null };
+    throw new Error(`Unexpected request: ${message.type}`);
+  };
+
+  bootHistoryPage(document, {
+    requestMessage,
+    search: '',
+    estimateStorage: async () => 0
+  });
+  await nextTurn();
+  await nextTurn();
+
+  assert.equal(document.getElementById('historyPendingBanner').hidden, false);
+  assert.match(
+    document.getElementById('historyPendingBanner').textContent,
+    /暂时无法刷新/
+  );
+});
+
 test('exports session chunks into bounded parts then sends only confirmed session deletion', async () => {
   const document = historyDocument();
   document.getElementById('targetDomain').value = 'archive.test';

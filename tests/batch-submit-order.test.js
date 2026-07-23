@@ -34,6 +34,15 @@ test('batch confirmation stores and renders the background history save status',
   assert.match(batch, /historySaveStatus:\s*historySaveStatus\s*\|\|\s*null/);
   assert.match(batch, /type:\s*'HISTORY_RETRY_PENDING'/);
   assert.match(batch, /historyPendingCount\s*=\s*response\.data\.pending/);
+  assert.match(
+    batch,
+    /else if \(value === null \|\| saveStatus === 'queued'\) \{\s*historyPendingCount = null;/
+  );
+  assert.match(batch, /historyPendingCountUnavailable = true;/);
+  assert.match(
+    batch,
+    /updateHistoryPendingCount\(historyPendingCount,\s*historySaveStatus\)/
+  );
   assert.match(batch, /saved:\s*'历史已保存'/);
   assert.match(batch, /queued:\s*'历史待重试'/);
   assert.match(batch, /failed:\s*'历史保存失败'/);
