@@ -218,6 +218,46 @@ test('legacy insert-if-absent never downgrades live data across reruns or concur
   assert.deepEqual(await repo.getRecord('batch-concurrent:2'), liveFirst);
 });
 
+test('pending recovery atomically preserves live data while upgrading legacy data', async (t) => {
+  const { repo } = await openRepo(t);
+  const live = makeBundle({
+    id: 'batch-pending-live:1',
+    submittedAt: 500,
+    anchors: [{ anchorText: 'Fresh', hrefDomain: 'fresh.test' }]
+  });
+  const stalePending = makeBundle({
+    id: 'batch-pending-live:1',
+    submittedAt: 100,
+    anchors: [{ anchorText: 'Stale', hrefDomain: 'stale.test' }]
+  });
+  stalePending.comment.commentHtml = 'stale queued body';
+  stalePending.comment.commentText = 'stale queued body';
+  await repo.upsertRecord(live);
+
+  assert.equal(await repo.upsertPendingUnlessLive(stalePending), false);
+  assert.deepEqual(await repo.getRecord(live.comment.id), live);
+
+  const legacy = makeBundle({
+    id: 'batch-pending-legacy:1',
+    submittedAt: 200,
+    anchors: [{ anchorText: 'Legacy', hrefDomain: 'legacy.test' }]
+  });
+  legacy.comment.source = 'legacy';
+  legacy.comment.commentHtml = 'legacy fallback';
+  legacy.comment.commentText = 'legacy fallback';
+  const exactPending = makeBundle({
+    id: 'batch-pending-legacy:1',
+    submittedAt: 300,
+    anchors: [{ anchorText: 'Exact', hrefDomain: 'exact.test' }]
+  });
+  exactPending.comment.commentHtml = 'exact pending body';
+  exactPending.comment.commentText = 'exact pending body';
+  await repo.upsertRecord(legacy);
+
+  assert.equal(await repo.upsertPendingUnlessLive(exactPending), true);
+  assert.deepEqual(await repo.getRecord(legacy.comment.id), exactPending);
+});
+
 test('paginates comments in descending submission order with a stable cursor', async (t) => {
   const { repo } = await openRepo(t);
   const records = [

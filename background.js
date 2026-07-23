@@ -27,6 +27,9 @@ const commentHistoryRepository = {
   insertLegacyIfAbsent: (...args) => (
     callCommentHistoryRepository('insertLegacyIfAbsent', args)
   ),
+  upsertPendingUnlessLive: (...args) => (
+    callCommentHistoryRepository('upsertPendingUnlessLive', args)
+  ),
   getRecord: (...args) => callCommentHistoryRepository('getRecord', args),
   queryRecords: (...args) => callCommentHistoryRepository('queryRecords', args),
   countRecords: (...args) => callCommentHistoryRepository('countRecords', args),

@@ -156,9 +156,10 @@ test('retry removes only successful pending keys and leaves failures isolated', 
   const attempts = [];
   const service = createCommentHistoryService({
     repository: {
-      async upsertRecord(bundle) {
+      async upsertPendingUnlessLive(bundle) {
         attempts.push(bundle.comment.id);
         if (bundle.comment.id === 'batch-a:2') throw new Error('still down');
+        return true;
       }
     },
     storageLocal
@@ -187,8 +188,9 @@ test('bounds each retry trigger and reports the full remaining pending count', a
   const attempts = [];
   const service = createCommentHistoryService({
     repository: {
-      async upsertRecord(bundle) {
+      async upsertPendingUnlessLive(bundle) {
         attempts.push(bundle.comment.id);
+        return true;
       }
     },
     storageLocal
@@ -231,6 +233,10 @@ test('direct save removes its stale key and non-recursively retries other pendin
     repository: {
       async upsertRecord(bundle) {
         attempts.push(bundle.comment.id);
+      },
+      async upsertPendingUnlessLive(bundle) {
+        attempts.push(bundle.comment.id);
+        return true;
       }
     },
     storageLocal
@@ -252,6 +258,208 @@ test('direct save removes its stale key and non-recursively retries other pendin
       .filter((key) => key.startsWith('historyPending:')).length,
     2
   );
+});
+
+test('direct save preserves fresh data and reports the queue when stale-key removal fails', async () => {
+  const direct = makeMessage({
+    batchId: 'batch-live',
+    urlIndex: 7,
+    history: {
+      ...makeMessage().history,
+      submittedAt: 1721000001000,
+      commentHtml: 'fresh direct body',
+      commentText: 'fresh direct body'
+    }
+  });
+  const staleKey = 'historyPending:batch-live:7';
+  const otherKey = 'historyPending:batch-other:1';
+  const storageLocal = createStorage({
+    [staleKey]: {
+      ...direct,
+      history: {
+        ...direct.history,
+        submittedAt: 1721000000000,
+        commentHtml: 'stale queued body',
+        commentText: 'stale queued body'
+      }
+    },
+    [otherKey]: makeMessage({ batchId: 'batch-other', urlIndex: 1 })
+  });
+  const originalRemove = storageLocal.remove.bind(storageLocal);
+  storageLocal.remove = async (key) => {
+    if (key === staleKey) throw new Error('targeted stale-key removal failure');
+    return originalRemove(key);
+  };
+  const storedBodies = new Map();
+  const directAttempts = [];
+  const pendingAttempts = [];
+  const service = createCommentHistoryService({
+    repository: {
+      async upsertRecord(bundle) {
+        directAttempts.push(bundle.comment.id);
+        storedBodies.set(bundle.comment.id, bundle.comment.commentHtml);
+      },
+      async upsertPendingUnlessLive(bundle) {
+        pendingAttempts.push(bundle.comment.id);
+        if (storedBodies.has(bundle.comment.id)) return false;
+        storedBodies.set(bundle.comment.id, bundle.comment.commentHtml);
+        return true;
+      }
+    },
+    storageLocal
+  });
+
+  assert.deepEqual(await service.saveConfirmedSuccess(direct), {
+    historySaveStatus: 'saved',
+    pendingCount: 2
+  });
+  assert.deepEqual(directAttempts, ['batch-live:7']);
+  assert.equal(storedBodies.get('batch-live:7'), 'fresh direct body');
+  assert.equal(Object.hasOwn(storageLocal.data, staleKey), true);
+  assert.equal(Object.hasOwn(storageLocal.data, otherKey), true);
+
+  storageLocal.remove = originalRemove;
+  assert.deepEqual(await service.retryPendingWrites(), {
+    retried: 2,
+    saved: 1,
+    discarded: 1,
+    pending: 0
+  });
+  assert.deepEqual(pendingAttempts, ['batch-live:7', 'batch-other:1']);
+  assert.equal(storedBodies.get('batch-live:7'), 'fresh direct body');
+  assert.equal(Object.hasOwn(storageLocal.data, staleKey), false);
+  assert.equal(Object.hasOwn(storageLocal.data, otherKey), false);
+});
+
+test('retry consumes reachable not-applicable and malformed pending entries', async () => {
+  const storageLocal = createStorage({
+    'historyPending:bad:1': makeMessage({
+      batchId: 'bad',
+      urlIndex: 1,
+      history: undefined,
+      historyUnavailableReason: 'legacy_context'
+    }),
+    'historyPending:bad:2': makeMessage({
+      batchId: 'bad',
+      urlIndex: 2,
+      result: 'manual_required',
+      history: undefined
+    }),
+    'historyPending:bad:3': {
+      batchId: 'bad',
+      urlIndex: 3,
+      result: 'success',
+      history: { submittedAt: 'not-a-number' }
+    }
+  });
+  let writeCount = 0;
+  const service = createCommentHistoryService({
+    repository: {
+      async upsertRecord() {
+        writeCount += 1;
+      }
+    },
+    storageLocal
+  });
+
+  assert.deepEqual(await service.retryPendingWrites(), {
+    retried: 3,
+    saved: 0,
+    discarded: 3,
+    pending: 0
+  });
+  assert.equal(writeCount, 0);
+  assert.deepEqual(storageLocal.data, {});
+});
+
+test('bounded retries eventually reach valid entries behind more than 25 poison keys', async () => {
+  const pending = {};
+  for (let index = 0; index < 27; index += 1) {
+    pending[`historyPending:000-bad:${String(index).padStart(2, '0')}`] = {
+      batchId: '000-bad',
+      urlIndex: index,
+      result: 'success',
+      history: undefined
+    };
+  }
+  pending['historyPending:zzz-valid:1'] = makeMessage({
+    batchId: 'zzz-valid',
+    urlIndex: 1
+  });
+  const storageLocal = createStorage(pending);
+  const attempts = [];
+  const service = createCommentHistoryService({
+    repository: {
+      async upsertPendingUnlessLive(bundle) {
+        attempts.push(bundle.comment.id);
+        return true;
+      }
+    },
+    storageLocal
+  });
+
+  assert.deepEqual(await service.retryPendingWrites(), {
+    retried: 25,
+    saved: 1,
+    discarded: 24,
+    pending: 3
+  });
+  assert.deepEqual(await service.retryPendingWrites(), {
+    retried: 3,
+    saved: 0,
+    discarded: 3,
+    pending: 0
+  });
+  assert.deepEqual(attempts, ['zzz-valid:1']);
+  assert.deepEqual(storageLocal.data, {});
+});
+
+test('terminal cleanup failures cannot consume the valid write-attempt budget', async () => {
+  const pending = {};
+  const poisonKeys = new Set();
+  for (let index = 0; index < 25; index += 1) {
+    const key = `historyPending:000-poison:${String(index).padStart(2, '0')}`;
+    poisonKeys.add(key);
+    if (index % 3 === 0) {
+      pending[key] = makeMessage({ result: 'fail' });
+    } else if (index % 3 === 1) {
+      pending[key] = makeMessage({
+        history: undefined,
+        historyUnavailableReason: 'legacy_context'
+      });
+    } else {
+      pending[key] = makeMessage({ history: { submittedAt: 'bad' } });
+    }
+  }
+  const validKey = 'historyPending:zzz-valid:1';
+  pending[validKey] = makeMessage({ batchId: 'zzz-valid', urlIndex: 1 });
+  const storageLocal = createStorage(pending);
+  const originalRemove = storageLocal.remove.bind(storageLocal);
+  storageLocal.remove = async (key) => {
+    if (poisonKeys.has(key)) throw new Error('poison cleanup unavailable');
+    return originalRemove(key);
+  };
+  const attempts = [];
+  const service = createCommentHistoryService({
+    repository: {
+      async upsertRecord() {
+        throw new Error('retry must use the atomic pending path');
+      },
+      async upsertPendingUnlessLive(bundle) {
+        attempts.push(bundle.comment.id);
+        return true;
+      }
+    },
+    storageLocal
+  });
+
+  assert.deepEqual(await service.retryPendingWrites(), {
+    retried: 25,
+    saved: 1,
+    pending: 25
+  });
+  assert.deepEqual(attempts, ['zzz-valid:1']);
+  assert.equal(Object.hasOwn(storageLocal.data, validKey), false);
 });
 
 test('queue maintenance failures never downgrade an already durable direct save', async () => {

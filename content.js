@@ -3397,6 +3397,9 @@
               await reportSuccessToBatch(text, history);
             }
           } else {
+            if (_batchCtx) {
+              clearBatchSubmitContext();
+            }
             setStatus('自动提交失败：' + (result.error || '未知错误') + '，请手动提交', '#f97373');
           }
         console.log('[AutoComment] >>>[7b] shouldAutoSubmit 为 false，仅填充文案');
@@ -4039,6 +4042,7 @@
       const clickResult = await clickCommentSubmitButton();
       console.log('[content] 点击结果:', clickResult);
       if (!clickResult.success) {
+        clearBatchSubmitContext();
         throw new Error(clickResult.error || '提交按钮点击失败');
       }
 

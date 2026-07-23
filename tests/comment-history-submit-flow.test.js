@@ -118,10 +118,10 @@ test('forwards one captured history payload through direct, restored, and panel 
   const panelReportIndex = panel.indexOf('reportSuccessToBatch(text, history)');
   assert.ok(panelCaptureIndex < panelClickIndex, 'panel capture must precede the click');
   assert.ok(panelClickIndex < panelReportIndex, 'panel success must reuse the pre-click payload');
-  assert.doesNotMatch(
+  assert.match(
     panel,
-    /clearBatchSubmitContext\(\)/,
-    'an ambiguous click failure must preserve the durable submit context'
+    /else \{\s*if \(_batchCtx\) \{\s*clearBatchSubmitContext\(\);\s*\}/,
+    'a definite panel no-click result must clear its pre-click success context'
   );
 });
 
@@ -171,10 +171,29 @@ test('pre-click context persistence rejects quota errors and ambiguous post-clic
     '\n  /**\n   * 等待页面关键元素加载'
   );
   const postClickFlow = taskFlow.slice(taskFlow.indexOf('const clickResult'));
+  const definiteFailure = sourceBetween(
+    'const clickResult = await clickCommentSubmitButton();',
+    '\n\n      // 检测表单是否成功提交'
+  );
+  assert.match(
+    definiteFailure,
+    /if \(!clickResult\.success\) \{\s*clearBatchSubmitContext\(\);/,
+    'a definite no-click result must clear the pre-click success context'
+  );
+  const ambiguousTimeout = sourceBetween(
+    "if (submitResult === 'timeout')",
+    '\n\n      // 页面点击成功后'
+  );
   assert.doesNotMatch(
-    postClickFlow,
+    ambiguousTimeout,
     /clearBatchSubmitContext\(\)/,
-    'post-click timeout and catch paths must not discard an ambiguous submission'
+    'a dispatched click with an ambiguous timeout must preserve its context'
+  );
+  const taskCatch = postClickFlow.slice(postClickFlow.indexOf('} catch (err) {'));
+  assert.doesNotMatch(
+    taskCatch,
+    /clearBatchSubmitContext\(\)/,
+    'the generic catch must not discard an ambiguously dispatched submission'
   );
 });
 
