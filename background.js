@@ -1,8 +1,8 @@
-// 点击扩展图标时，在当前标签页内打开/关闭浮动窗口
-chrome.action.onClicked.addListener((tab) => {
-  // 打开选项页面
-  chrome.tabs.create({ url: chrome.runtime.getURL('options.html') });
-});
+import { installLlmMessageListener } from './lib/llm-message-listener.mjs';
+import { installActionClickHandler } from './lib/action-click-handler.mjs';
+
+installLlmMessageListener(chrome);
+installActionClickHandler(chrome);
 
 /**
  * 将批量结果写入 storage（本地存储，由 batch.js 轮询读取）

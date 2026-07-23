@@ -8,6 +8,7 @@
 # Local development dependencies and editor state.
 /node_modules/
 /.idea/
+/.worktrees/
 
 # Generated extension bundles.
 /dist/*.zip
