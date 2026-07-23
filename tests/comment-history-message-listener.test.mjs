@@ -181,6 +181,48 @@ test('accepts the history page filter fields at the message top level', async ()
   });
 });
 
+test('accepts only normalized filters at export start and only session cursor at 500-row chunks', async () => {
+  const calls = [];
+  const { dispatch } = createFixture({
+    async startExport(payload) {
+      calls.push(['startExport', payload]);
+      return {};
+    },
+    async getExportChunk(payload) {
+      calls.push(['getExportChunk', payload]);
+      return {};
+    }
+  });
+
+  await dispatch({
+    type: 'HISTORY_EXPORT_START',
+    targetDomain: ' ARCHIVE.TEST ',
+    to: 123,
+    exportedBefore: 1,
+    limit: 100,
+    injected: true
+  });
+  await dispatch({
+    type: 'HISTORY_EXPORT_CHUNK',
+    exportSessionId: 'session-a',
+    cursor: { submittedAt: 50, id: 'batch-a:1', injected: true },
+    targetDomain: 'injected.test',
+    limit: 50_000
+  });
+
+  assert.deepEqual(calls, [
+    ['startExport', {
+      to: 123,
+      targetDomain: 'archive.test'
+    }],
+    ['getExportChunk', {
+      exportSessionId: 'session-a',
+      cursor: { submittedAt: 50, id: 'batch-a:1' },
+      limit: 500
+    }]
+  ]);
+});
+
 test('rejects deletion without explicit confirmation before calling the service', async () => {
   let deleteCount = 0;
   const { dispatch } = createFixture({

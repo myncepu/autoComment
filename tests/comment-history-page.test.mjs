@@ -2,12 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(dirname, '..');
-const historyModuleSource = fs.readFileSync(path.join(projectRoot, 'history.js'), 'utf8');
+const csvModuleUrl = pathToFileURL(
+  path.join(projectRoot, 'lib/comment-history-csv.mjs')
+).href;
+const historyModuleSource = fs
+  .readFileSync(path.join(projectRoot, 'history.js'), 'utf8')
+  .replace("'./lib/comment-history-csv.mjs'", `'${csvModuleUrl}'`);
 const {
   advancePagination,
   buildAnchorsRequest,
@@ -17,6 +22,7 @@ const {
   buildNotificationHistoryFilter,
   bootHistoryPage,
   createPaginationState,
+  downloadCsvPart,
   localDayEnd,
   localDayStart,
   retreatPagination,
@@ -139,6 +145,147 @@ test('builds lazy anchor and explicitly confirmed deletion request shapes', () =
   });
 });
 
+test('downloads a CSV Blob and always revokes its completed object URL', () => {
+  const document = historyDocument();
+  const calls = [];
+  class BlobFixture {
+    constructor(parts, options) {
+      this.parts = parts;
+      this.options = options;
+      calls.push(['blob', parts, options]);
+    }
+  }
+  const urlApi = {
+    createObjectURL(blob) {
+      calls.push(['create', blob]);
+      return 'blob:csv-part';
+    },
+    revokeObjectURL(url) {
+      calls.push(['revoke', url]);
+    }
+  };
+  const originalCreateElement = document.createElement.bind(document);
+  document.createElement = (tagName) => {
+    const element = originalCreateElement(tagName);
+    if (tagName === 'a') {
+      element.click = () => calls.push(['click', element.download, element.href]);
+    }
+    return element;
+  };
+
+  downloadCsvPart(document, ['\ufeffheader\r\n', 'row\r\n'], 'part-001.csv', {
+    BlobCtor: BlobFixture,
+    urlApi
+  });
+
+  assert.deepEqual(calls.map(([name]) => name), ['blob', 'create', 'click', 'revoke']);
+  assert.deepEqual(calls[0].slice(1), [
+    ['\ufeffheader\r\n', 'row\r\n'],
+    { type: 'text/csv;charset=utf-8' }
+  ]);
+  assert.deepEqual(calls[2], ['click', 'part-001.csv', 'blob:csv-part']);
+});
+
+test('exports session chunks into bounded parts then sends only confirmed session deletion', async () => {
+  const document = historyDocument();
+  document.getElementById('targetDomain').value = 'archive.test';
+  const requests = [];
+  const downloads = [];
+  let chunkNumber = 0;
+  const bundles = [
+    { comment: record('batch-a:3', 'Three'), anchors: [] },
+    { comment: record('batch-a:2', 'Two'), anchors: [] },
+    { comment: record('batch-a:1', 'One'), anchors: [] }
+  ];
+  const requestMessage = async (message) => {
+    requests.push(message);
+    if (message.type === 'HISTORY_SUMMARY') return {};
+    if (message.type === 'HISTORY_ARCHIVE_EVENTS') return [];
+    if (message.type === 'HISTORY_LIST') return { records: [], nextCursor: null };
+    if (message.type === 'HISTORY_EXPORT_START') {
+      return {
+        exportSessionId: 'export-session-a',
+        exportedBefore: Date.UTC(2026, 6, 24),
+        expectedCount: 3,
+        criteria: { targetDomain: 'archive.test' }
+      };
+    }
+    if (message.type === 'HISTORY_EXPORT_CHUNK') {
+      chunkNumber += 1;
+      return chunkNumber === 1
+        ? {
+            records: bundles.slice(0, 2),
+            nextCursor: { submittedAt: 100, id: 'batch-a:2' }
+          }
+        : { records: bundles.slice(2), nextCursor: null };
+    }
+    if (message.type === 'HISTORY_EXPORT_FINISH') return {};
+    if (message.type === 'HISTORY_DELETE_CONFIRMED') {
+      return { deletedCount: 3 };
+    }
+    throw new Error(`Unexpected request: ${message.type}`);
+  };
+
+  bootHistoryPage(document, {
+    requestMessage,
+    search: '',
+    estimateStorage: async () => 0,
+    rowsPerPart: 2,
+    downloadPart(parts, filename) {
+      downloads.push({ csv: parts.join(''), filename });
+    }
+  });
+  await nextTurn();
+  document.getElementById('exportHistoryBtn').click();
+  await nextTurn();
+  await nextTurn();
+
+  const exportRequests = requests.filter(({ type }) => type.startsWith('HISTORY_EXPORT'));
+  assert.deepEqual(exportRequests[0], {
+    type: 'HISTORY_EXPORT_START',
+    targetDomain: 'archive.test',
+    limit: 50
+  });
+  assert.deepEqual(exportRequests[1], {
+    type: 'HISTORY_EXPORT_CHUNK',
+    exportSessionId: 'export-session-a'
+  });
+  assert.deepEqual(exportRequests[2], {
+    type: 'HISTORY_EXPORT_CHUNK',
+    exportSessionId: 'export-session-a',
+    cursor: { submittedAt: 100, id: 'batch-a:2' }
+  });
+  assert.equal(downloads.length, 2);
+  assert.match(downloads[0].csv, /^\ufeffid,batchId/);
+  assert.match(downloads[0].csv, /batch-a:3/);
+  assert.match(downloads[0].csv, /batch-a:2/);
+  assert.doesNotMatch(downloads[0].csv, /batch-a:1/);
+  assert.match(downloads[1].csv, /^\ufeffid,batchId/);
+  assert.match(downloads[1].csv, /batch-a:1/);
+  assert.deepEqual(exportRequests[3], {
+    type: 'HISTORY_EXPORT_FINISH',
+    exportSessionId: 'export-session-a',
+    filenames: [
+      'comment-history-all-20260724-part-001.csv',
+      'comment-history-all-20260724-part-002.csv'
+    ]
+  });
+  assert.equal(document.getElementById('confirmDeleteBtn').hidden, false);
+  assert.equal(document.getElementById('confirmDeleteBtn').disabled, false);
+  assert.match(document.getElementById('exportStatus').textContent, /已处理 3 条，共 2 个文件/);
+
+  document.getElementById('confirmDeleteBtn').click();
+  await nextTurn();
+  assert.deepEqual(
+    requests.find(({ type }) => type === 'HISTORY_DELETE_CONFIRMED'),
+    {
+      type: 'HISTORY_DELETE_CONFIRMED',
+      confirmed: true,
+      exportSessionId: 'export-session-a'
+    }
+  );
+});
+
 test('editing a form field without Apply keeps Next bound to the active filter snapshot', async () => {
   const document = historyDocument();
   document.getElementById('targetDomain').value = 'original.example';
@@ -254,7 +401,8 @@ test('history layout includes summaries, indexed filters, pagination, archive an
     'nextPageBtn',
     'archiveTableBody',
     'exportHistoryBtn',
-    'confirmDeleteBtn'
+    'confirmDeleteBtn',
+    'exportStatus'
   ]) {
     assert.match(html, new RegExp(`id="${id}"`));
   }

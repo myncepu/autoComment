@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createCommentHistoryService } from '../lib/comment-history-service.mjs';
+import { buildCsvPartName } from '../lib/comment-history-csv.mjs';
 
 function makeMessage(overrides = {}) {
   return {
@@ -298,4 +299,263 @@ test('exposes repository-backed history queries with the injected clock', async 
     ['getRetentionSummary', 1721000000100],
     ['listArchiveEvents']
   ]);
+});
+
+function createExportRepository({
+  count = 2,
+  expiredCount = count,
+  chunk = { records: [], nextCursor: null },
+  deletedCount = count
+} = {}) {
+  const meta = new Map();
+  const calls = [];
+  return {
+    calls,
+    meta,
+    async countRecords(criteria) {
+      calls.push(['countRecords', criteria]);
+      const expiryBound = criteria.to;
+      return Number.isFinite(expiryBound) && expiryBound <= Date.UTC(2026, 3, 25, 12)
+        ? expiredCount
+        : count;
+    },
+    async getExportChunk(criteria) {
+      calls.push(['getExportChunk', criteria]);
+      return chunk;
+    },
+    async deleteConfirmed(criteria, archiveEvent) {
+      calls.push(['deleteConfirmed', criteria, archiveEvent]);
+      return deletedCount;
+    },
+    async getMeta(key) {
+      calls.push(['getMeta', key]);
+      return structuredClone(meta.get(key));
+    },
+    async setMeta(key, value) {
+      calls.push(['setMeta', key, value]);
+      meta.set(key, structuredClone(value));
+    }
+  };
+}
+
+const EXPORT_NOW = Date.UTC(2026, 6, 24, 12);
+const OLD_TO = EXPORT_NOW - 90 * 24 * 60 * 60 * 1000;
+
+async function finalizedExport(service, criteria = { to: OLD_TO }) {
+  const started = await service.startExport(criteria);
+  const filenames = Array.from(
+    { length: Math.max(1, Math.ceil(started.expectedCount / 50_000)) },
+    (_, index) => buildCsvPartName({
+      ...started.criteria,
+      exportedBefore: started.exportedBefore,
+      part: index + 1
+    })
+  );
+  await service.finishExport({
+    exportSessionId: started.exportSessionId,
+    filenames
+  });
+  return started;
+}
+
+test('stores one export snapshot descriptor and serves only 500-row session chunks', async () => {
+  const repository = createExportRepository({
+    count: 3,
+    chunk: {
+      records: [{ comment: { id: 'batch-a:7' }, anchors: [] }],
+      nextCursor: { submittedAt: 100, id: 'batch-a:7' }
+    }
+  });
+  const service = createCommentHistoryService({
+    repository,
+    storageLocal: createStorage(),
+    now: () => EXPORT_NOW,
+    createExportSessionId: () => 'export-session-a'
+  });
+
+  assert.deepEqual(await service.startExport({
+    targetDomain: ' TARGET.TEST ',
+    to: OLD_TO,
+    limit: 1,
+    injected: true
+  }), {
+    exportSessionId: 'export-session-a',
+    exportedBefore: EXPORT_NOW,
+    expectedCount: 3,
+    criteria: {
+      to: OLD_TO,
+      targetDomain: 'target.test'
+    }
+  });
+  assert.deepEqual(repository.meta.get('historyExport:export-session-a'), {
+    exportSessionId: 'export-session-a',
+    criteria: {
+      to: OLD_TO,
+      targetDomain: 'target.test'
+    },
+    exportedBefore: EXPORT_NOW,
+    expectedCount: 3,
+    startedAt: EXPORT_NOW,
+    filenames: [],
+    finalizedAt: null,
+    consumedAt: null
+  });
+
+  const cursor = { submittedAt: 100, id: 'batch-a:7' };
+  assert.deepEqual(await service.getExportChunk({
+    exportSessionId: 'export-session-a',
+    cursor,
+    limit: 50_000,
+    targetDomain: 'injected.test'
+  }), {
+    records: [{ comment: { id: 'batch-a:7' }, anchors: [] }],
+    nextCursor: cursor
+  });
+  assert.deepEqual(repository.calls.find(([name]) => name === 'getExportChunk')[1], {
+    to: OLD_TO,
+    targetDomain: 'target.test',
+    exportedBefore: EXPORT_NOW,
+    cursor,
+    limit: 500
+  });
+});
+
+test('requires explicit deletion confirmation even for a finalized export', async () => {
+  const repository = createExportRepository();
+  const service = createCommentHistoryService({
+    repository,
+    storageLocal: createStorage(),
+    now: () => EXPORT_NOW,
+    createExportSessionId: () => 'export-session-a'
+  });
+  const started = await finalizedExport(service);
+
+  await assert.rejects(
+    service.deleteConfirmed({
+      confirmed: false,
+      exportSessionId: started.exportSessionId
+    }),
+    (error) => error.code === 'CONFIRMATION_REQUIRED'
+  );
+  assert.equal(repository.calls.some(([name]) => name === 'deleteConfirmed'), false);
+});
+
+test('finalizes only the canonical complete filename set for every 50,000-row part', async () => {
+  const repository = createExportRepository({ count: 50_001 });
+  const service = createCommentHistoryService({
+    repository,
+    storageLocal: createStorage(),
+    now: () => EXPORT_NOW,
+    createExportSessionId: () => 'export-session-a'
+  });
+  const started = await service.startExport({ to: OLD_TO });
+
+  await assert.rejects(
+    service.finishExport({
+      exportSessionId: started.exportSessionId,
+      filenames: ['comment-history-all-20260425-part-001.csv']
+    }),
+    (error) => error.code === 'EXPORT_FILENAMES_MISMATCH'
+  );
+  assert.equal(repository.meta.get('historyExport:export-session-a').finalizedAt, null);
+});
+
+test('rejects a finalized export whose matching set contains a record under 90 days old', async () => {
+  const repository = createExportRepository({ count: 2, expiredCount: 1 });
+  const service = createCommentHistoryService({
+    repository,
+    storageLocal: createStorage(),
+    now: () => EXPORT_NOW,
+    createExportSessionId: () => 'export-session-a'
+  });
+  const started = await finalizedExport(service, {});
+
+  await assert.rejects(
+    service.deleteConfirmed({
+      confirmed: true,
+      exportSessionId: started.exportSessionId
+    }),
+    (error) => error.code === 'RETENTION_NOT_EXPIRED'
+  );
+  assert.equal(repository.calls.some(([name]) => name === 'deleteConfirmed'), false);
+});
+
+test('rejects deletion when the exported set count changed', async () => {
+  const repository = createExportRepository({ count: 2 });
+  const service = createCommentHistoryService({
+    repository,
+    storageLocal: createStorage(),
+    now: () => EXPORT_NOW,
+    createExportSessionId: () => 'export-session-a'
+  });
+  const started = await finalizedExport(service);
+  repository.countRecords = async (criteria) => {
+    repository.calls.push(['countRecords', criteria]);
+    return 1;
+  };
+
+  await assert.rejects(
+    service.deleteConfirmed({
+      confirmed: true,
+      exportSessionId: started.exportSessionId
+    }),
+    (error) => error.code === 'EXPORT_SET_CHANGED'
+  );
+  assert.equal(repository.calls.some(([name]) => name === 'deleteConfirmed'), false);
+});
+
+test('deletes exact expired snapshot criteria, archives filenames, and consumes the session', async () => {
+  const repository = createExportRepository({ count: 2, deletedCount: 2 });
+  const service = createCommentHistoryService({
+    repository,
+    storageLocal: createStorage(),
+    now: () => EXPORT_NOW,
+    createExportSessionId: () => 'export-session-a'
+  });
+  const started = await finalizedExport(service, {
+    from: 1,
+    to: OLD_TO,
+    hrefDomain: 'links.test'
+  });
+
+  assert.deepEqual(await service.deleteConfirmed({
+    confirmed: true,
+    exportSessionId: started.exportSessionId
+  }), {
+    deletedCount: 2,
+    exportSessionId: 'export-session-a'
+  });
+  const deleteCall = repository.calls.find(([name]) => name === 'deleteConfirmed');
+  assert.deepEqual(deleteCall[1], {
+    from: 1,
+    to: OLD_TO,
+    hrefDomain: 'links.test',
+    exportedBefore: EXPORT_NOW
+  });
+  assert.deepEqual(deleteCall[2], {
+    id: 'archive:export-session-a',
+    rangeStart: 1,
+    rangeEnd: OLD_TO,
+    recordCount: 2,
+    fileNames: ['comment-history-19700101-20260425-part-001.csv'],
+    exportStartedAt: EXPORT_NOW,
+    deleteConfirmedAt: EXPORT_NOW,
+    deletedAt: EXPORT_NOW
+  });
+  assert.equal(
+    repository.meta.get('historyExport:export-session-a').consumedAt,
+    EXPORT_NOW
+  );
+
+  await assert.rejects(
+    service.deleteConfirmed({
+      confirmed: true,
+      exportSessionId: started.exportSessionId
+    }),
+    (error) => error.code === 'EXPORT_SESSION_CONSUMED'
+  );
+  assert.equal(
+    repository.calls.filter(([name]) => name === 'deleteConfirmed').length,
+    1
+  );
 });

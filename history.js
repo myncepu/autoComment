@@ -1,3 +1,10 @@
+import {
+  COMMENT_CSV_HEADER,
+  CSV_ROWS_PER_PART,
+  buildCommentCsvRow,
+  buildCsvPartName
+} from './lib/comment-history-csv.mjs';
+
 const DAY_MS = 24 * 60 * 60 * 1000;
 const EXPIRY_DAYS = 90;
 
@@ -150,6 +157,25 @@ export function retreatPagination(state) {
 export function setStoredText(element, value) {
   element.textContent = value == null ? '' : String(value);
   return element;
+}
+
+export function downloadCsvPart(documentRef, parts, filename, {
+  BlobCtor = Blob,
+  urlApi = URL
+} = {}) {
+  const blob = new BlobCtor(parts, { type: 'text/csv;charset=utf-8' });
+  const objectUrl = urlApi.createObjectURL(blob);
+  try {
+    const link = documentRef.createElement('a');
+    link.href = objectUrl;
+    link.download = filename;
+    link.hidden = true;
+    documentRef.body.appendChild(link);
+    link.click();
+    link.remove();
+  } finally {
+    urlApi.revokeObjectURL(objectUrl);
+  }
 }
 
 function sendHistoryMessage(message) {
@@ -402,7 +428,8 @@ function getElements(documentRef) {
     'pageStatus',
     'archiveTableBody',
     'exportHistoryBtn',
-    'confirmDeleteBtn'
+    'confirmDeleteBtn',
+    'exportStatus'
   ];
   return Object.fromEntries(ids.map((id) => [id, documentRef.getElementById(id)]));
 }
@@ -420,7 +447,9 @@ export function bootHistoryPage(documentRef = document, {
   requestMessage = sendHistoryMessage,
   search = typeof location !== 'undefined' ? location.search : '',
   now = Date.now(),
-  estimateStorage: estimateStorageForPage = estimateStorage
+  estimateStorage: estimateStorageForPage = estimateStorage,
+  rowsPerPart = CSV_ROWS_PER_PART,
+  downloadPart: downloadPartOverride
 } = {}) {
   const elements = getElements(documentRef);
   if (Object.values(elements).some((element) => !element)) return;
@@ -428,6 +457,8 @@ export function bootHistoryPage(documentRef = document, {
   let pagination = createPaginationState();
   let nextCursor = null;
   let requestGeneration = 0;
+  let completedExportSessionId = '';
+  let exportInProgress = false;
   let activeFilter = Object.freeze({
     ...buildHistoryFilter(formValues(elements)),
     ...buildNotificationHistoryFilter(search, now)
@@ -482,6 +513,113 @@ export function bootHistoryPage(documentRef = document, {
     );
   }
 
+  function setExportStatus(message, isError = false) {
+    setStoredText(elements.exportStatus, message);
+    elements.exportStatus.classList.toggle('error', isError);
+  }
+
+  function resetConfirmedDelete() {
+    completedExportSessionId = '';
+    elements.confirmDeleteBtn.disabled = true;
+    elements.confirmDeleteBtn.hidden = true;
+  }
+
+  async function exportActiveSnapshot() {
+    if (exportInProgress) return;
+    exportInProgress = true;
+    elements.exportHistoryBtn.disabled = true;
+    resetConfirmedDelete();
+    setExportStatus('正在准备导出…');
+
+    let csvParts = [COMMENT_CSV_HEADER];
+    let currentPartRows = 0;
+    let processedCount = 0;
+    const filenames = [];
+    try {
+      const started = await requestMessage({
+        type: 'HISTORY_EXPORT_START',
+        ...activeFilter
+      });
+      const downloadPart = downloadPartOverride
+        || ((parts, filename) => downloadCsvPart(documentRef, parts, filename));
+
+      async function flushPart() {
+        const filename = buildCsvPartName({
+          from: started.criteria?.from,
+          to: started.criteria?.to,
+          exportedBefore: started.exportedBefore,
+          part: filenames.length + 1
+        });
+        await downloadPart(csvParts, filename);
+        filenames.push(filename);
+        csvParts = [COMMENT_CSV_HEADER];
+        currentPartRows = 0;
+      }
+
+      let cursor = null;
+      do {
+        const page = await requestMessage({
+          type: 'HISTORY_EXPORT_CHUNK',
+          exportSessionId: started.exportSessionId,
+          ...(cursor ? { cursor } : {})
+        });
+        const bundles = Array.isArray(page?.records) ? page.records : [];
+        for (const bundle of bundles) {
+          csvParts.push(buildCommentCsvRow(bundle?.comment, bundle?.anchors));
+          currentPartRows += 1;
+          processedCount += 1;
+          if (currentPartRows === rowsPerPart) await flushPart();
+        }
+        cursor = normalizedCursor(page?.nextCursor);
+        setExportStatus(
+          `正在导出：已处理 ${processedCount} / ${started.expectedCount} 条，已完成 ${filenames.length} 个文件`
+        );
+      } while (cursor);
+
+      if (processedCount !== started.expectedCount) {
+        throw new Error('导出记录集合已变化，请重新导出。');
+      }
+      if (currentPartRows > 0 || processedCount === 0) await flushPart();
+
+      await requestMessage({
+        type: 'HISTORY_EXPORT_FINISH',
+        exportSessionId: started.exportSessionId,
+        filenames
+      });
+      completedExportSessionId = started.exportSessionId;
+      elements.confirmDeleteBtn.hidden = false;
+      elements.confirmDeleteBtn.disabled = false;
+      setExportStatus(`导出完成：已处理 ${processedCount} 条，共 ${filenames.length} 个文件。`);
+    } catch (error) {
+      csvParts = [];
+      resetConfirmedDelete();
+      setExportStatus(error.message || '导出失败，请重试。', true);
+    } finally {
+      exportInProgress = false;
+      elements.exportHistoryBtn.disabled = false;
+    }
+  }
+
+  async function deleteCompletedExport() {
+    if (!completedExportSessionId) return;
+    elements.confirmDeleteBtn.disabled = true;
+    elements.exportHistoryBtn.disabled = true;
+    setExportStatus('正在核对并删除已归档记录…');
+    try {
+      const result = await requestMessage(
+        buildConfirmedDeleteRequest(completedExportSessionId)
+      );
+      resetConfirmedDelete();
+      setExportStatus(`已删除 ${result?.deletedCount || 0} 条已归档记录。`);
+      await Promise.all([loadOverview(), loadPage()]);
+    } catch (error) {
+      elements.confirmDeleteBtn.disabled = false;
+      setExportStatus(error.message || '删除失败，请重新导出后再试。', true);
+    } finally {
+      elements.exportHistoryBtn.disabled = false;
+    }
+  }
+
   function commitActiveFilter() {
     activeFilter = Object.freeze(buildHistoryFilter(formValues(elements)));
     pagination = createPaginationState();
@@ -509,7 +647,11 @@ export function bootHistoryPage(documentRef = document, {
     pagination = advancePagination(pagination, nextCursor);
     loadPage();
   });
+  elements.exportHistoryBtn.addEventListener('click', exportActiveSnapshot);
+  elements.confirmDeleteBtn.addEventListener('click', deleteCompletedExport);
 
+  elements.exportHistoryBtn.disabled = false;
+  elements.confirmDeleteBtn.hidden = true;
   loadOverview();
   loadPage();
 }
