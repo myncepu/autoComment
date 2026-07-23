@@ -110,7 +110,124 @@ Result: whitespace check passed; 77 passing, 0 failing.
 
 ## Concerns
 
-No known blockers. The page integration guards are source-level because
-`batch.js` is a DOM/Chrome extension entry point; lifecycle behavior of the two
-stateful primitives remains covered by their existing unit tests, while the
-added late-create guard protects the page-specific ownership rule.
+No known blockers. The initial page wiring and late-create ownership guards are
+source-level because `batch.js` is a DOM/Chrome extension entry point;
+lifecycle behavior of the two stateful primitives remains covered by their
+existing unit tests, while the late-create guard protects the page-specific
+ownership rule.
+
+## Review Fix: Pending-Create Timeout, Send Ownership, and Missing Item
+
+### RED
+
+Added three executable page-lifecycle regressions to
+`tests/batch-multi-window-integration.test.js` before changing production code:
+
+- a never-resolving `windows.create` must start the timeout interval as soon as
+  its opening activity is recorded;
+- an old batch's deferred `BATCH_HANDLE` rejection must not record, close, or
+  settle a replacement batch's same-index task;
+- a missing `parsedUrls[urlIndex]` must still create a terminal failure entry
+  with safe fields and advance processed counters.
+
+```bash
+node --test tests/batch-multi-window-integration.test.js
+```
+
+Result: 6 passing and 3 failing, as expected:
+
+- timeout interval count was `0` instead of `1`;
+- the stale rejection closed one replacement-batch window instead of zero;
+- the missing-item path recorded zero results instead of one.
+
+### GREEN
+
+Implemented the three lifecycle fixes:
+
+- `openWorkerWindow` now starts timeout checking immediately after recording
+  the opening reservation, before awaiting `windowManager.create`.
+- Worker-message ownership captures the issuing batch ID, scheduler, window
+  manager, and activity. `canContinueActivity` requires all three current
+  objects to match and requires the issuing manager to still track that exact
+  activity. The initial send, ready retry, exhausted-retry failure, post-PING
+  send, and rejected-`BATCH_HANDLE` failure all use this ownership gate.
+- The dispatched `BATCH_HANDLE` payload uses the captured batch ID rather than
+  mutable page state.
+- The late window-create branch also includes scheduler identity, so a resumed
+  scheduler cannot be settled by an earlier create callback.
+- `recordTaskResult` converts a missing item to `fail`, stores empty URL/domain
+  defaults, clears AI content, supplies `URL 数据不存在` when needed, increments
+  `failCount`, updates pending count, and preserves ordinary result behavior
+  when the item exists.
+
+Each regression was run independently after its fix:
+
+```bash
+node --test --test-name-pattern="opening reservations" \
+  tests/batch-multi-window-integration.test.js
+node --test --test-name-pattern="stale BATCH_HANDLE" \
+  tests/batch-multi-window-integration.test.js
+node --test --test-name-pattern="missing parsed URL" \
+  tests/batch-multi-window-integration.test.js
+```
+
+Result: 1 passing, 0 failing for each command.
+
+Complete integration and syntax check:
+
+```bash
+node --check batch.js
+node --test tests/batch-multi-window-integration.test.js
+```
+
+Result: syntax passed; 9 passing, 0 failing.
+
+Focused verification:
+
+```bash
+git diff --check
+node --test \
+  tests/batch-scheduler.test.mjs \
+  tests/batch-window-manager.test.mjs \
+  tests/batch-multi-window-integration.test.js
+```
+
+Result: whitespace check passed; 23 passing, 0 failing.
+
+Full verification:
+
+```bash
+npm test
+```
+
+Result: 80 passing, 0 failing.
+
+### Changed Files
+
+- `batch.js`
+- `tests/batch-multi-window-integration.test.js`
+- `.superpowers/sdd/task-7-report.md`
+
+### Review Self-Check
+
+- With every concurrency slot blocked in `windows.create`, scheduler active
+  indices and `openingActivities` now remain visible to the running timeout
+  interval. Timeout finalization settles each reservation and can refill
+  without waiting for any create promise.
+- A create that resolves after its timeout finds the recorded result, closes
+  through its issuing manager, and idempotently settles only its issuing
+  scheduler.
+- No message retry or failure callback can act after clear/start or stop/resume
+  replaces the scheduler, even if the new batch uses the same URL index.
+- Exact tracked-activity comparison also rejects callbacks after manual close
+  or expected close, before another activity could be affected.
+- Missing-item finalization now contributes exactly one failure to processed
+  totals, allowing completion rather than leaving a settled but uncounted
+  index.
+- Existing close-before-settle/refill ordering, duplicate-result protection,
+  counter branches, CSV mapping, illegal-site handling, stop/resume behavior,
+  and terminal completion guards are unchanged.
+
+### Review Concerns
+
+None.

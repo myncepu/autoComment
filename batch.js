@@ -654,12 +654,14 @@ async function openWorkerWindow(urlIndex) {
   }
 
   const activityBatchId = batchId;
+  const activityScheduler = scheduler;
   const activityWindowManager = windowManager;
   const opening = {
     batchId: activityBatchId,
     startTime: Date.now()
   };
   openingActivities.set(urlIndex, opening);
+  startTimeoutChecker();
   try {
     const activity = await windowManager.create({
       batchId: activityBatchId,
@@ -667,6 +669,7 @@ async function openWorkerWindow(urlIndex) {
       url: item.url
     });
     const isCurrentBatch = batchId === activityBatchId &&
+      scheduler === activityScheduler &&
       windowManager === activityWindowManager;
     if (openingActivities.get(urlIndex) === opening) {
       openingActivities.delete(urlIndex);
@@ -684,15 +687,20 @@ async function openWorkerWindow(urlIndex) {
       return;
     }
     highlightPreviewRow(urlIndex, 'processing');
-    startTimeoutChecker();
     updateStatsUI();
-    sendTaskWhenReady(activity);
+    sendTaskWhenReady(activity, {
+      batchId: activityBatchId,
+      scheduler: activityScheduler,
+      windowManager: activityWindowManager,
+      activity
+    });
   } catch (error) {
     if (openingActivities.get(urlIndex) === opening) {
       openingActivities.delete(urlIndex);
     }
     if (
       batchId !== activityBatchId ||
+      scheduler !== activityScheduler ||
       windowManager !== activityWindowManager
     ) {
       return;
@@ -707,18 +715,32 @@ async function openWorkerWindow(urlIndex) {
   }
 }
 
-function sendTaskWhenReady(activity, retries = 0) {
+function ownsCurrentActivity(activity, ownership) {
+  return Boolean(
+    ownership &&
+    ownership.activity === activity &&
+    batchId === ownership.batchId &&
+    scheduler === ownership.scheduler &&
+    windowManager === ownership.windowManager &&
+    ownership.windowManager.getByIndex(activity.urlIndex) === activity
+  );
+}
+
+function canContinueActivity(activity, ownership) {
+  return status === 'running' &&
+    !isTerminated &&
+    ownsCurrentActivity(activity, ownership) &&
+    !localResults.some(
+      (entry) => entry.originalIndex === activity.urlIndex
+    );
+}
+
+function sendTaskWhenReady(activity, ownership, retries = 0) {
   const { tabId, urlIndex, url } = activity;
-  if (
-    status !== 'running' ||
-    isTerminated ||
-    localResults.some((entry) => entry.originalIndex === urlIndex) ||
-    windowManager.getByIndex(urlIndex) !== activity
-  ) {
-    return;
-  }
+  if (!canContinueActivity(activity, ownership)) return;
+
   if (retries > 20) {
-    if (!localResults.some((entry) => entry.originalIndex === urlIndex)) {
+    if (canContinueActivity(activity, ownership)) {
       void finalizeTask(
         urlIndex,
         'fail',
@@ -730,17 +752,11 @@ function sendTaskWhenReady(activity, retries = 0) {
   }
 
   chrome.tabs.sendMessage(tabId, { type: 'PING' }).then(() => {
-    if (
-      status !== 'running' ||
-      isTerminated ||
-      localResults.some((entry) => entry.originalIndex === urlIndex) ||
-      windowManager.getByIndex(urlIndex) !== activity
-    ) {
-      return;
-    }
+    if (!canContinueActivity(activity, ownership)) return;
+
     return chrome.tabs.sendMessage(tabId, {
       type: 'BATCH_HANDLE',
-      batchId,
+      batchId: ownership.batchId,
       urlIndex,
       url
     }).then((response) => {
@@ -748,7 +764,7 @@ function sendTaskWhenReady(activity, retries = 0) {
         console.warn('[batch] content.js 响应 ok=false 或无响应:', response);
       }
     }).catch((error) => {
-      if (!localResults.some((entry) => entry.originalIndex === urlIndex)) {
+      if (canContinueActivity(activity, ownership)) {
         void finalizeTask(
           urlIndex,
           'fail',
@@ -758,7 +774,11 @@ function sendTaskWhenReady(activity, retries = 0) {
       }
     });
   }).catch(() => {
-    setTimeout(() => sendTaskWhenReady(activity, retries + 1), 500);
+    if (!canContinueActivity(activity, ownership)) return;
+    setTimeout(
+      () => sendTaskWhenReady(activity, ownership, retries + 1),
+      500
+    );
   });
 }
 
@@ -769,45 +789,49 @@ function recordTaskResult(urlIndex, result, aiContent, errorMessage, elapsed) {
     aiContentLen: aiContent ? aiContent.length : 0,
     errorMessage
   });
-  const item = parsedUrls[urlIndex];
-  if (!item) {
-    console.log('[batch] recordTaskResult: item 不存在, urlIndex=', urlIndex);
-    return;
-  }
-
   if (localResults.some((r) => r.originalIndex === urlIndex)) {
     console.log('[batch] recordTaskResult: 重复调用, urlIndex=', urlIndex);
     return;
   }
 
+  const item = parsedUrls[urlIndex] || null;
+  const recordedResult = item ? result : 'fail';
+  const recordedAiContent = item ? aiContent : null;
+  const recordedErrorMessage = item
+    ? errorMessage
+    : errorMessage || 'URL 数据不存在';
+  if (!item) {
+    console.log('[batch] recordTaskResult: item 不存在，记录安全失败结果, urlIndex=', urlIndex);
+  }
+
   const resultEntry = {
     originalIndex: urlIndex,
-    url: item.url,
-    sourceDomain: item.sourceDomain || '',
-    result: result,
-    aiContent: aiContent || null,
-    errorMessage: errorMessage || null,
+    url: item?.url || '',
+    sourceDomain: item?.sourceDomain || '',
+    result: recordedResult,
+    aiContent: recordedAiContent || null,
+    errorMessage: recordedErrorMessage || null,
     timestamp: Date.now(),
     elapsed,
-    originalRow: item.originalRow || null  // 保存原始行数据用于导出
+    originalRow: item?.originalRow || null  // 保存原始行数据用于导出
   };
 
   localResults.push(resultEntry);
 
-  if (result === 'success') {
+  if (recordedResult === 'success') {
     successCount++;
     highlightPreviewRow(urlIndex, 'success');
-  } else if (result === 'skipped') {
+  } else if (recordedResult === 'skipped') {
     skippedCount++;
     skippedIndices.add(urlIndex);
     highlightPreviewRow(urlIndex, 'skipped');
-  } else if (result === 'no_comment_box') {
+  } else if (recordedResult === 'no_comment_box') {
     noCommentBoxCount++;
     highlightPreviewRow(urlIndex, 'no_comment_box');
-  } else if (result === 'manual_required') {
+  } else if (recordedResult === 'manual_required') {
     manualRequiredCount++;
     highlightPreviewRow(urlIndex, 'manual_required');
-  } else if (result === 'blocked_illegal') {
+  } else if (recordedResult === 'blocked_illegal') {
     blockedIllegalCount++;
     highlightPreviewRow(urlIndex, 'blocked_illegal');
   } else {
@@ -825,7 +849,7 @@ function recordTaskResult(urlIndex, result, aiContent, errorMessage, elapsed) {
   const processedCount = getProcessedCount();
   console.log('[batch] recordTaskResult 完成:', {
     urlIndex,
-    result,
+    result: recordedResult,
     successCount,
     failCount,
     skippedCount,
