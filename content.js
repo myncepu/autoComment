@@ -4298,44 +4298,19 @@
    */
   async function writePendingResult(batchId, urlIndex, url, result, aiContent, errorMessage) {
     console.log('[content] writePendingResult >>>', { batchId, urlIndex, url, result, aiContentLen: aiContent ? aiContent.length : 0, errorMessage });
-    if (typeof chrome === 'undefined' || !chrome.storage) {
-      console.warn('[content] writePendingResult: chrome.storage 不可用');
-      return;
+    const response = await chrome.runtime.sendMessage({
+      type: 'BATCH_PERSIST_PENDING_RESULT',
+      batchId,
+      urlIndex,
+      url: url || '',
+      result,
+      aiContent,
+      errorMessage
+    });
+    if (!response?.ok) {
+      throw new Error(response?.error || '批处理待确认结果保存失败');
     }
-    try {
-      const data = await new Promise((resolve) => {
-        chrome.storage.local.get(['batchResults', 'batchReportedUrls'], (d) => resolve(d));
-      });
-      const results = Array.isArray(data.batchResults) ? data.batchResults : [];
-      const entry = {
-        batchId,
-        urlIndex,
-        url: url || '',
-        result,
-        aiContent,
-        errorMessage,
-        timestamp: Date.now()
-      };
-      const existingIndex = results.findIndex((item) => item.batchId === batchId && item.urlIndex === urlIndex);
-      if (existingIndex >= 0) {
-        results[existingIndex] = { ...results[existingIndex], ...entry };
-      } else {
-        results.push(entry);
-      }
-      if (results.length > 100) results.shift();
-      const reported = Array.isArray(data.batchReportedUrls) ? data.batchReportedUrls : [];
-      const urlKey = `${batchId}:${urlIndex}`;
-      if (!reported.includes(urlKey)) {
-        reported.push(urlKey);
-        if (reported.length > 500) reported.shift();
-      }
-      await new Promise((resolve) => {
-        chrome.storage.local.set({ batchResults: results, batchReportedUrls: reported }, resolve);
-      });
-      console.log('[content] writePendingResult <<< 写入完成, 当前results长度:', results.length);
-    } catch (e) {
-      console.error('[content] writePendingResult 错误:', e);
-    }
+    console.log('[content] writePendingResult <<< 写入完成');
   }
 
   async function reportBatchResult(batchId, urlIndex, result, aiContent, errorMessage, pageUrl) {
