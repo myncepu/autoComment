@@ -18,3 +18,28 @@ test('Chinese policy accurately distinguishes static page access and model API d
   assert.match(policy, /API Key 只会在你请求生成文案或主动测试连接时作为授权信息发送给你配置的服务商；只有生成请求会发送上述有限的页面上下文。/);
   assert.doesNotMatch(policy, /仅在当前激活标签页上工作/);
 });
+
+test('English policy discloses local successful-comment history, retention, deletion, and permissions', () => {
+  assert.match(policy, /Last updated: <span id="last-updated">2026-07-23<\/span>/);
+  assert.match(policy, /Successful-comment history stays on this device in IndexedDB and is not sent to the AutoComment backend\./);
+  assert.match(policy, /It preserves the exact submitted comment body \(HTML and text\), target page URL and domain, promoted website URL and domain, submission time and status, batch\/task identifiers, source, and each anchor's text and raw\/resolved URL\./);
+  assert.match(policy, /This history does not separately capture names, email addresses, passwords, API keys, or other form credentials\./);
+  assert.match(policy, /History becomes eligible for cleanup after 90 days on a rolling basis, but the reminder alarm never deletes it\./);
+  assert.match(policy, /Deletion is available only after export and your explicit confirmation; canceling leaves the records untouched\./);
+  assert.match(policy, /Uninstalling the extension deletes its IndexedDB history with the rest of the extension's local data\./);
+  assert.match(policy, /<code>unlimitedStorage<\/code>.*prevents the normal extension storage quota from blocking local comment history/);
+  assert.match(policy, /<code>alarms<\/code>.*schedules local history reminders and queued-write retries; an alarm never deletes history/);
+  assert.match(policy, /<code>notifications<\/code>.*shows local reminders when history approaches or passes the 90-day cleanup threshold/);
+});
+
+test('Chinese policy discloses local successful-comment history, retention, deletion, and permissions', () => {
+  assert.match(policy, /成功评论历史仅保留在本设备的 IndexedDB 中，不会发送到 AutoComment 后端。/);
+  assert.match(policy, /它会保留实际提交的评论正文（HTML 和文本）、目标页面 URL 和域名、推广网站 URL 和域名、提交时间与状态、批次\/任务标识、来源，以及每个链接的锚文本和原始\/解析后 URL。/);
+  assert.match(policy, /该历史不会另行收集姓名、邮箱地址、密码、API Key 或其他表单凭据。/);
+  assert.match(policy, /历史记录按滚动周期在满 90 天后才具备清理资格，但提醒闹钟绝不会删除记录。/);
+  assert.match(policy, /只有先导出并由你明确确认后才会删除；取消操作会保留全部记录。/);
+  assert.match(policy, /卸载扩展会随扩展的其他本地数据一并删除其 IndexedDB 历史。/);
+  assert.match(policy, /<code>unlimitedStorage<\/code>.*避免常规扩展存储配额阻碍本地评论历史/);
+  assert.match(policy, /<code>alarms<\/code>.*安排本地历史提醒和排队写入重试；闹钟绝不会删除历史/);
+  assert.match(policy, /<code>notifications<\/code>.*在历史记录接近或超过 90 天清理阈值时显示本地提醒/);
+});

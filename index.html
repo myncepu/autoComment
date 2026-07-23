@@ -52,7 +52,7 @@
 </head>
 <body>
   <h1>Privacy Policy – AutoComment Chrome Extension</h1>
-  <p class="muted">Last updated: <span id="last-updated">2026-07-19</span></p>
+  <p class="muted">Last updated: <span id="last-updated">2026-07-23</span></p>
 
   <p>
     This privacy policy explains how the <strong>AutoComment</strong> Chrome extension
@@ -73,7 +73,7 @@
 
   <h2>2. Data we store locally</h2>
   <p>
-    The extension uses <code>chrome.storage</code> to store only the data necessary to provide its features:
+    The extension uses Chrome's browser storage APIs, including <code>chrome.storage</code> and IndexedDB, to store only the data necessary to provide its features:
   </p>
   <ul>
     <li><strong>User profile data you provide</strong> (for auto‑fill):
@@ -99,6 +99,13 @@
     <li><strong>Short-term local usage records</strong>:
       <ul>
         <li>Short‑term records about which domains recently had comments generated, to avoid re‑generating content too frequently for the same site.</li>
+      </ul>
+    </li>
+    <li><strong>Successful-comment history in IndexedDB</strong>:
+      <ul>
+        <li>Successful-comment history stays on this device in IndexedDB and is not sent to the AutoComment backend.</li>
+        <li>It preserves the exact submitted comment body (HTML and text), target page URL and domain, promoted website URL and domain, submission time and status, batch/task identifiers, source, and each anchor's text and raw/resolved URL.</li>
+        <li>This history does not separately capture names, email addresses, passwords, API keys, or other form credentials.</li>
       </ul>
     </li>
   </ul>
@@ -173,19 +180,28 @@
     <li><strong>Content-script matches</strong>: Static content scripts use <code>&lt;all_urls&gt;</code> to run on matching loaded pages, including user-initiated batch tabs, where they read the page data and fill recognized form fields described above.</li>
     <li><strong>Model API host permissions</strong>: OpenRouter has default model API host permission; saving or testing another HTTP(S) API Base URL requests optional permission only for that provider host.</li>
     <li><strong><code>storage</code></strong>: Used to store your profile data, API Base URL, model ID, locally stored API key, preferences, and cooldown records as described above.</li>
+    <li><strong><code>unlimitedStorage</code></strong>: This permission prevents the normal extension storage quota from blocking local comment history as it grows.</li>
+    <li><strong><code>alarms</code></strong>: This permission schedules local history reminders and queued-write retries; an alarm never deletes history.</li>
+    <li><strong><code>notifications</code></strong>: This permission shows local reminders when history approaches or passes the 90-day cleanup threshold.</li>
   </ul>
 
   <h2>7. Data retention</h2>
   <p>
-    All data stored by the extension is kept on your device until you remove or reset the extension, or you clear the data via the extension's options or Chrome's extension data settings.
+    Profile data, API configuration, preferences, and cooldown records are kept on your device until you change or clear them, reset the extension, or uninstall it.
   </p>
   <p>
     Short‑term "cooldown" records used to avoid regenerating content for the same domain are automatically cleaned after a limited time window.
   </p>
+  <p>
+    History becomes eligible for cleanup after 90 days on a rolling basis, but the reminder alarm never deletes it. Deletion is available only after export and your explicit confirmation; canceling leaves the records untouched.
+  </p>
+  <p>
+    Uninstalling the extension deletes its IndexedDB history with the rest of the extension's local data.
+  </p>
 
   <h2>8. Security</h2>
   <p>
-    We rely on Chrome's extension security model and <code>chrome.storage</code> for storing settings. However, no method of storage or transmission is 100% secure. You should not store highly sensitive passwords or confidential information in the extension if you are uncomfortable doing so.
+    We rely on Chrome's extension security model, <code>chrome.storage</code> for settings, and IndexedDB for comment history. However, no method of storage or transmission is 100% secure. You should not store highly sensitive passwords or confidential information in the extension if you are uncomfortable doing so.
   </p>
 
   <h2>9. Children's privacy</h2>
@@ -233,13 +249,14 @@
     </ul>
 
     <h2>二、本地存储的数据</h2>
-    <p>扩展只会在本地（通过 <code>chrome.storage</code>）存储实现功能所必需的数据：</p>
+    <p>扩展只会在本地通过 Chrome 浏览器存储 API（包括 <code>chrome.storage</code> 和 IndexedDB）存储实现功能所必需的数据：</p>
     <ul>
       <li>你在扩展中手动填写的资料：姓名/昵称、邮箱、密码、网站 URL。</li>
       <li>API Base URL 和模型 ID（保存在 <code>chrome.storage.sync</code>）。</li>
       <li>用于调用 AI 的 API Key（仅保存在 <code>chrome.storage.local</code>，不会同步或导出）。</li>
       <li>开关类偏好设置：是否自动打开浮窗、是否显示可选的外链导出控件等。</li>
       <li>用于避免在同一域名过于频繁生成文案的短期本地冷却记录（会定期清理）。</li>
+      <li>成功评论历史仅保留在本设备的 IndexedDB 中，不会发送到 AutoComment 后端。它会保留实际提交的评论正文（HTML 和文本）、目标页面 URL 和域名、推广网站 URL 和域名、提交时间与状态、批次/任务标识、来源，以及每个链接的锚文本和原始/解析后 URL。该历史不会另行收集姓名、邮箱地址、密码、API Key 或其他表单凭据。</li>
     </ul>
     <p>这些数据仅保存在你的浏览器中，不会出售，不用于投放广告。</p>
 
@@ -275,9 +292,15 @@
       <li><strong>内容脚本匹配范围</strong>：静态内容脚本通过 <code>&lt;all_urls&gt;</code> 在匹配的已加载页面运行，包括用户发起的批量处理标签页；它们会读取上述页面数据并填写识别到的表单字段。</li>
       <li><strong>模型 API 主机权限</strong>：OpenRouter 默认拥有模型 API 主机权限；保存或测试其他 HTTP(S) API Base URL 时，只会为该服务商主机请求可选权限。</li>
       <li><strong><code>storage</code></strong>：用于保存上述资料、API Base URL、模型 ID、仅本地保存的 API Key、偏好设置和冷却记录。</li>
+      <li><strong><code>unlimitedStorage</code></strong>：此权限用于避免常规扩展存储配额阻碍本地评论历史持续增长。</li>
+      <li><strong><code>alarms</code></strong>：此权限用于安排本地历史提醒和排队写入重试；闹钟绝不会删除历史。</li>
+      <li><strong><code>notifications</code></strong>：此权限用于在历史记录接近或超过 90 天清理阈值时显示本地提醒。</li>
     </ul>
 
     <h2>七、你的选择</h2>
+    <p>
+      历史记录按滚动周期在满 90 天后才具备清理资格，但提醒闹钟绝不会删除记录。只有先导出并由你明确确认后才会删除；取消操作会保留全部记录。卸载扩展会随扩展的其他本地数据一并删除其 IndexedDB 历史。
+    </p>
     <ul>
       <li>你可以随时在浏览器中禁用或卸载本扩展。</li>
       <li>你可以在扩展选项页中随时修改或清空存储的数据。</li>

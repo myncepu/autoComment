@@ -9,6 +9,7 @@
     "start": "node server.js",
     "dev": "node server.js",
     "csv:export": "node scripts/run-csv-export.js",
+    "history:benchmark": "node scripts/benchmark-comment-history.mjs",
     "pm2:start": "pm2 start server.js --name auto-comment-api",
     "pm2:stop": "pm2 stop auto-comment-api",
     "pm2:restart": "pm2 restart auto-comment-api",
