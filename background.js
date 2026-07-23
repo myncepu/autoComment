@@ -30,6 +30,9 @@ const commentHistoryRepository = {
   getRetentionSummary: (...args) => callCommentHistoryRepository('getRetentionSummary', args),
   getExportChunk: (...args) => callCommentHistoryRepository('getExportChunk', args),
   deleteConfirmed: (...args) => callCommentHistoryRepository('deleteConfirmed', args),
+  deleteExportSessionAtomic: (...args) => (
+    callCommentHistoryRepository('deleteExportSessionAtomic', args)
+  ),
   listArchiveEvents: (...args) => callCommentHistoryRepository('listArchiveEvents', args),
   getMeta: (...args) => callCommentHistoryRepository('getMeta', args),
   setMeta: (...args) => callCommentHistoryRepository('setMeta', args)

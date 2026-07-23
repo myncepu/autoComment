@@ -305,13 +305,15 @@ function createExportRepository({
   count = 2,
   expiredCount = count,
   chunk = { records: [], nextCursor: null },
-  deletedCount = count
+  deletedCount = count,
+  atomicErrorCode = ''
 } = {}) {
   const meta = new Map();
   const calls = [];
-  return {
+  const repository = {
     calls,
     meta,
+    atomicErrorCode,
     async countRecords(criteria) {
       calls.push(['countRecords', criteria]);
       const expiryBound = criteria.to;
@@ -327,6 +329,29 @@ function createExportRepository({
       calls.push(['deleteConfirmed', criteria, archiveEvent]);
       return deletedCount;
     },
+    async deleteExportSessionAtomic(payload) {
+      calls.push(['deleteExportSessionAtomic', payload]);
+      if (repository.atomicErrorCode) {
+        const error = new Error(repository.atomicErrorCode);
+        error.code = repository.atomicErrorCode;
+        throw error;
+      }
+      const key = `historyExport:${payload.exportSessionId}`;
+      const descriptor = meta.get(key);
+      if (descriptor?.consumedAt != null) {
+        const error = new Error('EXPORT_SESSION_CONSUMED');
+        error.code = 'EXPORT_SESSION_CONSUMED';
+        throw error;
+      }
+      meta.set(key, {
+        ...descriptor,
+        consumedAt: payload.confirmedAt
+      });
+      return {
+        deletedCount,
+        exportSessionId: payload.exportSessionId
+      };
+    },
     async getMeta(key) {
       calls.push(['getMeta', key]);
       return structuredClone(meta.get(key));
@@ -336,6 +361,7 @@ function createExportRepository({
       meta.set(key, structuredClone(value));
     }
   };
+  return repository;
 }
 
 const EXPORT_NOW = Date.UTC(2026, 6, 24, 12);
@@ -437,7 +463,10 @@ test('requires explicit deletion confirmation even for a finalized export', asyn
     }),
     (error) => error.code === 'CONFIRMATION_REQUIRED'
   );
-  assert.equal(repository.calls.some(([name]) => name === 'deleteConfirmed'), false);
+  assert.equal(
+    repository.calls.some(([name]) => name === 'deleteExportSessionAtomic'),
+    false
+  );
 });
 
 test('finalizes only the canonical complete filename set for every 50,000-row part', async () => {
@@ -460,8 +489,12 @@ test('finalizes only the canonical complete filename set for every 50,000-row pa
   assert.equal(repository.meta.get('historyExport:export-session-a').finalizedAt, null);
 });
 
-test('rejects a finalized export whose matching set contains a record under 90 days old', async () => {
-  const repository = createExportRepository({ count: 2, expiredCount: 1 });
+test('preserves the atomic repository error when the matching set is under 90 days old', async () => {
+  const repository = createExportRepository({
+    count: 2,
+    expiredCount: 1,
+    atomicErrorCode: 'RETENTION_NOT_EXPIRED'
+  });
   const service = createCommentHistoryService({
     repository,
     storageLocal: createStorage(),
@@ -477,10 +510,13 @@ test('rejects a finalized export whose matching set contains a record under 90 d
     }),
     (error) => error.code === 'RETENTION_NOT_EXPIRED'
   );
-  assert.equal(repository.calls.some(([name]) => name === 'deleteConfirmed'), false);
+  assert.equal(
+    repository.calls.filter(([name]) => name === 'deleteExportSessionAtomic').length,
+    1
+  );
 });
 
-test('rejects deletion when the exported set count changed', async () => {
+test('preserves the atomic repository error when the exported set count changed', async () => {
   const repository = createExportRepository({ count: 2 });
   const service = createCommentHistoryService({
     repository,
@@ -489,10 +525,7 @@ test('rejects deletion when the exported set count changed', async () => {
     createExportSessionId: () => 'export-session-a'
   });
   const started = await finalizedExport(service);
-  repository.countRecords = async (criteria) => {
-    repository.calls.push(['countRecords', criteria]);
-    return 1;
-  };
+  repository.atomicErrorCode = 'EXPORT_SET_CHANGED';
 
   await assert.rejects(
     service.deleteConfirmed({
@@ -501,10 +534,13 @@ test('rejects deletion when the exported set count changed', async () => {
     }),
     (error) => error.code === 'EXPORT_SET_CHANGED'
   );
-  assert.equal(repository.calls.some(([name]) => name === 'deleteConfirmed'), false);
+  assert.equal(
+    repository.calls.filter(([name]) => name === 'deleteExportSessionAtomic').length,
+    1
+  );
 });
 
-test('deletes exact expired snapshot criteria, archives filenames, and consumes the session', async () => {
+test('delegates finalized deletion and observes the atomically consumed session', async () => {
   const repository = createExportRepository({ count: 2, deletedCount: 2 });
   const service = createCommentHistoryService({
     repository,
@@ -525,22 +561,12 @@ test('deletes exact expired snapshot criteria, archives filenames, and consumes 
     deletedCount: 2,
     exportSessionId: 'export-session-a'
   });
-  const deleteCall = repository.calls.find(([name]) => name === 'deleteConfirmed');
+  const deleteCall = repository.calls.find(
+    ([name]) => name === 'deleteExportSessionAtomic'
+  );
   assert.deepEqual(deleteCall[1], {
-    from: 1,
-    to: OLD_TO,
-    hrefDomain: 'links.test',
-    exportedBefore: EXPORT_NOW
-  });
-  assert.deepEqual(deleteCall[2], {
-    id: 'archive:export-session-a',
-    rangeStart: 1,
-    rangeEnd: OLD_TO,
-    recordCount: 2,
-    fileNames: ['comment-history-19700101-20260425-part-001.csv'],
-    exportStartedAt: EXPORT_NOW,
-    deleteConfirmedAt: EXPORT_NOW,
-    deletedAt: EXPORT_NOW
+    exportSessionId: 'export-session-a',
+    confirmedAt: EXPORT_NOW
   });
   assert.equal(
     repository.meta.get('historyExport:export-session-a').consumedAt,
@@ -555,7 +581,42 @@ test('deletes exact expired snapshot criteria, archives filenames, and consumes 
     (error) => error.code === 'EXPORT_SESSION_CONSUMED'
   );
   assert.equal(
-    repository.calls.filter(([name]) => name === 'deleteConfirmed').length,
-    1
+    repository.calls.filter(([name]) => name === 'deleteExportSessionAtomic').length,
+    2
   );
+});
+
+test('delegates confirmed cleanup to one atomic repository operation without service prechecks', async () => {
+  const calls = [];
+  const service = createCommentHistoryService({
+    repository: {
+      async getMeta() {
+        throw new Error('service must not open a session read transaction');
+      },
+      async countRecords() {
+        throw new Error('service must not open a count transaction');
+      },
+      async deleteExportSessionAtomic(payload) {
+        calls.push(payload);
+        return {
+          deletedCount: 2,
+          exportSessionId: 'export-session-a'
+        };
+      }
+    },
+    storageLocal: createStorage(),
+    now: () => EXPORT_NOW
+  });
+
+  assert.deepEqual(await service.deleteConfirmed({
+    confirmed: true,
+    exportSessionId: ' export-session-a '
+  }), {
+    deletedCount: 2,
+    exportSessionId: 'export-session-a'
+  });
+  assert.deepEqual(calls, [{
+    exportSessionId: 'export-session-a',
+    confirmedAt: EXPORT_NOW
+  }]);
 });

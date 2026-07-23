@@ -63,6 +63,26 @@ function openDatabase(indexedDBImpl, dbName) {
   });
 }
 
+async function storeFinalizedExportSession(repo, {
+  exportSessionId = 'export-session-a',
+  criteria = {},
+  exportedBefore,
+  expectedCount
+}) {
+  const descriptor = {
+    exportSessionId,
+    criteria,
+    exportedBefore,
+    expectedCount,
+    startedAt: exportedBefore,
+    filenames: ['comment-history-part-001.csv'],
+    finalizedAt: exportedBefore + 1,
+    consumedAt: null
+  };
+  await repo.setMeta(`historyExport:${exportSessionId}`, descriptor);
+  return descriptor;
+}
+
 test('creates the version 1 stores and indexes exactly as designed', async (t) => {
   const { repo, indexedDBImpl, dbName } = await openRepo(t);
   repo.close();
@@ -405,6 +425,174 @@ test('reads export comments and anchors from one readonly snapshot', async (t) =
 
   assert.deepEqual(exported.records, [original]);
   assert.deepEqual(await repo.getRecord(original.comment.id), newer);
+});
+
+test('atomic export cleanup aborts before deletion when the set mutates after export', async (t) => {
+  const { repo } = await openRepo(t);
+  const day = 24 * 60 * 60 * 1000;
+  const confirmedAt = 200 * day;
+  const exportedBefore = confirmedAt - 1;
+  const original = makeBundle({
+    id: 'batch-a:0',
+    submittedAt: confirmedAt - 100 * day,
+    updatedAt: exportedBefore - 10,
+    targetDomain: 'delete.test',
+    anchors: [{ anchorText: 'Original', hrefDomain: 'links.test' }]
+  });
+  const concurrent = makeBundle({
+    id: 'batch-a:1',
+    submittedAt: confirmedAt - 95 * day,
+    updatedAt: exportedBefore - 5,
+    targetDomain: 'delete.test',
+    anchors: [{ anchorText: 'Concurrent', hrefDomain: 'links.test' }]
+  });
+  await repo.upsertRecord(original);
+  await storeFinalizedExportSession(repo, {
+    criteria: { targetDomain: 'delete.test' },
+    exportedBefore,
+    expectedCount: 1
+  });
+
+  // Deterministically represents a write committed after export prechecks and
+  // before the cleanup transaction begins.
+  await repo.upsertRecord(concurrent);
+
+  await assert.rejects(
+    repo.deleteExportSessionAtomic({
+      exportSessionId: 'export-session-a',
+      confirmedAt
+    }),
+    (error) => error.code === 'EXPORT_SET_CHANGED'
+  );
+  assert.deepEqual(await repo.getRecord(original.comment.id), original);
+  assert.deepEqual(await repo.getRecord(concurrent.comment.id), concurrent);
+  assert.deepEqual(await repo.listArchiveEvents(), []);
+  assert.equal(
+    (await repo.getMeta('historyExport:export-session-a')).consumedAt,
+    null
+  );
+});
+
+test('atomic export cleanup rolls back comments anchors archive and session on meta failure', async (t) => {
+  const { repo } = await openRepo(t, {
+    onBeforeExportSessionConsume({ descriptor }) {
+      descriptor.injectedUncloneable = () => {};
+    }
+  });
+  const day = 24 * 60 * 60 * 1000;
+  const confirmedAt = 200 * day;
+  const exportedBefore = confirmedAt - 1;
+  const original = makeBundle({
+    id: 'batch-a:0',
+    submittedAt: confirmedAt - 100 * day,
+    updatedAt: exportedBefore - 10,
+    targetDomain: 'delete.test',
+    anchors: [{ anchorText: 'Rollback', hrefDomain: 'links.test' }]
+  });
+  await repo.upsertRecord(original);
+  await storeFinalizedExportSession(repo, {
+    criteria: { targetDomain: 'delete.test' },
+    exportedBefore,
+    expectedCount: 1
+  });
+
+  await assert.rejects(
+    repo.deleteExportSessionAtomic({
+      exportSessionId: 'export-session-a',
+      confirmedAt
+    }),
+    (error) => error.name === 'DataCloneError'
+  );
+  assert.deepEqual(await repo.getRecord(original.comment.id), original);
+  assert.deepEqual(await repo.listArchiveEvents(), []);
+  assert.equal(
+    (await repo.getMeta('historyExport:export-session-a')).consumedAt,
+    null
+  );
+});
+
+test('atomic export cleanup commits comments anchors archive and session together', async (t) => {
+  const { repo } = await openRepo(t);
+  const day = 24 * 60 * 60 * 1000;
+  const confirmedAt = 200 * day;
+  const exportedBefore = confirmedAt - 1;
+  const original = makeBundle({
+    id: 'batch-a:0',
+    submittedAt: confirmedAt - 100 * day,
+    updatedAt: exportedBefore - 10,
+    targetDomain: 'delete.test',
+    anchors: [{ anchorText: 'Archived', hrefDomain: 'links.test' }]
+  });
+  await repo.upsertRecord(original);
+  const descriptor = await storeFinalizedExportSession(repo, {
+    criteria: { targetDomain: 'delete.test' },
+    exportedBefore,
+    expectedCount: 1
+  });
+
+  assert.deepEqual(await repo.deleteExportSessionAtomic({
+    exportSessionId: 'export-session-a',
+    confirmedAt
+  }), {
+    deletedCount: 1,
+    exportSessionId: 'export-session-a'
+  });
+  assert.equal(await repo.getRecord(original.comment.id), null);
+  assert.deepEqual(await repo.listArchiveEvents(), [{
+    id: 'archive:export-session-a',
+    rangeStart: null,
+    rangeEnd: confirmedAt - 90 * day,
+    recordCount: 1,
+    fileNames: descriptor.filenames,
+    exportStartedAt: exportedBefore,
+    deleteConfirmedAt: confirmedAt,
+    deletedAt: confirmedAt
+  }]);
+  assert.equal(
+    (await repo.getMeta('historyExport:export-session-a')).consumedAt,
+    confirmedAt
+  );
+  await assert.rejects(
+    repo.deleteExportSessionAtomic({
+      exportSessionId: 'export-session-a',
+      confirmedAt: confirmedAt + 1
+    }),
+    (error) => error.code === 'EXPORT_SESSION_CONSUMED'
+  );
+});
+
+test('atomic export cleanup rejects a matching record younger than 90 days without writes', async (t) => {
+  const { repo } = await openRepo(t);
+  const day = 24 * 60 * 60 * 1000;
+  const confirmedAt = 200 * day;
+  const exportedBefore = confirmedAt - 1;
+  const recent = makeBundle({
+    id: 'batch-a:0',
+    submittedAt: confirmedAt - 89 * day,
+    updatedAt: exportedBefore - 10,
+    targetDomain: 'delete.test',
+    anchors: [{ anchorText: 'Too recent', hrefDomain: 'links.test' }]
+  });
+  await repo.upsertRecord(recent);
+  await storeFinalizedExportSession(repo, {
+    criteria: { targetDomain: 'delete.test' },
+    exportedBefore,
+    expectedCount: 1
+  });
+
+  await assert.rejects(
+    repo.deleteExportSessionAtomic({
+      exportSessionId: 'export-session-a',
+      confirmedAt
+    }),
+    (error) => error.code === 'RETENTION_NOT_EXPIRED'
+  );
+  assert.deepEqual(await repo.getRecord(recent.comment.id), recent);
+  assert.deepEqual(await repo.listArchiveEvents(), []);
+  assert.equal(
+    (await repo.getMeta('historyExport:export-session-a')).consumedAt,
+    null
+  );
 });
 
 test('confirmed deletion honors anchor criteria', async (t) => {

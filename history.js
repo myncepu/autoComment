@@ -605,19 +605,27 @@ export function bootHistoryPage(documentRef = document, {
     elements.confirmDeleteBtn.disabled = true;
     elements.exportHistoryBtn.disabled = true;
     setExportStatus('正在核对并删除已归档记录…');
+    let result;
     try {
-      const result = await requestMessage(
+      result = await requestMessage(
         buildConfirmedDeleteRequest(completedExportSessionId)
       );
-      resetConfirmedDelete();
-      setExportStatus(`已删除 ${result?.deletedCount || 0} 条已归档记录。`);
-      await Promise.all([loadOverview(), loadPage()]);
     } catch (error) {
       elements.confirmDeleteBtn.disabled = false;
       setExportStatus(error.message || '删除失败，请重新导出后再试。', true);
-    } finally {
       elements.exportHistoryBtn.disabled = false;
+      return;
     }
+
+    resetConfirmedDelete();
+    const successMessage = `已删除 ${result?.deletedCount || 0} 条已归档记录。`;
+    setExportStatus(successMessage);
+    try {
+      await Promise.all([loadOverview(), loadPage()]);
+    } catch (_) {
+      setExportStatus(`${successMessage} 页面数据刷新失败，请手动刷新。`, true);
+    }
+    elements.exportHistoryBtn.disabled = false;
   }
 
   function commitActiveFilter() {

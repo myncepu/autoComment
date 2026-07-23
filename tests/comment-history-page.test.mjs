@@ -286,6 +286,64 @@ test('exports session chunks into bounded parts then sends only confirmed sessio
   );
 });
 
+test('keeps confirmed deletion success when the best-effort page refresh fails', async () => {
+  const document = historyDocument();
+  let deletionSucceeded = false;
+  const refreshFailure = {};
+  Object.defineProperty(refreshFailure, 'message', {
+    get() {
+      throw new Error('refresh status rendering failed');
+    }
+  });
+  const requestMessage = async (message) => {
+    if (message.type === 'HISTORY_SUMMARY') return {};
+    if (message.type === 'HISTORY_ARCHIVE_EVENTS') return [];
+    if (message.type === 'HISTORY_LIST') {
+      if (deletionSucceeded) throw refreshFailure;
+      return { records: [], nextCursor: null };
+    }
+    if (message.type === 'HISTORY_EXPORT_START') {
+      return {
+        exportSessionId: 'export-session-a',
+        exportedBefore: Date.UTC(2026, 6, 24),
+        expectedCount: 0,
+        criteria: {}
+      };
+    }
+    if (message.type === 'HISTORY_EXPORT_CHUNK') {
+      return { records: [], nextCursor: null };
+    }
+    if (message.type === 'HISTORY_EXPORT_FINISH') return {};
+    if (message.type === 'HISTORY_DELETE_CONFIRMED') {
+      deletionSucceeded = true;
+      return { deletedCount: 0 };
+    }
+    throw new Error(`Unexpected request: ${message.type}`);
+  };
+
+  bootHistoryPage(document, {
+    requestMessage,
+    search: '',
+    estimateStorage: async () => 0,
+    downloadPart() {}
+  });
+  await nextTurn();
+  document.getElementById('exportHistoryBtn').click();
+  await nextTurn();
+  await nextTurn();
+  document.getElementById('confirmDeleteBtn').click();
+  await nextTurn();
+  await nextTurn();
+
+  const status = document.getElementById('exportStatus').textContent;
+  assert.match(status, /已删除 0 条已归档记录/);
+  assert.match(status, /刷新失败/);
+  assert.doesNotMatch(status, /删除失败/);
+  assert.equal(document.getElementById('confirmDeleteBtn').hidden, true);
+  assert.equal(document.getElementById('confirmDeleteBtn').disabled, true);
+  assert.equal(document.getElementById('exportHistoryBtn').disabled, false);
+});
+
 test('editing a form field without Apply keeps Next bound to the active filter snapshot', async () => {
   const document = historyDocument();
   document.getElementById('targetDomain').value = 'original.example';
