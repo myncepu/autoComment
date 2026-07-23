@@ -10,6 +10,7 @@ import {
 test('normalizes batch concurrency to the supported 1 through 10 range', () => {
   assert.equal(normalizeBatchConcurrency(undefined), 3);
   assert.equal(normalizeBatchConcurrency('4'), 4);
+  assert.equal(normalizeBatchConcurrency('3.5', 7), 7);
   assert.equal(normalizeBatchConcurrency(0), 3);
   assert.equal(normalizeBatchConcurrency(11), 3);
   assert.equal(normalizeBatchConcurrency('not-a-number', 6), 6);
