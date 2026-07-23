@@ -331,6 +331,110 @@ Result: 81 passing, 0 failing.
 
 None.
 
+## Re-Review Fix: Deferred Completion Lifecycle Ownership
+
+### RED
+
+Added an executable completion regression that:
+
+- begins completion with a deferred `closeAll`;
+- records whether completion disables and hides Stop immediately;
+- attempts Stop while status is already completed;
+- installs a replacement batch, scheduler, manager, and same-index opening;
+- resolves the old completion close and checks the replacement lifecycle.
+
+```bash
+node --test --test-name-pattern="deferred completion" \
+  tests/batch-multi-window-integration.test.js
+```
+
+Result: 0 passing and 1 failing, as expected. The replacement same-index
+opening was `undefined` instead of the replacement object, proving that an old
+completion continuation cleared new batch state.
+
+### GREEN
+
+Implemented completion ownership and UI sequencing:
+
+- `stopBatch` returns immediately unless `status === 'running'`.
+- `onAllCompleted` captures its batch ID, scheduler, window manager, and a
+  snapshot of opening entries at entry.
+- Completion stops the captured scheduler, sets completed status, and updates
+  statistics and controls before awaiting window cleanup. Stop is therefore
+  disabled and hidden immediately.
+- `closeAll` runs through the captured manager.
+- After `closeAll`, batch/scheduler/manager identities must still match before
+  any opening cleanup.
+- Cleanup deletes only entries whose current map value is the exact captured
+  opening object; it never performs an unqualified global clear.
+- No post-close UI update runs for a stale completion lifecycle.
+
+Focused regression:
+
+```bash
+node --check batch.js
+node --test --test-name-pattern="deferred completion" \
+  tests/batch-multi-window-integration.test.js
+```
+
+Result: syntax passed; 1 passing, 0 failing.
+
+Complete integration:
+
+```bash
+node --test tests/batch-multi-window-integration.test.js
+```
+
+Result: 12 passing, 0 failing.
+
+Focused scheduler/window/integration verification:
+
+```bash
+git diff --check
+node --test \
+  tests/batch-scheduler.test.mjs \
+  tests/batch-window-manager.test.mjs \
+  tests/batch-multi-window-integration.test.js
+```
+
+Result: whitespace check passed; 26 passing, 0 failing.
+
+Full verification:
+
+```bash
+npm test
+```
+
+Result: 83 passing, 0 failing.
+
+### Changed Files
+
+- `batch.js`
+- `tests/batch-multi-window-integration.test.js`
+- `.superpowers/sdd/task-7-report.md`
+
+### Re-Review Self-Check
+
+- Completed status and `updateUI` occur synchronously before the first await,
+  so the user cannot trigger Stop through the visible controls during window
+  cleanup.
+- The status guard also makes direct or queued Stop calls no-ops after
+  completion begins.
+- Clear/start can replace all three lifecycle identities while the captured
+  manager closes; the old continuation then exits without touching replacement
+  openings or controls.
+- Exact opening-object comparison protects a same-index replacement even if a
+  future lifecycle were to reuse one or two other identity values.
+- A non-stale completion still removes only its own captured openings after
+  its windows close.
+- Previous deferred finalizer, deferred late-create, pending timeout,
+  message-ownership, duplicate-result, stop/resume, and completion-once
+  protections remain covered.
+
+### Re-Review Concerns
+
+None.
+
 ## Re-Review Fix: Deferred Late-Create Cleanup Ownership
 
 ### RED

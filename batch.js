@@ -560,6 +560,8 @@ async function clearBatchTaskSettings() {
 }
 
 async function stopBatch() {
+  if (status !== 'running') return;
+
   isTerminated = true;
   scheduler?.stop();
   setStatus('terminated');
@@ -967,8 +969,14 @@ function saveLocalResults() {
 async function onAllCompleted() {
   console.log('[batch] onAllCompleted 被调用!');
   if (status !== 'running') return;
+
+  const completingBatchId = batchId;
+  const completingScheduler = scheduler;
+  const completingWindowManager = windowManager;
+  const completingOpenings = new Map(openingActivities);
+
   isTerminated = true;
-  scheduler?.stop();
+  completingScheduler?.stop();
   setStatus('completed');
   stopTimeoutChecker();
   if (pollTimer) {
@@ -976,11 +984,20 @@ async function onAllCompleted() {
     pollTimer = null;
   }
 
-  await windowManager.closeAll();
-  openingActivities.clear();
-
   updateStatsUI();
   updateUI();
+
+  await completingWindowManager?.closeAll();
+  const ownsCompletingLifecycle = batchId === completingBatchId &&
+    scheduler === completingScheduler &&
+    windowManager === completingWindowManager;
+  if (!ownsCompletingLifecycle) return;
+
+  for (const [urlIndex, opening] of completingOpenings) {
+    if (openingActivities.get(urlIndex) === opening) {
+      openingActivities.delete(urlIndex);
+    }
+  }
 }
 
 // 超时检测

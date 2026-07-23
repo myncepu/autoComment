@@ -7,6 +7,7 @@ const vm = require('node:vm');
 const read = (file) => fs.readFileSync(path.resolve(__dirname, '..', file), 'utf8');
 
 function createBatchHarness() {
+  const elements = new Map();
   const makeElement = () => ({
     checked: false,
     value: '',
@@ -48,7 +49,10 @@ function createBatchHarness() {
     },
     document: {
       addEventListener() {},
-      getElementById() { return makeElement(); },
+      getElementById(id) {
+        if (!elements.has(id)) elements.set(id, makeElement());
+        return elements.get(id);
+      },
       createElement() { return makeElement(); },
       body: makeElement()
     },
@@ -77,6 +81,9 @@ function createBatchHarness() {
         sendTaskWhenReady,
         recordTaskResult,
         finalizeTask,
+        onAllCompleted,
+        stopBatch,
+        updateUI,
         setState(next) {
           if ('batchId' in next) batchId = next.batchId;
           if ('parsedUrls' in next) parsedUrls = next.parsedUrls;
@@ -100,6 +107,8 @@ function createBatchHarness() {
         getState() {
           return {
             localResults,
+            status,
+            isTerminated,
             successCount,
             failCount,
             pendingCount
@@ -111,6 +120,7 @@ function createBatchHarness() {
   return {
     api: context.__batchTest,
     chrome,
+    elements,
     intervalCalls
   };
 }
@@ -520,4 +530,98 @@ test('deferred late-create cleanup cannot mutate resumed same-index work', async
   assert.equal(resumedOpenings.get(0), resumedOpening);
   assert.equal(oldSettleCount, 1);
   assert.equal(closeCount, 1);
+});
+
+test('deferred completion cannot stop or clear a replacement lifecycle', async () => {
+  const { api, elements } = createBatchHarness();
+  let resolveCloseAll;
+  let oldCloseAllCount = 0;
+  let oldStopCount = 0;
+  const oldOpening = { batchId: 'batch-old', startTime: 1 };
+  const oldOpenings = new Map([[0, oldOpening]]);
+  const oldScheduler = {
+    stop() { oldStopCount += 1; },
+    get activeIndices() { return []; }
+  };
+  const closeAllPromise = new Promise((resolve) => {
+    resolveCloseAll = resolve;
+  });
+  const oldManager = {
+    closeAll() {
+      oldCloseAllCount += 1;
+      return closeAllPromise;
+    }
+  };
+  api.setState({
+    batchId: 'batch-old',
+    parsedUrls: [{ url: 'https://old.test', sourceDomain: '' }],
+    status: 'running',
+    scheduler: oldScheduler,
+    windowManager: oldManager,
+    openingActivities: oldOpenings,
+    isTerminated: false,
+    localResults: [],
+    totalCount: 1,
+    successCount: 1,
+    failCount: 0,
+    skippedCount: 0,
+    noCommentBoxCount: 0,
+    manualRequiredCount: 0,
+    blockedIllegalCount: 0,
+    pendingCount: 0,
+    timeoutCheckTimer: null
+  });
+  api.updateUI();
+
+  const completion = api.onAllCompleted();
+  const stopButton = elements.get('stopBtn');
+  const completionDisabledStopImmediately = stopButton.disabled;
+  const completionHidStopImmediately = stopButton.style.display === 'none';
+
+  const stopping = api.stopBatch();
+  const statusAfterStopAttempt = api.getState().status;
+
+  let replacementStopCount = 0;
+  let replacementCloseAllCount = 0;
+  const replacementOpening = { batchId: 'batch-new', startTime: 2 };
+  const replacementOpenings = new Map([[0, replacementOpening]]);
+  api.setState({
+    batchId: 'batch-new',
+    parsedUrls: [{ url: 'https://new.test', sourceDomain: '' }],
+    status: 'running',
+    scheduler: {
+      stop() { replacementStopCount += 1; },
+      get activeIndices() { return [0]; }
+    },
+    windowManager: {
+      async closeAll() { replacementCloseAllCount += 1; }
+    },
+    openingActivities: replacementOpenings,
+    isTerminated: false,
+    localResults: [],
+    totalCount: 1,
+    successCount: 0,
+    failCount: 0,
+    skippedCount: 0,
+    noCommentBoxCount: 0,
+    manualRequiredCount: 0,
+    blockedIllegalCount: 0,
+    pendingCount: 1
+  });
+  api.updateUI();
+
+  resolveCloseAll();
+  await Promise.all([completion, stopping]);
+
+  assert.equal(replacementOpenings.get(0), replacementOpening);
+  assert.equal(replacementStopCount, 0);
+  assert.equal(replacementCloseAllCount, 0);
+  assert.equal(api.getState().status, 'running');
+  assert.equal(stopButton.disabled, false);
+  assert.equal(stopButton.style.display, 'inline-flex');
+  assert.equal(completionDisabledStopImmediately, true);
+  assert.equal(completionHidStopImmediately, true);
+  assert.equal(statusAfterStopAttempt, 'completed');
+  assert.equal(oldStopCount, 1);
+  assert.equal(oldCloseAllCount, 1);
 });
