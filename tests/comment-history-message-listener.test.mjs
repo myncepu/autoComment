@@ -240,18 +240,35 @@ test('does not trust an uppercase error code as permission to expose its raw mes
   assert.equal(JSON.stringify(response).includes(secret), false);
 });
 
-test('background confirms only after history save status is included in both responses', async (t) => {
+test('background migrates an old record before its startup retention check and confirms saved history', async (t) => {
   const previousChrome = globalThis.chrome;
   const previousIndexedDb = globalThis.indexedDB;
   const previousKeyRange = globalThis.IDBKeyRange;
   const previousEmitWarning = process.emitWarning;
   const previousConsoleLog = console.log;
+  const previousDateNow = Date.now;
+  const fixedNow = Date.UTC(2026, 6, 24, 12, 0, 0);
   const runtimeListeners = [];
   const runtimeMessages = [];
-  const storageData = { legacyMigrationV1: true };
+  const startupNotifications = [];
+  const alarmListeners = [];
+  const notificationClickListeners = [];
+  const storageData = {
+    batchResults: [{
+      batchId: 'legacy-batch',
+      urlIndex: 1,
+      result: 'success',
+      url: 'https://legacy.test/post',
+      aiContent: 'Migrated legacy comment',
+      timestamp: fixedNow - 80 * 24 * 60 * 60 * 1000
+    }]
+  };
   const chromeApi = {
     runtime: {
       id: 'extension-id',
+      getURL(path) {
+        return `chrome-extension://extension-id/${path}`;
+      },
       onMessage: {
         addListener(listener) {
           runtimeListeners.push(listener);
@@ -283,6 +300,24 @@ test('background confirms only after history save status is included in both res
     action: {
       onClicked: { addListener() {} }
     },
+    alarms: {
+      create() {},
+      onAlarm: {
+        addListener(listener) {
+          alarmListeners.push(listener);
+        }
+      }
+    },
+    notifications: {
+      async create(id, options) {
+        startupNotifications.push({ id, options });
+      },
+      onClicked: {
+        addListener(listener) {
+          notificationClickListeners.push(listener);
+        }
+      }
+    },
     tabs: {
       async sendMessage() {},
       async create() {}
@@ -291,17 +326,26 @@ test('background confirms only after history save status is included in both res
   globalThis.chrome = chromeApi;
   globalThis.indexedDB = new IDBFactory();
   globalThis.IDBKeyRange = IDBKeyRange;
+  Date.now = () => fixedNow;
   process.emitWarning = () => {};
   console.log = () => {};
   t.after(() => {
     globalThis.chrome = previousChrome;
     globalThis.indexedDB = previousIndexedDb;
     globalThis.IDBKeyRange = previousKeyRange;
+    Date.now = previousDateNow;
     process.emitWarning = previousEmitWarning;
     console.log = previousConsoleLog;
   });
 
   await import(`../background.js?history-integration=${Date.now()}`);
+  assert.equal(alarmListeners.length, 1);
+  assert.equal(notificationClickListeners.length, 1);
+  for (let attempt = 0; attempt < 100 && startupNotifications.length === 0; attempt += 1) {
+    await new Promise(setImmediate);
+  }
+  assert.equal(startupNotifications.length, 1);
+  assert.match(startupNotifications[0].options.message, /2026-05-05/);
   const message = {
     type: 'BATCH_HANDLE_CONFIRM',
     batchId: 'batch-integration',

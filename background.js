@@ -41,10 +41,12 @@ const commentHistoryService = createCommentHistoryService({
 });
 
 installCommentHistoryMessageListener(chrome, commentHistoryService);
-installCommentHistoryRetention(chrome, {
+const commentHistoryRetention = installCommentHistoryRetention(chrome, {
   getRetentionStatus: (...args) => commentHistoryService.getRetentionStatus(...args),
   getMeta: (...args) => commentHistoryRepository.getMeta(...args),
   setMeta: (...args) => commentHistoryRepository.setMeta(...args)
+}, {
+  startImmediately: false
 });
 
 (async () => {
@@ -57,6 +59,11 @@ installCommentHistoryRetention(chrome, {
     await commentHistoryService.retryPendingWrites();
   } catch (_) {
     console.warn('[background] Comment history retry deferred');
+  }
+  try {
+    await commentHistoryRetention.checkNow();
+  } catch (_) {
+    console.warn('[background] Comment history retention check deferred');
   }
 })();
 
