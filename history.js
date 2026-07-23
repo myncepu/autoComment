@@ -100,6 +100,15 @@ export function buildHistoryListRequest(values = {}, cursor = null, extraFilter 
   };
 }
 
+function buildActiveHistoryListRequest(activeFilter, cursor = null) {
+  const safeCursor = normalizedCursor(cursor);
+  return {
+    type: 'HISTORY_LIST',
+    ...activeFilter,
+    ...(safeCursor ? { cursor: safeCursor } : {})
+  };
+}
+
 export function buildAnchorsRequest(commentId) {
   return {
     type: 'HISTORY_ANCHORS',
@@ -407,45 +416,58 @@ async function estimateStorage() {
   }
 }
 
-export function bootHistoryPage(documentRef = document) {
+export function bootHistoryPage(documentRef = document, {
+  requestMessage = sendHistoryMessage,
+  search = typeof location !== 'undefined' ? location.search : '',
+  now = Date.now(),
+  estimateStorage: estimateStorageForPage = estimateStorage
+} = {}) {
   const elements = getElements(documentRef);
   if (Object.values(elements).some((element) => !element)) return;
 
   let pagination = createPaginationState();
   let nextCursor = null;
-  let notificationFilter = buildNotificationHistoryFilter(
-    typeof location !== 'undefined' ? location.search : ''
-  );
+  let requestGeneration = 0;
+  let activeFilter = Object.freeze({
+    ...buildHistoryFilter(formValues(elements)),
+    ...buildNotificationHistoryFilter(search, now)
+  });
 
   async function loadPage() {
+    const generation = ++requestGeneration;
+    const pageState = {
+      filter: { ...activeFilter },
+      cursor: normalizedCursor(pagination.cursor),
+      pageIndex: pagination.pageIndex
+    };
     elements.previousPageBtn.disabled = true;
     elements.nextPageBtn.disabled = true;
     setPageStatus(elements, '正在加载…');
     try {
-      const request = buildHistoryListRequest(
-        formValues(elements),
-        pagination.cursor,
-        notificationFilter
-      );
-      const page = await sendHistoryMessage(request);
+      const request = buildActiveHistoryListRequest(pageState.filter, pageState.cursor);
+      const page = await requestMessage(request);
+      if (generation !== requestGeneration) return;
       nextCursor = normalizedCursor(page?.nextCursor);
       renderRecords(documentRef, elements, page?.records);
-      setStoredText(elements.pageLabel, `第 ${pagination.pageIndex + 1} 页`);
-      elements.previousPageBtn.disabled = pagination.pageIndex === 0;
-      elements.nextPageBtn.disabled = !nextCursor;
+      setStoredText(elements.pageLabel, `第 ${pageState.pageIndex + 1} 页`);
       setPageStatus(elements, `本页 ${page?.records?.length || 0} 条`);
     } catch (error) {
+      if (generation !== requestGeneration) return;
+      nextCursor = null;
       renderRecords(documentRef, elements, []);
       setPageStatus(elements, error.message, true);
-      elements.previousPageBtn.disabled = pagination.pageIndex === 0;
+    } finally {
+      if (generation !== requestGeneration) return;
+      elements.previousPageBtn.disabled = pageState.pageIndex === 0;
+      elements.nextPageBtn.disabled = !nextCursor;
     }
   }
 
   async function loadOverview() {
     const [summaryResult, archiveResult, estimatedUsage] = await Promise.allSettled([
-      sendHistoryMessage({ type: 'HISTORY_SUMMARY' }),
-      sendHistoryMessage({ type: 'HISTORY_ARCHIVE_EVENTS' }),
-      estimateStorage()
+      requestMessage({ type: 'HISTORY_SUMMARY' }),
+      requestMessage({ type: 'HISTORY_ARCHIVE_EVENTS' }),
+      estimateStorageForPage()
     ]);
     const summary = summaryResult.status === 'fulfilled' ? summaryResult.value : {};
     renderSummary(
@@ -460,21 +482,23 @@ export function bootHistoryPage(documentRef = document) {
     );
   }
 
+  function commitActiveFilter() {
+    activeFilter = Object.freeze(buildHistoryFilter(formValues(elements)));
+    pagination = createPaginationState();
+    nextCursor = null;
+    return loadPage();
+  }
+
   elements.historyFilterForm.addEventListener('submit', (event) => {
     event.preventDefault();
-    notificationFilter = {};
-    pagination = createPaginationState();
-    loadPage();
+    commitActiveFilter();
   });
   elements.resetFiltersBtn.addEventListener('click', () => {
     elements.historyFilterForm.reset();
-    notificationFilter = {};
-    pagination = createPaginationState();
-    loadPage();
+    commitActiveFilter();
   });
   elements.pageSize.addEventListener('change', () => {
-    pagination = createPaginationState();
-    loadPage();
+    commitActiveFilter();
   });
   elements.previousPageBtn.addEventListener('click', () => {
     pagination = retreatPagination(pagination);
