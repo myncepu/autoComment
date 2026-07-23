@@ -35,6 +35,7 @@
 - `lib/comment-history-csv.mjs`: safe CSV cell encoding, formula-injection protection, row building, and 50,000-row part naming.
 - `history.html`: comment history layout.
 - `history.js`: history-page controller, paginated queries, filters, CSV chunk export, and delete confirmation.
+- `icons/history.svg`: local notification icon used by the retention reminder.
 
 ### Modified production files
 
@@ -179,7 +180,7 @@ Implement a browser-global IIFE. `readEditorHtml` must use `editor._realElement.
 
 - [ ] **Step 5: Add failing record-normalization tests**
 
-Cover stable IDs, domain normalization, browser-local `archiveMonth`, anchor IDs, invalid required fields, and legacy success/non-success conversion:
+Cover stable IDs, domain normalization, browser-local `archiveMonth`, anchor IDs, invalid required fields, and legacy success/non-success conversion. Legacy conversion must parse detectable multiline `<a>` tags without a DOM, preserve raw `href`, resolve valid links against the page URL, strip nested tags from anchor text, and leave unparseable links unresolved:
 
 ```js
 assert.equal(makeCommentHistoryId('batch-a', 7), 'batch-a:7');
@@ -523,6 +524,7 @@ git commit -m "feat: carry actual comment data through submission"
 **Files:**
 - Create: `lib/comment-history-retention.mjs`
 - Create: `tests/comment-history-retention.test.mjs`
+- Create: `icons/history.svg`
 - Modify: `background.js`
 - Modify: `manifest.json`
 
@@ -566,7 +568,7 @@ Add manifest permissions:
 ]
 ```
 
-Create one alarm named `comment-history-retention-check` with `periodInMinutes: 1440`. Run the same check at service startup. Clicking the notification opens `history.html?filter=expired`. The alarm handler may query and notify only; it must not call deletion.
+Create one alarm named `comment-history-retention-check` with `periodInMinutes: 1440`. Run the same check at service startup. Use `chrome.runtime.getURL('icons/history.svg')` as the required notification `iconUrl`. Clicking the notification opens `history.html?filter=expired`. The alarm handler may query and notify only; it must not call deletion.
 
 - [ ] **Step 5: Run focused tests**
 
@@ -577,7 +579,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add manifest.json background.js lib/comment-history-retention.mjs tests/comment-history-retention.test.mjs
+git add manifest.json background.js icons/history.svg lib/comment-history-retention.mjs tests/comment-history-retention.test.mjs
 git commit -m "feat: remind before comment history cleanup"
 ```
 
