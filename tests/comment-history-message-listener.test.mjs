@@ -219,6 +219,27 @@ test('returns a safe structured error without exposing stack or raw failure deta
   });
 });
 
+test('does not trust an uppercase error code as permission to expose its raw message', async () => {
+  const secret = 'chrome-extension://private/?token=history-secret';
+  const { dispatch } = createFixture({
+    async getSummary() {
+      const error = new Error(`database failed while reading ${secret}`);
+      error.code = 'DB_FAILED';
+      throw error;
+    }
+  });
+
+  const { response } = await dispatch({ type: 'HISTORY_SUMMARY' });
+  assert.deepEqual(response, {
+    ok: false,
+    error: {
+      code: 'DB_FAILED',
+      message: '评论历史请求失败。'
+    }
+  });
+  assert.equal(JSON.stringify(response).includes(secret), false);
+});
+
 test('background confirms only after history save status is included in both responses', async (t) => {
   const previousChrome = globalThis.chrome;
   const previousIndexedDb = globalThis.indexedDB;
@@ -281,7 +302,6 @@ test('background confirms only after history save status is included in both res
   });
 
   await import(`../background.js?history-integration=${Date.now()}`);
-  const responses = [];
   const message = {
     type: 'BATCH_HANDLE_CONFIRM',
     batchId: 'batch-integration',
@@ -299,18 +319,36 @@ test('background confirms only after history save status is included in both res
     }
   };
 
-  const handled = runtimeListeners.map((listener) => listener(
-    message,
-    { id: 'extension-id', tab: { id: 42 } },
-    (response) => responses.push(response)
-  ));
-  assert.ok(handled.includes(true));
-  for (let attempt = 0; attempt < 20 && responses.length === 0; attempt += 1) {
-    await new Promise(setImmediate);
+  async function dispatchConfirm(confirmMessage) {
+    const responses = [];
+    const handled = runtimeListeners.map((listener) => listener(
+      confirmMessage,
+      { id: 'extension-id', tab: { id: 42 } },
+      (response) => responses.push(response)
+    ));
+    assert.ok(handled.includes(true));
+    for (let attempt = 0; attempt < 20 && responses.length === 0; attempt += 1) {
+      await new Promise(setImmediate);
+    }
+    return responses;
   }
 
+  const responses = await dispatchConfirm(message);
   assert.deepEqual(responses, [{ ok: true, historySaveStatus: 'saved' }]);
   assert.equal(runtimeMessages.length, 1);
   assert.equal(runtimeMessages[0].type, 'BATCH_CONFIRMED');
   assert.equal(runtimeMessages[0].historySaveStatus, 'saved');
+
+  for (const [offset, result] of ['', false, 0].entries()) {
+    const explicitResultResponses = await dispatchConfirm({
+      ...message,
+      urlIndex: 10 + offset,
+      result
+    });
+    assert.deepEqual(explicitResultResponses, [{
+      ok: true,
+      historySaveStatus: 'not_applicable'
+    }]);
+    assert.equal(runtimeMessages.at(-1).result, result);
+  }
 });

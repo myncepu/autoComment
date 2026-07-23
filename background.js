@@ -102,7 +102,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           batchId: message.batchId,
           urlIndex: message.urlIndex,
           url: message.url || '',
-          result: message.result || 'success',
+          result: message.result ?? 'success',
           aiContent: message.aiContent || null,
           errorMessage: message.errorMessage || null
         });
@@ -110,7 +110,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         const { historySaveStatus } = await commentHistoryService.saveConfirmedSuccess({
           ...message,
-          result: message.result || 'success'
+          result: message.result ?? 'success'
         });
 
         // 关键：先通知 batch.js（popup）落盘已完成，batch.js 等到确认后才关闭标签页
@@ -118,7 +118,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         chrome.runtime.sendMessage({
           type: 'BATCH_CONFIRMED',
           urlIndex: message.urlIndex,
-          result: message.result || 'success',
+          result: message.result ?? 'success',
           aiContent: message.aiContent || null,
           errorMessage: message.errorMessage || null,
           historySaveStatus

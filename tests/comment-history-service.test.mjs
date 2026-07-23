@@ -86,6 +86,22 @@ test('skips history writes for every non-success result', async () => {
   assert.equal(writeCount, 0);
 });
 
+test('defaults only nullish results to success and preserves explicit falsey results', async () => {
+  let writeCount = 0;
+  const service = createCommentHistoryService({
+    repository: { async upsertRecord() { writeCount += 1; } },
+    storageLocal: createStorage()
+  });
+
+  for (const result of ['', false, 0]) {
+    assert.deepEqual(
+      await service.saveConfirmedSuccess(makeMessage({ result })),
+      { historySaveStatus: 'not_applicable' }
+    );
+  }
+  assert.equal(writeCount, 0);
+});
+
 test('queues a repository failure under the independent record key', async () => {
   const storageLocal = createStorage();
   const message = makeMessage();
