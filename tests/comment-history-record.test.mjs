@@ -104,13 +104,13 @@ test('converts only successful legacy entries and parses multiline anchors witho
     result: 'success',
     urlIndex: 4,
     url: 'https://Host.test/posts/1',
-    aiContent: 'Read <a\n href="/go\nnext">First <strong>nested</strong></a> and <a href="http://[">Broken</a> <a data-href="/wrong">Not a link</a> <a href="">Empty</a>',
+    aiContent: 'Read <a\n href="/go\nnext">First <strong>nested</strong></a> and <a href="http://[">Broken</a> <a data-href="/wrong">Not a link</a> <a title="contains href=\'/not-real\'">Title only</a> <a href="">Empty</a>',
     timestamp: 1721000000000
   }, 'batch-a');
 
   assert.equal(record.comment.id, 'batch-a:4');
   assert.equal(record.comment.source, 'legacy');
-  assert.equal(record.comment.commentText, 'Read First nested and Broken Not a link Empty');
+  assert.equal(record.comment.commentText, 'Read First nested and Broken Not a link Title only Empty');
   assert.equal(record.comment.promotedWebsiteUrl, '');
   assert.deepEqual(record.anchors, [
     {
@@ -147,6 +147,16 @@ test('converts only successful legacy entries and parses multiline anchors witho
       id: 'batch-a:4:3',
       commentId: 'batch-a:4',
       position: 3,
+      anchorText: 'Title only',
+      anchorTextNormalized: 'title only',
+      hrefRaw: '',
+      hrefResolved: '',
+      hrefDomain: ''
+    },
+    {
+      id: 'batch-a:4:4',
+      commentId: 'batch-a:4',
+      position: 4,
       anchorText: 'Empty',
       anchorTextNormalized: 'empty',
       hrefRaw: '',

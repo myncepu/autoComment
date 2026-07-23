@@ -16,7 +16,7 @@
 - Browser retention is a rolling 90 days; notify at ages 80, 87, and 90 days, then every 7 overdue days.
 - No record may be deleted by an alarm or without explicit user confirmation.
 - A CSV part contains at most 50,000 comment rows and uses UTF-8 BOM.
-- Never persist passwords, email addresses, cookies, authentication data, or full page HTML.
+- Never separately read or persist autofill form email, password, cookie, authentication, or full-page HTML data. Preserve the exact submitted comment body and anchor URLs without redaction, even when that submitted content itself contains an email address or token-like string.
 - Stored comment HTML must only be rendered as text.
 - Existing user-owned `.DS_Store` changes must remain untouched.
 
