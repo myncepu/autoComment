@@ -175,6 +175,7 @@ test('parses a legacy href after a quoted attribute containing a greater-than si
     timestamp: 1721000000000
   }, 'batch-a');
 
+  assert.equal(record.comment.commentText, 'Text');
   assert.deepEqual(record.anchors, [{
     id: 'batch-a:5:0',
     commentId: 'batch-a:5',
@@ -185,4 +186,16 @@ test('parses a legacy href after a quoted attribute containing a greater-than si
     hrefResolved: 'https://host.test/real',
     hrefDomain: 'host.test'
   }]);
+});
+
+test('strips nested tags with quoted greater-than signs from legacy anchor text', () => {
+  const record = buildLegacyCommentHistoryRecord({
+    result: 'success',
+    urlIndex: 6,
+    url: 'https://host.test/posts/1',
+    aiContent: '<a href="/real"><span title=">">Text</span></a>',
+    timestamp: 1721000000000
+  }, 'batch-a');
+
+  assert.equal(record.anchors[0].anchorText, 'Text');
 });
