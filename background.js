@@ -3,6 +3,7 @@ import { installActionClickHandler } from './lib/action-click-handler.mjs';
 import { openCommentHistoryDb } from './lib/comment-history-db.mjs';
 import { createCommentHistoryService } from './lib/comment-history-service.mjs';
 import { installCommentHistoryMessageListener } from './lib/comment-history-message-listener.mjs';
+import { installCommentHistoryRetention } from './lib/comment-history-retention.mjs';
 
 installLlmMessageListener(chrome);
 installActionClickHandler(chrome);
@@ -40,6 +41,11 @@ const commentHistoryService = createCommentHistoryService({
 });
 
 installCommentHistoryMessageListener(chrome, commentHistoryService);
+installCommentHistoryRetention(chrome, {
+  getRetentionStatus: (...args) => commentHistoryService.getRetentionStatus(...args),
+  getMeta: (...args) => commentHistoryRepository.getMeta(...args),
+  setMeta: (...args) => commentHistoryRepository.setMeta(...args)
+});
 
 (async () => {
   try {

@@ -5,7 +5,10 @@
   "description": "自动填充注册表单，并为当前网站生成推广文案。",
   "permissions": [
     "activeTab",
-    "storage"
+    "storage",
+    "unlimitedStorage",
+    "alarms",
+    "notifications"
   ],
   "host_permissions": [
     "https://openrouter.ai/*"
