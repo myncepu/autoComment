@@ -104,7 +104,7 @@
     <li><strong>Successful-comment history in IndexedDB</strong>:
       <ul>
         <li>Successful-comment history stays on this device in IndexedDB and is not sent to the AutoComment backend.</li>
-        <li>It preserves the exact submitted comment body (HTML and text), target page URL and domain, promoted website URL and domain, submission time and status, batch/task identifiers, source, and each anchor's text and raw/resolved URL.</li>
+        <li>It preserves the exact submitted comment HTML (the editor value), plus a whitespace-normalized plain-text representation derived from that HTML, target page URL and domain, promoted website URL and domain, submission time and status, batch/task identifiers, source, and each anchor's whitespace-normalized text and raw/resolved URL.</li>
         <li>This history does not separately capture names, email addresses, passwords, API keys, or other form credentials.</li>
       </ul>
     </li>
@@ -181,7 +181,7 @@
     <li><strong>Model API host permissions</strong>: OpenRouter has default model API host permission; saving or testing another HTTP(S) API Base URL requests optional permission only for that provider host.</li>
     <li><strong><code>storage</code></strong>: Used to store your profile data, API Base URL, model ID, locally stored API key, preferences, and cooldown records as described above.</li>
     <li><strong><code>unlimitedStorage</code></strong>: This permission prevents the normal extension storage quota from blocking local comment history as it grows.</li>
-    <li><strong><code>alarms</code></strong>: This permission schedules local history reminders and queued-write retries; an alarm never deletes history.</li>
+    <li><strong><code>alarms</code></strong>: This permission schedules local retention checks and history reminders; an alarm never deletes history.</li>
     <li><strong><code>notifications</code></strong>: This permission shows local reminders when history approaches or passes the 90-day cleanup threshold.</li>
   </ul>
 
@@ -256,7 +256,7 @@
       <li>用于调用 AI 的 API Key（仅保存在 <code>chrome.storage.local</code>，不会同步或导出）。</li>
       <li>开关类偏好设置：是否自动打开浮窗、是否显示可选的外链导出控件等。</li>
       <li>用于避免在同一域名过于频繁生成文案的短期本地冷却记录（会定期清理）。</li>
-      <li>成功评论历史仅保留在本设备的 IndexedDB 中，不会发送到 AutoComment 后端。它会保留实际提交的评论正文（HTML 和文本）、目标页面 URL 和域名、推广网站 URL 和域名、提交时间与状态、批次/任务标识、来源，以及每个链接的锚文本和原始/解析后 URL。该历史不会另行收集姓名、邮箱地址、密码、API Key 或其他表单凭据。</li>
+      <li>成功评论历史仅保留在本设备的 IndexedDB 中，不会发送到 AutoComment 后端。它会精确保留实际提交的评论 HTML（即编辑器值），并保存从该 HTML 派生且经过空白规范化的纯文本表示、目标页面 URL 和域名、推广网站 URL 和域名、提交时间与状态、批次/任务标识、来源，以及每个链接经空白规范化的锚文本和原始/解析后 URL。该历史不会另行收集姓名、邮箱地址、密码、API Key 或其他表单凭据。</li>
     </ul>
     <p>这些数据仅保存在你的浏览器中，不会出售，不用于投放广告。</p>
 
@@ -293,7 +293,7 @@
       <li><strong>模型 API 主机权限</strong>：OpenRouter 默认拥有模型 API 主机权限；保存或测试其他 HTTP(S) API Base URL 时，只会为该服务商主机请求可选权限。</li>
       <li><strong><code>storage</code></strong>：用于保存上述资料、API Base URL、模型 ID、仅本地保存的 API Key、偏好设置和冷却记录。</li>
       <li><strong><code>unlimitedStorage</code></strong>：此权限用于避免常规扩展存储配额阻碍本地评论历史持续增长。</li>
-      <li><strong><code>alarms</code></strong>：此权限用于安排本地历史提醒和排队写入重试；闹钟绝不会删除历史。</li>
+      <li><strong><code>alarms</code></strong>：此权限用于安排本地保留期限检查和历史提醒；闹钟绝不会删除历史。</li>
       <li><strong><code>notifications</code></strong>：此权限用于在历史记录接近或超过 90 天清理阈值时显示本地提醒。</li>
     </ul>
 

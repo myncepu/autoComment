@@ -14,6 +14,11 @@ const QUERY_MEDIAN_LIMIT_MS = 2_000;
 const FIXED_NOW = Date.UTC(2026, 6, 23, 12);
 const DAY_MS = 24 * 60 * 60 * 1_000;
 const DB_NAME = 'auto-comment-history-scale-benchmark';
+const RECORDS_PER_DAY_BUCKET = RECORD_COUNT / 120;
+
+function generatedRecordId(index) {
+  return `bench:${String(index).padStart(6, '0')}`;
+}
 
 function formatMilliseconds(value) {
   return `${value.toFixed(2)} ms`;
@@ -50,7 +55,7 @@ function requestResult(request) {
 }
 
 function generatedBundle(index) {
-  const id = `bench:${String(index).padStart(6, '0')}`;
+  const id = generatedRecordId(index);
   const submittedAt = FIXED_NOW - ((index % 120) * DAY_MS) - Math.floor(index / 120);
   const targetDomain = `target-${index % 12}.example`;
   const promotedDomain = `promo-${index % 8}.example`;
@@ -117,31 +122,133 @@ function median(values) {
   return ordered[Math.floor(ordered.length / 2)];
 }
 
-async function sampleMedian(operation, validate) {
+function validateIndexVisits(visits, expectedIndexName, expectedCount) {
+  assert.equal(visits.length, expectedCount);
+  assert.ok(visits.every(({ kind, indexName }) => (
+    kind === 'normal' && indexName === expectedIndexName
+  )));
+}
+
+async function timedIndexedQuery({
+  operation,
+  validate,
+  queryVisits,
+  expectedIndexName,
+  expectedVisitCount
+}) {
+  queryVisits.length = 0;
+  const measurement = await timed(operation);
+  validate(measurement.result);
+  validateIndexVisits(queryVisits, expectedIndexName, expectedVisitCount);
+  return measurement;
+}
+
+async function sampleMedian(options) {
   const samples = [];
   for (let index = 0; index < QUERY_SAMPLES; index += 1) {
-    const measurement = await timed(operation);
-    validate(measurement.result);
+    const measurement = await timedIndexedQuery(options);
     samples.push(measurement.durationMs);
   }
   return { samples, medianMs: median(samples) };
 }
 
-function validateCommentPage(result, predicate = () => true) {
-  assert.equal(result.records.length, QUERY_LIMIT);
-  assert.ok(result.records.every(predicate));
+function expectedPageIndices(dayBucket, count) {
+  return Array.from(
+    { length: count },
+    (_, position) => dayBucket + (position * 120)
+  );
 }
 
-function validateExportPage(result) {
-  assert.equal(result.records.length, EXPORT_LIMIT);
-  assert.ok(result.records.every(({ comment, anchors }) => (
-    anchors.length === 1 && anchors[0].commentId === comment.id
-  )));
+function expectedRecordId(index) {
+  return `bench:${String(index).padStart(6, '0')}`;
 }
 
-function validateDeletePreparation(ids) {
-  assert.equal(ids.length, DELETE_PREPARATION_LIMIT);
-  assert.ok(ids.every((id) => Number(id.slice('bench:'.length)) % 120 >= 90));
+function expectedSubmittedAt(index) {
+  return FIXED_NOW - ((index % 120) * DAY_MS) - Math.floor(index / 120);
+}
+
+function expectedCommentCursor(index) {
+  return {
+    submittedAt: expectedSubmittedAt(index),
+    id: expectedRecordId(index)
+  };
+}
+
+function expectedAnchorPayload(index) {
+  const commentId = expectedRecordId(index);
+  const promotedDomain = `promo-${index % 8}.example`;
+  const promotedWebsiteUrl = `https://${promotedDomain}/`;
+  return {
+    id: `${commentId}:0`,
+    commentId,
+    position: 0,
+    anchorText: `promo ${index}`,
+    anchorTextNormalized: `promo ${index}`,
+    hrefRaw: promotedWebsiteUrl,
+    hrefResolved: promotedWebsiteUrl,
+    hrefDomain: promotedDomain
+  };
+}
+
+function validateExactCommentPage(result, expectedIndices) {
+  const expectedIds = expectedIndices.map(expectedRecordId);
+  const actualIds = result.records.map(({ id }) => id);
+  assert.equal(new Set(actualIds).size, actualIds.length);
+  assert.deepEqual(actualIds, expectedIds);
+  assert.deepEqual(result.nextCursor, expectedCommentCursor(expectedIndices.at(-1)));
+}
+
+function validateExportPage(result, expectedIndices) {
+  const expectedIds = expectedIndices.map(expectedRecordId);
+  const actualIds = result.records.map(({ comment }) => comment.id);
+  assert.equal(new Set(actualIds).size, actualIds.length);
+  assert.deepEqual(actualIds, expectedIds);
+  assert.deepEqual(
+    result.records.map(({ anchors }) => anchors),
+    expectedIndices.map((index) => [expectedAnchorPayload(index)])
+  );
+  assert.deepEqual(result.nextCursor, expectedCommentCursor(expectedIndices.at(-1)));
+}
+
+function expectedDeletePreparationIndices() {
+  const indices = [];
+  for (let dayBucket = 119; dayBucket >= 90; dayBucket -= 1) {
+    for (
+      let bucketPosition = RECORDS_PER_DAY_BUCKET - 1;
+      bucketPosition >= 0 && indices.length < DELETE_PREPARATION_LIMIT;
+      bucketPosition -= 1
+    ) {
+      indices.push(dayBucket + (bucketPosition * 120));
+    }
+    if (indices.length === DELETE_PREPARATION_LIMIT) break;
+  }
+  return indices;
+}
+
+function validateDeletePreparation(result, expectedIndices) {
+  const expectedIds = expectedIndices.map(expectedRecordId);
+  assert.equal(new Set(result.ids).size, result.ids.length);
+  assert.deepEqual(result.ids, expectedIds);
+
+  const expectedCutoffIndex = 90;
+  const expectedFirstIneligibleIndex = 89 + (
+    (RECORDS_PER_DAY_BUCKET - 1) * 120
+  );
+  assert.equal(result.cutoffRecord.id, expectedRecordId(expectedCutoffIndex));
+  assert.equal(result.cutoffRecord.submittedAt, result.expiredAt);
+  assert.equal(
+    result.cutoffRecord.submittedAt,
+    expectedSubmittedAt(expectedCutoffIndex)
+  );
+  assert.equal(
+    result.firstIneligibleRecord.id,
+    expectedRecordId(expectedFirstIneligibleIndex)
+  );
+  assert.equal(
+    result.firstIneligibleRecord.submittedAt,
+    expectedSubmittedAt(expectedFirstIneligibleIndex)
+  );
+  assert.ok(result.firstIneligibleRecord.submittedAt > result.expiredAt);
 }
 
 async function prepareDeleteIds(database) {
@@ -152,7 +259,7 @@ async function prepareDeleteIds(database) {
   const range = IDBKeyRange.upperBound([expiredAt, '\uffff\uffff']);
   const ids = [];
 
-  await new Promise((resolve, reject) => {
+  const idsPromise = new Promise((resolve, reject) => {
     const request = index.openCursor(range, 'next');
     request.onerror = () => reject(request.error);
     request.onsuccess = () => {
@@ -165,8 +272,24 @@ async function prepareDeleteIds(database) {
       cursor.continue();
     };
   });
+  const cutoffRecordPromise = requestResult(
+    index.get([expiredAt, generatedRecordId(90)])
+  );
+  const firstIneligibleRecordPromise = new Promise((resolve, reject) => {
+    const request = index.openCursor(
+      IDBKeyRange.lowerBound([expiredAt, '\uffff\uffff'], true),
+      'next'
+    );
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve(request.result?.value);
+  });
+  const [, cutoffRecord, firstIneligibleRecord] = await Promise.all([
+    idsPromise,
+    cutoffRecordPromise,
+    firstIneligibleRecordPromise
+  ]);
   await completion;
-  return ids;
+  return { ids, expiredAt, cutoffRecord, firstIneligibleRecord };
 }
 
 function logEnvironment() {
@@ -187,6 +310,7 @@ async function main() {
   logEnvironment();
   const indexedDBImpl = new IDBFactory();
   globalThis.IDBKeyRange = IDBKeyRange;
+  const queryVisits = [];
   let repository;
   let database;
 
@@ -194,7 +318,8 @@ async function main() {
     repository = await openCommentHistoryDb({
       indexedDBImpl,
       IDBKeyRangeImpl: IDBKeyRange,
-      dbName: DB_NAME
+      dbName: DB_NAME,
+      onQueryCursorVisit: (visit) => queryVisits.push(visit)
     });
     database = await openDatabase(indexedDBImpl, DB_NAME);
 
@@ -227,49 +352,66 @@ async function main() {
       return;
     }
 
-    const coldFirstPage = await timed(
-      () => repository.queryRecords({ limit: QUERY_LIMIT })
-    );
-    validateCommentPage(coldFirstPage.result);
-    const warmFirstPage = await sampleMedian(
-      () => repository.queryRecords({ limit: QUERY_LIMIT }),
-      validateCommentPage
-    );
-    const targetDomainFilter = await sampleMedian(
-      () => repository.queryRecords({
+    const expectedFirstPage = expectedPageIndices(0, QUERY_LIMIT);
+    const expectedTargetPage = expectedPageIndices(3, QUERY_LIMIT);
+    const expectedPromotedPage = expectedPageIndices(5, QUERY_LIMIT);
+    const expectedExportPage = expectedPageIndices(0, EXPORT_LIMIT);
+    const expectedDeletePreparation = expectedDeletePreparationIndices();
+    const coldFirstPage = await timedIndexedQuery({
+      operation: () => repository.queryRecords({ limit: QUERY_LIMIT }),
+      validate: (result) => validateExactCommentPage(result, expectedFirstPage),
+      queryVisits,
+      expectedIndexName: 'by_submitted_at_id',
+      expectedVisitCount: QUERY_LIMIT + 1
+    });
+    const warmFirstPage = await sampleMedian({
+      operation: () => repository.queryRecords({ limit: QUERY_LIMIT }),
+      validate: (result) => validateExactCommentPage(result, expectedFirstPage),
+      queryVisits,
+      expectedIndexName: 'by_submitted_at_id',
+      expectedVisitCount: QUERY_LIMIT + 1
+    });
+    const targetDomainFilter = await sampleMedian({
+      operation: () => repository.queryRecords({
         targetDomain: 'target-3.example',
         limit: QUERY_LIMIT
       }),
-      (result) => validateCommentPage(
-        result,
-        (record) => record.targetDomain === 'target-3.example'
-      )
-    );
-    const promotedDomainFilter = await sampleMedian(
-      () => repository.queryRecords({
+      validate: (result) => validateExactCommentPage(result, expectedTargetPage),
+      queryVisits,
+      expectedIndexName: 'by_target_domain_submitted_at',
+      expectedVisitCount: QUERY_LIMIT + 1
+    });
+    const promotedDomainFilter = await sampleMedian({
+      operation: () => repository.queryRecords({
         promotedDomain: 'promo-5.example',
         limit: QUERY_LIMIT
       }),
-      (result) => validateCommentPage(
-        result,
-        (record) => record.promotedDomain === 'promo-5.example'
-      )
-    );
-    const exportCursor = await timed(
-      () => repository.getExportChunk({ limit: EXPORT_LIMIT })
-    );
-    validateExportPage(exportCursor.result);
+      validate: (result) => validateExactCommentPage(result, expectedPromotedPage),
+      queryVisits,
+      expectedIndexName: 'by_promoted_domain_submitted_at',
+      expectedVisitCount: QUERY_LIMIT + 1
+    });
+    const exportCursor = await timedIndexedQuery({
+      operation: () => repository.getExportChunk({ limit: EXPORT_LIMIT }),
+      validate: (result) => validateExportPage(result, expectedExportPage),
+      queryVisits,
+      expectedIndexName: 'by_submitted_at_id',
+      expectedVisitCount: EXPORT_LIMIT + 1
+    });
     const deletePreparation = await timed(
       () => prepareDeleteIds(database)
     );
-    validateDeletePreparation(deletePreparation.result);
+    validateDeletePreparation(
+      deletePreparation.result,
+      expectedDeletePreparation
+    );
 
     console.log(`Cold first-page query (${coldFirstPage.result.records.length} rows): ${formatMilliseconds(coldFirstPage.durationMs)}`);
     console.log(`Warm first-page query median of 5: ${formatMilliseconds(warmFirstPage.medianMs)} [${warmFirstPage.samples.map(formatMilliseconds).join(', ')}]`);
     console.log(`Target-domain filter median of 5: ${formatMilliseconds(targetDomainFilter.medianMs)} [${targetDomainFilter.samples.map(formatMilliseconds).join(', ')}]`);
     console.log(`Promoted-domain filter median of 5: ${formatMilliseconds(promotedDomainFilter.medianMs)} [${promotedDomainFilter.samples.map(formatMilliseconds).join(', ')}]`);
     console.log(`500-row export cursor (${exportCursor.result.records.length} rows): ${formatMilliseconds(exportCursor.durationMs)}`);
-    console.log(`50,000-row delete preparation (${deletePreparation.result.length} IDs): ${formatMilliseconds(deletePreparation.durationMs)}`);
+    console.log(`50,000-row delete preparation (${deletePreparation.result.ids.length} IDs): ${formatMilliseconds(deletePreparation.durationMs)}`);
 
     const indexedMedians = [
       ['warm first-page', warmFirstPage.medianMs],
