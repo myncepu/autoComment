@@ -873,9 +873,12 @@ async function finalizeTask(
 ) {
   if (localResults.some((entry) => entry.originalIndex === urlIndex)) return false;
 
-  const activity = windowManager?.getByIndex(urlIndex);
-  const opening = openingActivities.get(urlIndex);
-  const startTime = activity?.startTime || opening?.startTime;
+  const taskBatchId = batchId;
+  const taskScheduler = scheduler;
+  const taskWindowManager = windowManager;
+  const taskOpening = openingActivities.get(urlIndex);
+  const activity = taskWindowManager?.getByIndex(urlIndex);
+  const startTime = activity?.startTime || taskOpening?.startTime;
   const elapsed = forcedElapsed !== undefined
     ? forcedElapsed
     : startTime
@@ -883,13 +886,23 @@ async function finalizeTask(
       : null;
 
   recordTaskResult(urlIndex, result, aiContent, errorMessage, elapsed);
-  if (closeWindow) {
-    await windowManager.closeByIndex(urlIndex);
+  if (closeWindow && taskWindowManager) {
+    await taskWindowManager.closeByIndex(urlIndex);
   }
-  openingActivities.delete(urlIndex);
-  if (scheduler) {
-    scheduler.settle(urlIndex);
+  if (
+    taskOpening &&
+    openingActivities.get(urlIndex) === taskOpening
+  ) {
+    openingActivities.delete(urlIndex);
   }
+  if (taskScheduler) {
+    taskScheduler.settle(urlIndex);
+  }
+
+  const ownsCurrentLifecycle = batchId === taskBatchId &&
+    scheduler === taskScheduler &&
+    windowManager === taskWindowManager;
+  if (!ownsCurrentLifecycle) return true;
 
   if (!suppressCompletion && status === 'running' && !isTerminated) {
     fillAvailableWindows();

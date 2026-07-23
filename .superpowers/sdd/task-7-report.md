@@ -231,3 +231,102 @@ Result: 80 passing, 0 failing.
 ### Review Concerns
 
 None.
+
+## Re-Review Fix: Deferred Finalizer Lifecycle Ownership
+
+### RED
+
+Added an executable regression that starts finalization for batch A, defers its
+`closeByIndex`, replaces the page state with batch B using a new scheduler,
+manager, result array, and same-index opening entry, then resolves batch A's
+close.
+
+```bash
+node --test --test-name-pattern="deferred finalizer" \
+  tests/batch-multi-window-integration.test.js
+```
+
+Result: 0 passing and 1 failing, as expected. The replacement scheduler's
+`settle` count was `1` instead of `0`, demonstrating that the old finalizer's
+post-close continuation read mutable global lifecycle state.
+
+### GREEN
+
+`finalizeTask` now captures, before recording:
+
+- the issuing `batchId`;
+- the issuing scheduler;
+- the issuing window manager;
+- the exact opening activity for the URL index, if present.
+
+It closes through the captured manager. After the close resolves, it deletes
+the opening entry only when the map still contains the exact captured object,
+and settles only the captured scheduler. It compares current batch, scheduler,
+and manager identity before refill or completion checks; stale finalizers
+return without touching the replacement lifecycle.
+
+Focused regression:
+
+```bash
+node --check batch.js
+node --test --test-name-pattern="deferred finalizer" \
+  tests/batch-multi-window-integration.test.js
+```
+
+Result: syntax passed; 1 passing, 0 failing.
+
+Complete integration:
+
+```bash
+node --test tests/batch-multi-window-integration.test.js
+```
+
+Result: 10 passing, 0 failing.
+
+Focused scheduler/window/integration verification:
+
+```bash
+git diff --check
+node --test \
+  tests/batch-scheduler.test.mjs \
+  tests/batch-window-manager.test.mjs \
+  tests/batch-multi-window-integration.test.js
+```
+
+Result: whitespace check passed; 24 passing, 0 failing.
+
+Full verification:
+
+```bash
+npm test
+```
+
+Result: 81 passing, 0 failing.
+
+### Changed Files
+
+- `batch.js`
+- `tests/batch-multi-window-integration.test.js`
+- `.superpowers/sdd/task-7-report.md`
+
+### Re-Review Self-Check
+
+- A clear/start replacement uses different batch, scheduler, and manager
+  identities, so an earlier finalizer can close only its captured manager and
+  cannot delete, settle, refill, complete, or record into the replacement.
+- A stop/resume replacement can retain batch or manager identity, but its new
+  scheduler identity still makes the earlier continuation stale.
+- Exact opening-object comparison protects a new same-index opening entry even
+  if its key is identical.
+- The old scheduler is settled exactly once; the replacement scheduler is
+  untouched.
+- Result recording remains synchronous before the close await. Replacing the
+  result array during that await means the stale continuation has no later
+  result mutation.
+- Close-before-settle/refill ordering and all previous timeout, message
+  ownership, missing-item, duplicate-result, stop/resume, and completion
+  protections remain intact.
+
+### Re-Review Concerns
+
+None.

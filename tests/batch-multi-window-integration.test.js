@@ -76,6 +76,7 @@ function createBatchHarness() {
         openWorkerWindow,
         sendTaskWhenReady,
         recordTaskResult,
+        finalizeTask,
         setState(next) {
           if ('batchId' in next) batchId = next.batchId;
           if ('parsedUrls' in next) parsedUrls = next.parsedUrls;
@@ -153,8 +154,8 @@ test('terminal paths close a worker window before replenishing the queue', () =>
   const start = script.indexOf('async function finalizeTask(');
   const end = script.indexOf('\nfunction getProcessedCount()', start);
   const finalizeTask = script.slice(start, end);
-  const closeIndex = finalizeTask.indexOf('await windowManager.closeByIndex(urlIndex)');
-  const settleIndex = finalizeTask.indexOf('scheduler.settle(urlIndex)');
+  const closeIndex = finalizeTask.indexOf('await taskWindowManager.closeByIndex(urlIndex)');
+  const settleIndex = finalizeTask.indexOf('taskScheduler.settle(urlIndex)');
   const refillIndex = finalizeTask.indexOf('fillAvailableWindows()');
   assert.ok(closeIndex >= 0);
   assert.ok(settleIndex > closeIndex);
@@ -333,4 +334,99 @@ test('missing parsed URL records a terminal failure with safe defaults', () => {
   assert.equal(state.successCount, 0);
   assert.equal(state.failCount, 1);
   assert.equal(state.pendingCount, 0);
+});
+
+test('deferred finalizer cannot mutate a replacement same-index lifecycle', async () => {
+  const { api } = createBatchHarness();
+  let resolveClose;
+  let oldCloseCount = 0;
+  let oldSettleCount = 0;
+  const oldOpening = { batchId: 'batch-old', startTime: 1 };
+  const oldOpenings = new Map([[0, oldOpening]]);
+  const oldScheduler = {
+    settle() { oldSettleCount += 1; }
+  };
+  const oldManager = {
+    getByIndex() {
+      return { batchId: 'batch-old', urlIndex: 0, startTime: 1 };
+    },
+    closeByIndex() {
+      oldCloseCount += 1;
+      return new Promise((resolve) => {
+        resolveClose = resolve;
+      });
+    }
+  };
+  api.setState({
+    batchId: 'batch-old',
+    parsedUrls: [{ url: 'https://old.test', sourceDomain: '' }],
+    status: 'running',
+    scheduler: oldScheduler,
+    windowManager: oldManager,
+    openingActivities: oldOpenings,
+    isTerminated: false,
+    localResults: [],
+    totalCount: 2,
+    successCount: 0,
+    failCount: 0,
+    skippedCount: 0,
+    noCommentBoxCount: 0,
+    manualRequiredCount: 0,
+    blockedIllegalCount: 0,
+    pendingCount: 2
+  });
+
+  const finalizing = api.finalizeTask(
+    0,
+    'fail',
+    null,
+    'old task failed'
+  );
+  assert.equal(oldCloseCount, 1);
+
+  let replacementSettleCount = 0;
+  let replacementRefillCount = 0;
+  let replacementCloseCount = 0;
+  const replacementOpening = { batchId: 'batch-new', startTime: 2 };
+  const replacementOpenings = new Map([[0, replacementOpening]]);
+  api.setState({
+    batchId: 'batch-new',
+    parsedUrls: [{ url: 'https://new.test', sourceDomain: '' }],
+    status: 'running',
+    scheduler: {
+      settle() { replacementSettleCount += 1; },
+      takeAvailable() {
+        replacementRefillCount += 1;
+        return [];
+      },
+      get activeIndices() { return [0]; }
+    },
+    windowManager: {
+      getByIndex() {
+        return { batchId: 'batch-new', urlIndex: 0, startTime: 2 };
+      },
+      async closeByIndex() { replacementCloseCount += 1; }
+    },
+    openingActivities: replacementOpenings,
+    isTerminated: false,
+    localResults: [],
+    totalCount: 1,
+    successCount: 0,
+    failCount: 0,
+    skippedCount: 0,
+    noCommentBoxCount: 0,
+    manualRequiredCount: 0,
+    blockedIllegalCount: 0,
+    pendingCount: 1
+  });
+
+  resolveClose();
+  await finalizing;
+
+  assert.equal(replacementSettleCount, 0);
+  assert.equal(replacementRefillCount, 0);
+  assert.equal(replacementCloseCount, 0);
+  assert.equal(replacementOpenings.get(0), replacementOpening);
+  assert.equal(api.getState().localResults.length, 0);
+  assert.equal(oldSettleCount, 1);
 });
