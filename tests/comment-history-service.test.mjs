@@ -102,6 +102,32 @@ test('defaults only nullish results to success and preserves explicit falsey res
   assert.equal(writeCount, 0);
 });
 
+test('treats only marked pre-upgrade success contexts without history as not applicable', async () => {
+  let writeCount = 0;
+  const storageLocal = createStorage();
+  const service = createCommentHistoryService({
+    repository: { async upsertRecord() { writeCount += 1; } },
+    storageLocal
+  });
+
+  assert.deepEqual(
+    await service.saveConfirmedSuccess(makeMessage({
+      history: undefined,
+      historyUnavailableReason: 'legacy_context'
+    })),
+    { historySaveStatus: 'not_applicable' }
+  );
+  assert.deepEqual(
+    await service.saveConfirmedSuccess(makeMessage({
+      history: undefined,
+      historyUnavailableReason: 'unexpected'
+    })),
+    { historySaveStatus: 'failed' }
+  );
+  assert.equal(writeCount, 0);
+  assert.deepEqual(storageLocal.data, {});
+});
+
 test('queues a repository failure under the independent record key', async () => {
   const storageLocal = createStorage();
   const message = makeMessage();

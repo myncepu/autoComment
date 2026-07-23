@@ -815,7 +815,17 @@
     return `${batchId}:${urlIndex}`;
   }
 
-  async function persistBatchSubmitContext(batchId, urlIndex, url, result, aiContent, errorMessage) {
+  async function captureCurrentCommentHistory(editor, pageUrl) {
+    const promotedWebsiteUrl = await getWebsiteUrl();
+    return globalThis.AutoCommentHistoryCapture.captureSubmission({
+      editor,
+      pageUrl: pageUrl || location.href,
+      promotedWebsiteUrl,
+      now: Date.now()
+    });
+  }
+
+  async function persistBatchSubmitContext(batchId, urlIndex, url, result, aiContent, errorMessage, history) {
     if (typeof chrome === 'undefined' || !chrome.storage) return;
     await new Promise((resolve) => {
       chrome.storage.local.set({
@@ -826,6 +836,7 @@
           result,
           aiContent: aiContent || null,
           errorMessage: errorMessage || null,
+          history,
           timestamp: Date.now()
         }
       }, resolve);
@@ -854,7 +865,9 @@
         url: ctx.url || '',
         aiContent: ctx.aiContent || '',
         result: ctx.result || 'success',
-        errorMessage: ctx.errorMessage || null
+        errorMessage: ctx.errorMessage || null,
+        history: ctx.history,
+        historyUnavailableReason: ctx.history ? undefined : 'legacy_context'
       }).then(resolve).catch(resolve);
     });
 
@@ -876,22 +889,26 @@
   }
 
   // 批处理模式专用：直接上报成功到 background
-  async function reportSuccessToBatch(aiContent) {
+  async function reportSuccessToBatch(aiContent, history) {
     if (!_batchCtx) return;
     const { batchId, urlIndex, url } = _batchCtx;
     try {
       await writePendingResult(batchId, urlIndex, url, 'success', aiContent, null);
     } catch (_) {}
     if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
-      await new Promise((resolve) => {
+      const response = await new Promise((resolve) => {
         chrome.runtime.sendMessage({
           type: 'BATCH_HANDLE_CONFIRM',
           batchId,
           urlIndex,
           url: url || '',
-          aiContent
+          aiContent,
+          history
         }).then(resolve).catch(resolve);
       });
+      if (response && response.ok) {
+        clearBatchSubmitContext();
+      }
     }
   }
 
@@ -957,9 +974,12 @@
         return;
       }
 
+      const editor = findLikelyCommentTextarea({ allowGenericFallback: true });
+      const history = await captureCurrentCommentHistory(editor, url);
+      await persistBatchSubmitContext(batchId, urlIndex, url, 'success', promotionText, null, history);
       const navResult = await waitForNavigate(12000);
 
-      await reportSuccessToBatch(promotionText);
+      await reportSuccessToBatch(promotionText, history);
     } catch (err) {
       console.error('[AutoComment] handleBatchTaskForAutoMode 异常:', err);
     }
@@ -3281,14 +3301,23 @@
           // 等待一小段时间确保页面 JS 验证逻辑已完成初始化
           await new Promise(resolve => setTimeout(resolve, 600));
 
+          const editor = findLikelyCommentTextarea({ allowGenericFallback: true });
+          const history = await captureCurrentCommentHistory(editor, location.href);
+          if (_batchCtx) {
+            const { batchId, urlIndex, url } = _batchCtx;
+            await persistBatchSubmitContext(batchId, urlIndex, url, 'success', text, null, history);
+          }
           const result = await clickCommentSubmitButton();
           if (result.success) {
             setStatus('评论已自动提交！', '#22c55e');
             // 批处理模式：提交成功后上报结果到 batch.html
             if (_batchCtx) {
-              await reportSuccessToBatch(text);
+              await reportSuccessToBatch(text, history);
             }
           } else {
+            if (_batchCtx) {
+              clearBatchSubmitContext();
+            }
             setStatus('自动提交失败：' + (result.error || '未知错误') + '，请手动提交', '#f97373');
           }
         console.log('[AutoComment] >>>[7b] shouldAutoSubmit 为 false，仅填充文案');
@@ -3921,9 +3950,11 @@
         return;
       }
 
+      const editor = findLikelyCommentTextarea({ allowGenericFallback: true });
+      const history = await captureCurrentCommentHistory(editor, url);
       // 提交前先写入 pending 结果（页面刷新后 batch.js 仍能立即读到）
       await writePendingResult(batchId, urlIndex, url, 'success', aiContent, null);
-      await persistBatchSubmitContext(batchId, urlIndex, url, 'success', aiContent, null);
+      await persistBatchSubmitContext(batchId, urlIndex, url, 'success', aiContent, null, history);
       console.log('[content] pending结果写入完成');
       console.log('[content] 7/7 点击提交按钮...');
       const clickResult = await clickCommentSubmitButton();
@@ -3957,7 +3988,8 @@
             batchId,
             urlIndex,
             url: url || '',
-            aiContent
+            aiContent,
+            history
           }).then((res) => {
             console.log('[content] background 响应:', res);
             resolve(res);

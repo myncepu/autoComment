@@ -89,6 +89,7 @@ const filterKeyword = document.getElementById('filterKeyword');
 const statsTableBody = document.getElementById('statsTableBody');
 const statsTableWrap = document.getElementById('statsTableWrap');
 const statsCountLabel = document.getElementById('statsCountLabel');
+const historySaveWarning = document.getElementById('historySaveWarning');
 
 // 批量任务设置勾选框
 const batchAutoOpenPanel = document.getElementById('batchAutoOpenPanel');
@@ -99,6 +100,11 @@ const batchAutoSubmit = document.getElementById('batchAutoSubmit');
 const BATCH_SETTINGS_KEY = 'batch_task_settings';
 const BATCH_URLS_KEY = 'batch_task_urls';
 const BATCH_DOMAIN_BLACKLIST = ['nsfw-ai.net'];
+const HISTORY_SAVE_STATUS_TEXT = {
+  saved: '历史已保存',
+  queued: '历史待重试',
+  failed: '历史保存失败'
+};
 
 // 全局勾选框设置的 storage.sync 键
 const BATCH_CHECKBOX_SETTINGS_KEY = 'batch_checkbox_settings';
@@ -204,7 +210,7 @@ function bindEvents() {
     // background 通知：结果已落盘，标签页可以安全关闭了
     if (message.type === 'BATCH_CONFIRMED') {
       console.log('[batch] 收到 BATCH_CONFIRMED >>>', { urlIndex: message.urlIndex, result: message.result, aiContentLen: message.aiContent ? message.aiContent.length : 0, tabsPendingConfirm: [...tabsPendingConfirm.entries()], tabsWaitingClose: [...tabsWaitingClose], time: new Date().toISOString() });
-      handleTabConfirmed(message.urlIndex, message.result, message.aiContent, message.errorMessage);
+      handleTabConfirmed(message.urlIndex, message.result, message.aiContent, message.errorMessage, message.historySaveStatus);
     }
   });
 
@@ -537,7 +543,7 @@ async function stopBatch() {
   for (const [tabId, info] of activeEntries) {
     if (!localResults.some((r) => r.originalIndex === info.urlIndex)) {
       const elapsed = Math.round((Date.now() - info.startTime) / 1000);
-      handleTabResult(info.urlIndex, 'fail', null, '手动终止', elapsed, { suppressCompletion: true });
+      handleTabResult(info.urlIndex, 'fail', null, '手动终止', null, elapsed, { suppressCompletion: true });
     }
   }
 
@@ -644,7 +650,7 @@ async function openNextTab() {
   if (illegalCheck.blocked) {
     console.warn('[batch] 命中非法网站规则，跳过打开标签页:', { urlIndex, url, illegalCheck });
     item.illegalCheck = illegalCheck;
-    handleTabResult(urlIndex, 'blocked_illegal', null, getIllegalSiteBlockMessage(illegalCheck), 0);
+    handleTabResult(urlIndex, 'blocked_illegal', null, getIllegalSiteBlockMessage(illegalCheck), null, 0);
     if (status === 'running' && currentIndex < totalCount) {
       setTimeout(openNextTabSync, 0);
     } else if (status === 'running' && activeTabCount === 0) {
@@ -681,7 +687,7 @@ async function openNextTab() {
           if (!localResults.some((r) => r.originalIndex === urlIndex)) {
             console.log('[batch] 标签关闭但无结果，记为失败:', urlIndex);
             const elapsed = startTime ? Math.round((Date.now() - startTime) / 1000) : null;
-            handleTabResult(urlIndex, 'fail', null, '用户手动关闭', elapsed);
+            handleTabResult(urlIndex, 'fail', null, '用户手动关闭', null, elapsed);
           } else {
             console.log('[batch] 标签关闭已有结果:', urlIndex);
             clearPreviewRow(urlIndex);
@@ -759,7 +765,7 @@ async function openNextTab() {
 
 // 处理标签页结果
 // elapsed 可选，外部已知的耗时直接传入（如手动关闭时），否则从 activeTabsByIndex 计算
-function handleTabResult(urlIndex, result, aiContent, errorMessage, forcedElapsed, options = {}) {
+function handleTabResult(urlIndex, result, aiContent, errorMessage, historySaveStatus, forcedElapsed, options = {}) {
   console.log('[batch] handleTabResult 被调用:', { urlIndex, result, aiContentLen: aiContent ? aiContent.length : 0, errorMessage });
   const item = parsedUrls[urlIndex];
   if (!item) {
@@ -786,6 +792,7 @@ function handleTabResult(urlIndex, result, aiContent, errorMessage, forcedElapse
     result: result,
     aiContent: aiContent || null,
     errorMessage: errorMessage || null,
+    historySaveStatus: historySaveStatus || null,
     timestamp: Date.now(),
     elapsed,
     originalRow: item.originalRow || null  // 保存原始行数据用于导出
@@ -839,16 +846,20 @@ function handleTabResult(urlIndex, result, aiContent, errorMessage, forcedElapse
 }
 
 // background 通知：结果已落盘，可以安全关闭标签页了
-function handleTabConfirmed(urlIndex, result, aiContent, errorMessage) {
-  console.log('[batch] handleTabConfirmed >>>', { urlIndex, result, aiContentLen: aiContent ? aiContent.length : 0, errorMessage, tabsPendingConfirmBefore: [...tabsPendingConfirm.entries()] });
+function handleTabConfirmed(urlIndex, result, aiContent, errorMessage, historySaveStatus) {
+  console.log('[batch] handleTabConfirmed >>>', { urlIndex, result, aiContentLen: aiContent ? aiContent.length : 0, errorMessage, historySaveStatus, tabsPendingConfirmBefore: [...tabsPendingConfirm.entries()] });
 
   // 如果已经记录过结果（标签页可能已被 onRemoved 提前关闭清理），跳过 handleTabResult
-  if (localResults.some((r) => r.originalIndex === urlIndex)) {
+  const existingResult = localResults.find((r) => r.originalIndex === urlIndex);
+  if (existingResult) {
+    existingResult.historySaveStatus = historySaveStatus || null;
+    saveLocalResults();
+    renderStats();
     console.log('[batch] handleTabConfirmed: urlIndex', urlIndex, '已有结果，可能是标签页提前关闭，无需重复处理');
     checkAllCompleted();
   } else {
     // 处理结果（更新 UI、写入 storage）
-    handleTabResult(urlIndex, result, aiContent, errorMessage);
+    handleTabResult(urlIndex, result, aiContent, errorMessage, historySaveStatus);
   }
 
   // 查找并关闭标签页（如果还在的话）
@@ -1249,9 +1260,15 @@ function filterTimeBucket(elapsedSecs) {
 function renderStats() {
   if (localResults.length === 0) {
     statsPanel.classList.remove('visible');
+    historySaveWarning.style.display = 'none';
     return;
   }
   statsPanel.classList.add('visible');
+  const hasHistorySaveWarning = localResults.some(
+    (result) => result.result === 'success' &&
+      (result.historySaveStatus === 'queued' || result.historySaveStatus === 'failed')
+  );
+  historySaveWarning.style.display = hasHistorySaveWarning ? 'block' : 'none';
 
   const total = localResults.length;
   const success = localResults.filter((r) => r.result === 'success').length;
@@ -1341,6 +1358,13 @@ function renderStats() {
       aiCell.style.color = '#d1d5db';
     }
     tr.appendChild(aiCell);
+
+    const historyCell = document.createElement('td');
+    historyCell.textContent = r.result === 'success'
+      ? (HISTORY_SAVE_STATUS_TEXT[r.historySaveStatus] || '—')
+      : '—';
+    historyCell.className = r.historySaveStatus ? `history-save-${r.historySaveStatus}` : '';
+    tr.appendChild(historyCell);
 
     const elapsedCell = document.createElement('td');
     elapsedCell.textContent = elapsedStr;

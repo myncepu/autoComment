@@ -508,6 +508,20 @@
       .stats-table tr.url-manual_required td { background: #fffbeb; }
       .stats-table tr.url-blocked_illegal td { background: #fff1f2; }
 
+      .history-save-warning {
+        display: none;
+        margin: 12px 0;
+        padding: 10px 12px;
+        border: 1px solid #f59e0b;
+        border-radius: 8px;
+        background: #fffbeb;
+        color: #92400e;
+        font-size: 13px;
+      }
+      .history-save-saved { color: #15803d; }
+      .history-save-queued { color: #b45309; }
+      .history-save-failed { color: #b91c1c; }
+
       .result-badge {
         display: inline-block;
         padding: 2px 8px;
@@ -791,6 +805,9 @@
             <div class="stats-card-value rate" id="statsRate">—</div>
           </div>
         </div>
+        <div class="history-save-warning" id="historySaveWarning">
+          部分评论历史尚未保存，请稍后重试或检查扩展存储。
+        </div>
         <div class="stats-filter">
           <span class="stats-filter-label">筛选：</span>
           <select id="filterResult">
@@ -824,6 +841,7 @@
               <col style="width: 92px" />
               <col style="width: 210px" />
               <col style="width: 260px" />
+              <col style="width: 94px" />
               <col style="width: 72px" />
               <col style="width: 72px" />
             </colgroup>
@@ -834,6 +852,7 @@
                 <th>结果</th>
                 <th>错误信息</th>
                 <th>AI 生成内容</th>
+                <th>历史保存</th>
                 <th>耗时</th>
                 <th>时间</th>
               </tr>
