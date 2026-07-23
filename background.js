@@ -1,10 +1,16 @@
 import { installLlmMessageListener } from './lib/llm-message-listener.mjs';
 import { installActionClickHandler } from './lib/action-click-handler.mjs';
 import { createBatchResultStore } from './lib/batch-result-store.mjs';
+import {
+  createBatchSubmitContextStore,
+  installBatchSubmitContextListener
+} from './lib/batch-submit-context-store.mjs';
 
 installLlmMessageListener(chrome);
 installActionClickHandler(chrome);
 const batchResultStore = createBatchResultStore(chrome.storage.local);
+const batchSubmitContextStore = createBatchSubmitContextStore(chrome.storage.local);
+installBatchSubmitContextListener(chrome, batchSubmitContextStore);
 
 /**
  * 将批量结果写入 storage（本地存储，由 batch.js 轮询读取）
