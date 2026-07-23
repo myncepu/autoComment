@@ -206,6 +206,16 @@ function formatDateTime(timestamp) {
   }).format(new Date(timestamp));
 }
 
+function formatSnapshotRange(snapshotRange, exportedBefore) {
+  const rangeStart = Number.isFinite(snapshotRange?.from)
+    ? formatDateTime(snapshotRange.from)
+    : '最早记录';
+  const rangeEnd = Number.isFinite(snapshotRange?.to)
+    ? formatDateTime(snapshotRange.to)
+    : formatDateTime(exportedBefore);
+  return `${rangeStart} 至 ${rangeEnd}`;
+}
+
 function formatBytes(value) {
   if (!Number.isFinite(value) || value < 0) return '不可用';
   if (value < 1024) return `${value} B`;
@@ -421,6 +431,7 @@ function getElements(documentRef) {
     'summaryExpired',
     'summaryStorage',
     'retentionBanner',
+    'historyPendingBanner',
     'historyTableBody',
     'previousPageBtn',
     'nextPageBtn',
@@ -459,10 +470,24 @@ export function bootHistoryPage(documentRef = document, {
   let requestGeneration = 0;
   let completedExportSessionId = '';
   let exportInProgress = false;
+  let exportFilterGeneration = 0;
   let activeFilter = Object.freeze({
     ...buildHistoryFilter(formValues(elements)),
     ...buildNotificationHistoryFilter(search, now)
   });
+
+  function renderPendingQueue(pendingCount) {
+    const count = Number.isInteger(pendingCount) && pendingCount > 0
+      ? pendingCount
+      : 0;
+    elements.historyPendingBanner.hidden = count === 0;
+    setStoredText(
+      elements.historyPendingBanner,
+      count > 0
+        ? `仍有 ${count} 条评论历史等待后台重试保存。`
+        : ''
+    );
+  }
 
   async function loadPage() {
     const generation = ++requestGeneration;
@@ -524,8 +549,18 @@ export function bootHistoryPage(documentRef = document, {
     elements.confirmDeleteBtn.hidden = true;
   }
 
+  function invalidateConfirmedDelete() {
+    exportFilterGeneration += 1;
+    const hadEligibleExport = Boolean(completedExportSessionId);
+    resetConfirmedDelete();
+    if (hadEligibleExport) {
+      setExportStatus('筛选条件已更改；如需清理，请按当前筛选重新导出。');
+    }
+  }
+
   async function exportActiveSnapshot() {
     if (exportInProgress) return;
+    const filterGeneration = exportFilterGeneration;
     exportInProgress = true;
     elements.exportHistoryBtn.disabled = true;
     resetConfirmedDelete();
@@ -586,10 +621,30 @@ export function bootHistoryPage(documentRef = document, {
         exportSessionId: started.exportSessionId,
         filenames
       });
-      completedExportSessionId = started.exportSessionId;
-      elements.confirmDeleteBtn.hidden = false;
-      elements.confirmDeleteBtn.disabled = false;
-      setExportStatus(`导出完成：已处理 ${processedCount} 条，共 ${filenames.length} 个文件。`);
+      if (filterGeneration !== exportFilterGeneration) {
+        resetConfirmedDelete();
+        setExportStatus(
+          '导出归档已完成，但筛选条件已更改；如需清理，请按当前筛选重新导出。'
+        );
+        return;
+      }
+      const snapshotRange = formatSnapshotRange(
+        started.snapshotRange,
+        started.exportedBefore
+      );
+      if (started.cleanupEligible === true) {
+        completedExportSessionId = started.exportSessionId;
+        elements.confirmDeleteBtn.hidden = false;
+        elements.confirmDeleteBtn.disabled = false;
+        setExportStatus(
+          `导出完成：服务器快照 ${started.expectedCount} 条，范围 ${snapshotRange}，共 ${filenames.length} 个文件。`
+        );
+      } else {
+        resetConfirmedDelete();
+        setExportStatus(
+          `仅归档：服务器快照 ${started.expectedCount} 条，范围 ${snapshotRange}，共 ${filenames.length} 个文件；快照包含未满 90 天的记录，不提供删除确认。`
+        );
+      }
     } catch (error) {
       csvParts = [];
       resetConfirmedDelete();
@@ -629,6 +684,7 @@ export function bootHistoryPage(documentRef = document, {
   }
 
   function commitActiveFilter() {
+    invalidateConfirmedDelete();
     activeFilter = Object.freeze(buildHistoryFilter(formValues(elements)));
     pagination = createPaginationState();
     nextCursor = null;
@@ -639,6 +695,8 @@ export function bootHistoryPage(documentRef = document, {
     event.preventDefault();
     commitActiveFilter();
   });
+  elements.historyFilterForm.addEventListener('input', invalidateConfirmedDelete);
+  elements.historyFilterForm.addEventListener('change', invalidateConfirmedDelete);
   elements.resetFiltersBtn.addEventListener('click', () => {
     elements.historyFilterForm.reset();
     commitActiveFilter();
@@ -660,8 +718,15 @@ export function bootHistoryPage(documentRef = document, {
 
   elements.exportHistoryBtn.disabled = false;
   elements.confirmDeleteBtn.hidden = true;
-  loadOverview();
-  loadPage();
+  (async () => {
+    try {
+      const retryResult = await requestMessage({ type: 'HISTORY_RETRY_PENDING' });
+      renderPendingQueue(retryResult?.pending);
+    } catch (_) {
+      // The page remains usable if the retry status cannot be refreshed.
+    }
+    await Promise.all([loadOverview(), loadPage()]);
+  })();
 }
 
 if (typeof document !== 'undefined') {

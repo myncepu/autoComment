@@ -24,6 +24,9 @@ async function callCommentHistoryRepository(method, args) {
 
 const commentHistoryRepository = {
   upsertRecord: (...args) => callCommentHistoryRepository('upsertRecord', args),
+  insertLegacyIfAbsent: (...args) => (
+    callCommentHistoryRepository('insertLegacyIfAbsent', args)
+  ),
   getRecord: (...args) => callCommentHistoryRepository('getRecord', args),
   queryRecords: (...args) => callCommentHistoryRepository('queryRecords', args),
   countRecords: (...args) => callCommentHistoryRepository('countRecords', args),
@@ -124,7 +127,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
         console.log('[background] persistBatchReport 完成，准备发送 BATCH_CONFIRMED');
 
-        const { historySaveStatus } = await commentHistoryService.saveConfirmedSuccess({
+        const {
+          historySaveStatus,
+          pendingCount: historyPendingCount
+        } = await commentHistoryService.saveConfirmedSuccess({
           ...message,
           result: message.result ?? 'success'
         });
@@ -137,7 +143,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           result: message.result ?? 'success',
           aiContent: message.aiContent || null,
           errorMessage: message.errorMessage || null,
-          historySaveStatus
+          historySaveStatus,
+          ...(Number.isInteger(historyPendingCount) ? { historyPendingCount } : {})
         }).then(() => {
           console.log('[background] BATCH_CONFIRMED 发送成功');
         }).catch((e) => {
@@ -148,7 +155,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
         });
 
-        sendResponse({ ok: true, historySaveStatus });
+        sendResponse({
+          ok: true,
+          historySaveStatus,
+          ...(Number.isInteger(historyPendingCount) ? { historyPendingCount } : {})
+        });
         console.log('[background] BATCH_HANDLE_CONFIRM <<< sendResponse({ok:true})');
       } catch (e) {
         console.error('[background] BATCH_HANDLE_CONFIRM 错误:', e);

@@ -186,6 +186,37 @@ test('downloads a CSV Blob and always revokes its completed object URL', () => {
   assert.deepEqual(calls[2], ['click', 'part-001.csv', 'blob:csv-part']);
 });
 
+test('history startup retries a live worker queue before loading and displays remaining pending count', async () => {
+  const document = historyDocument();
+  const requests = [];
+  const requestMessage = async (message) => {
+    requests.push(message);
+    if (message.type === 'HISTORY_RETRY_PENDING') {
+      return { retried: 25, saved: 23, pending: 2 };
+    }
+    if (message.type === 'HISTORY_SUMMARY') return {};
+    if (message.type === 'HISTORY_ARCHIVE_EVENTS') return [];
+    if (message.type === 'HISTORY_LIST') return { records: [], nextCursor: null };
+    throw new Error(`Unexpected request: ${message.type}`);
+  };
+
+  bootHistoryPage(document, {
+    requestMessage,
+    search: '',
+    estimateStorage: async () => 0
+  });
+  await nextTurn();
+  await nextTurn();
+
+  assert.equal(requests[0].type, 'HISTORY_RETRY_PENDING');
+  assert.ok(
+    requests.findIndex(({ type }) => type === 'HISTORY_RETRY_PENDING')
+      < requests.findIndex(({ type }) => type === 'HISTORY_LIST')
+  );
+  assert.equal(document.getElementById('historyPendingBanner').hidden, false);
+  assert.match(document.getElementById('historyPendingBanner').textContent, /2/);
+});
+
 test('exports session chunks into bounded parts then sends only confirmed session deletion', async () => {
   const document = historyDocument();
   document.getElementById('targetDomain').value = 'archive.test';
@@ -207,6 +238,12 @@ test('exports session chunks into bounded parts then sends only confirmed sessio
         exportSessionId: 'export-session-a',
         exportedBefore: Date.UTC(2026, 6, 24),
         expectedCount: 3,
+        cleanupEligible: true,
+        cleanupEligibleCount: 3,
+        snapshotRange: {
+          from: null,
+          to: Date.UTC(2026, 6, 24)
+        },
         criteria: { targetDomain: 'archive.test' }
       };
     }
@@ -272,7 +309,10 @@ test('exports session chunks into bounded parts then sends only confirmed sessio
   });
   assert.equal(document.getElementById('confirmDeleteBtn').hidden, false);
   assert.equal(document.getElementById('confirmDeleteBtn').disabled, false);
-  assert.match(document.getElementById('exportStatus').textContent, /已处理 3 条，共 2 个文件/);
+  assert.match(
+    document.getElementById('exportStatus').textContent,
+    /服务器快照 3 条.*2026.*2 个文件/
+  );
 
   document.getElementById('confirmDeleteBtn').click();
   await nextTurn();
@@ -283,6 +323,202 @@ test('exports session chunks into bounded parts then sends only confirmed sessio
       confirmed: true,
       exportSessionId: 'export-session-a'
     }
+  );
+});
+
+test('mixed-age export remains archive-only and shows the authoritative snapshot range', async () => {
+  const document = historyDocument();
+  const requests = [];
+  const requestMessage = async (message) => {
+    requests.push(message);
+    if (message.type === 'HISTORY_RETRY_PENDING') {
+      return { retried: 0, saved: 0, pending: 0 };
+    }
+    if (message.type === 'HISTORY_SUMMARY') return {};
+    if (message.type === 'HISTORY_ARCHIVE_EVENTS') return [];
+    if (message.type === 'HISTORY_LIST') return { records: [], nextCursor: null };
+    if (message.type === 'HISTORY_EXPORT_START') {
+      return {
+        exportSessionId: 'archive-only-session',
+        exportedBefore: Date.UTC(2026, 6, 24),
+        expectedCount: 1,
+        cleanupEligible: false,
+        cleanupEligibleCount: 0,
+        snapshotRange: {
+          from: Date.UTC(2026, 5, 1),
+          to: Date.UTC(2026, 6, 24)
+        },
+        criteria: {}
+      };
+    }
+    if (message.type === 'HISTORY_EXPORT_CHUNK') {
+      return {
+        records: [{ comment: record('batch-a:1', 'Mixed age'), anchors: [] }],
+        nextCursor: null
+      };
+    }
+    if (message.type === 'HISTORY_EXPORT_FINISH') return {};
+    if (message.type === 'HISTORY_DELETE_CONFIRMED') {
+      throw new Error('archive-only export must not request deletion');
+    }
+    throw new Error(`Unexpected request: ${message.type}`);
+  };
+
+  bootHistoryPage(document, {
+    requestMessage,
+    search: '',
+    estimateStorage: async () => 0,
+    downloadPart() {}
+  });
+  await nextTurn();
+  await nextTurn();
+  document.getElementById('exportHistoryBtn').click();
+  await nextTurn();
+  await nextTurn();
+
+  assert.equal(document.getElementById('confirmDeleteBtn').hidden, true);
+  assert.equal(document.getElementById('confirmDeleteBtn').disabled, true);
+  assert.match(
+    document.getElementById('exportStatus').textContent,
+    /仅归档.*服务器快照 1 条.*2026.*不提供删除确认/
+  );
+  assert.equal(
+    requests.some(({ type }) => type === 'HISTORY_DELETE_CONFIRMED'),
+    false
+  );
+});
+
+test('changing a filter invalidates and hides an eligible export confirmation', async () => {
+  const document = historyDocument();
+  const requests = [];
+  const requestMessage = async (message) => {
+    requests.push(message);
+    if (message.type === 'HISTORY_RETRY_PENDING') {
+      return { retried: 0, saved: 0, pending: 0 };
+    }
+    if (message.type === 'HISTORY_SUMMARY') return {};
+    if (message.type === 'HISTORY_ARCHIVE_EVENTS') return [];
+    if (message.type === 'HISTORY_LIST') return { records: [], nextCursor: null };
+    if (message.type === 'HISTORY_EXPORT_START') {
+      return {
+        exportSessionId: 'eligible-session',
+        exportedBefore: Date.UTC(2026, 6, 24),
+        expectedCount: 1,
+        cleanupEligible: true,
+        cleanupEligibleCount: 1,
+        snapshotRange: {
+          from: null,
+          to: Date.UTC(2026, 3, 25)
+        },
+        criteria: { to: Date.UTC(2026, 3, 25) }
+      };
+    }
+    if (message.type === 'HISTORY_EXPORT_CHUNK') {
+      return {
+        records: [{ comment: record('batch-a:1', 'Expired'), anchors: [] }],
+        nextCursor: null
+      };
+    }
+    if (message.type === 'HISTORY_EXPORT_FINISH') return {};
+    if (message.type === 'HISTORY_DELETE_CONFIRMED') return { deletedCount: 1 };
+    throw new Error(`Unexpected request: ${message.type}`);
+  };
+
+  bootHistoryPage(document, {
+    requestMessage,
+    search: '',
+    estimateStorage: async () => 0,
+    downloadPart() {}
+  });
+  await nextTurn();
+  await nextTurn();
+  document.getElementById('exportHistoryBtn').click();
+  await nextTurn();
+  await nextTurn();
+  assert.equal(document.getElementById('confirmDeleteBtn').hidden, false);
+
+  const targetDomain = document.getElementById('targetDomain');
+  targetDomain.value = 'changed.test';
+  targetDomain.dispatchEvent(
+    new document.defaultView.Event('input', { bubbles: true })
+  );
+  assert.equal(document.getElementById('confirmDeleteBtn').hidden, true);
+  assert.equal(document.getElementById('confirmDeleteBtn').disabled, true);
+  document.getElementById('confirmDeleteBtn').click();
+  await nextTurn();
+  assert.equal(
+    requests.some(({ type }) => type === 'HISTORY_DELETE_CONFIRMED'),
+    false
+  );
+});
+
+test('changing a filter during export cannot resurrect the stale session delete confirmation', async () => {
+  const document = historyDocument();
+  const finishRequest = deferred();
+  const requests = [];
+  const requestMessage = async (message) => {
+    requests.push(message);
+    if (message.type === 'HISTORY_RETRY_PENDING') {
+      return { retried: 0, saved: 0, pending: 0 };
+    }
+    if (message.type === 'HISTORY_SUMMARY') return {};
+    if (message.type === 'HISTORY_ARCHIVE_EVENTS') return [];
+    if (message.type === 'HISTORY_LIST') return { records: [], nextCursor: null };
+    if (message.type === 'HISTORY_EXPORT_START') {
+      return {
+        exportSessionId: 'stale-eligible-session',
+        exportedBefore: Date.UTC(2026, 6, 24),
+        expectedCount: 1,
+        cleanupEligible: true,
+        cleanupEligibleCount: 1,
+        snapshotRange: {
+          from: null,
+          to: Date.UTC(2026, 3, 25)
+        },
+        criteria: { to: Date.UTC(2026, 3, 25) }
+      };
+    }
+    if (message.type === 'HISTORY_EXPORT_CHUNK') {
+      return {
+        records: [{ comment: record('batch-a:1', 'Expired'), anchors: [] }],
+        nextCursor: null
+      };
+    }
+    if (message.type === 'HISTORY_EXPORT_FINISH') return finishRequest.promise;
+    if (message.type === 'HISTORY_DELETE_CONFIRMED') {
+      throw new Error('stale export must not request deletion');
+    }
+    throw new Error(`Unexpected request: ${message.type}`);
+  };
+
+  bootHistoryPage(document, {
+    requestMessage,
+    search: '',
+    estimateStorage: async () => 0,
+    downloadPart() {}
+  });
+  await nextTurn();
+  await nextTurn();
+  document.getElementById('exportHistoryBtn').click();
+  await nextTurn();
+
+  const targetDomain = document.getElementById('targetDomain');
+  targetDomain.value = 'new-filter.test';
+  targetDomain.dispatchEvent(
+    new document.defaultView.Event('input', { bubbles: true })
+  );
+  finishRequest.resolve({});
+  await nextTurn();
+  await nextTurn();
+
+  assert.equal(document.getElementById('confirmDeleteBtn').hidden, true);
+  assert.equal(document.getElementById('confirmDeleteBtn').disabled, true);
+  assert.match(document.getElementById('exportStatus').textContent, /筛选条件已更改/);
+  document.getElementById('confirmDeleteBtn').click();
+  await nextTurn();
+  assert.equal(
+    requests.some(({ type }) => type === 'HISTORY_DELETE_CONFIRMED'),
+    false
   );
 });
 
@@ -307,6 +543,12 @@ test('keeps confirmed deletion success when the best-effort page refresh fails',
         exportSessionId: 'export-session-a',
         exportedBefore: Date.UTC(2026, 6, 24),
         expectedCount: 0,
+        cleanupEligible: true,
+        cleanupEligibleCount: 0,
+        snapshotRange: {
+          from: null,
+          to: Date.UTC(2026, 6, 24)
+        },
         criteria: {}
       };
     }
@@ -447,6 +689,7 @@ test('history layout includes summaries, indexed filters, pagination, archive an
     'summaryExpired',
     'summaryStorage',
     'retentionBanner',
+    'historyPendingBanner',
     'dateFrom',
     'dateTo',
     'targetDomain',
@@ -479,4 +722,5 @@ test('entry pages expose comment history links and batch requests retention stat
   assert.match(batchHtml, /id="openHistoryBtn"[^>]*>[^<]*评论历史/);
   assert.match(batchHtml, /id="historyRetentionBanner"/);
   assert.match(batchJs, /type:\s*'HISTORY_RETENTION_STATUS'/);
+  assert.match(batchJs, /type:\s*'HISTORY_RETRY_PENDING'/);
 });

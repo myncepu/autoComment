@@ -24,6 +24,7 @@ let noCommentBoxCount = 0;
 let manualRequiredCount = 0;
 let blockedIllegalCount = 0;
 let pendingCount = 0;
+let historyPendingCount = null;
 
 // 本地结果存储
 let localResults = [];              // [{originalIndex, url, result, aiContent, errorMessage, timestamp}]
@@ -152,6 +153,7 @@ async function init() {
   await loadBatchCheckboxSettings(); // 全局记忆的勾选框设置
   bindEvents();
   loadHistoryRetentionStatus();
+  retryPendingHistoryWrites();
 
   updateUI();
 }
@@ -168,6 +170,49 @@ function loadHistoryRetentionStatus() {
       ? `有 ${expiredCount} 条评论历史已满 90 天，等待导出和确认清理。`
       : `有 ${dueSoonCount} 条评论历史即将达到 90 天，请提前归档。`;
   });
+}
+
+function renderHistorySaveWarning() {
+  const hasFailedWrite = localResults.some(
+    (result) => result.result === 'success'
+      && result.historySaveStatus === 'failed'
+  );
+  const hasUnrefreshedQueuedWrite = historyPendingCount == null
+    && localResults.some(
+      (result) => result.result === 'success'
+        && result.historySaveStatus === 'queued'
+    );
+  const hasHistorySaveWarning = historyPendingCount > 0
+    || hasFailedWrite
+    || hasUnrefreshedQueuedWrite;
+  historySaveWarning.textContent = historyPendingCount > 0
+    ? `仍有 ${historyPendingCount} 条评论历史等待后台重试保存。`
+    : '部分评论历史尚未保存，请稍后重试或检查扩展存储。';
+  historySaveWarning.style.display = hasHistorySaveWarning ? 'block' : 'none';
+}
+
+function retryPendingHistoryWrites() {
+  chrome.runtime.sendMessage({ type: 'HISTORY_RETRY_PENDING' }, (response) => {
+    if (chrome.runtime.lastError || !response?.ok) return;
+    if (!Number.isInteger(response.data?.pending)) return;
+    historyPendingCount = response.data.pending;
+    if (historyPendingCount === 0) {
+      let changed = false;
+      for (const result of localResults) {
+        if (result.result === 'success' && result.historySaveStatus === 'queued') {
+          result.historySaveStatus = 'saved';
+          changed = true;
+        }
+      }
+      if (changed) saveLocalResults();
+    }
+    renderHistorySaveWarning();
+    if (localResults.length > 0) renderStats();
+  });
+}
+
+function updateHistoryPendingCount(value) {
+  if (Number.isInteger(value)) historyPendingCount = value;
 }
 
 async function loadTimeoutSetting() {
@@ -233,7 +278,14 @@ function bindEvents() {
     // background 通知：结果已落盘，标签页可以安全关闭了
     if (message.type === 'BATCH_CONFIRMED') {
       console.log('[batch] 收到 BATCH_CONFIRMED >>>', { urlIndex: message.urlIndex, result: message.result, aiContentLen: message.aiContent ? message.aiContent.length : 0, tabsPendingConfirm: [...tabsPendingConfirm.entries()], tabsWaitingClose: [...tabsWaitingClose], time: new Date().toISOString() });
-      handleTabConfirmed(message.urlIndex, message.result, message.aiContent, message.errorMessage, message.historySaveStatus);
+      handleTabConfirmed(
+        message.urlIndex,
+        message.result,
+        message.aiContent,
+        message.errorMessage,
+        message.historySaveStatus,
+        message.historyPendingCount
+      );
     }
   });
 
@@ -869,8 +921,16 @@ function handleTabResult(urlIndex, result, aiContent, errorMessage, historySaveS
 }
 
 // background 通知：结果已落盘，可以安全关闭标签页了
-function handleTabConfirmed(urlIndex, result, aiContent, errorMessage, historySaveStatus) {
+function handleTabConfirmed(
+  urlIndex,
+  result,
+  aiContent,
+  errorMessage,
+  historySaveStatus,
+  historyPendingCount
+) {
   console.log('[batch] handleTabConfirmed >>>', { urlIndex, result, aiContentLen: aiContent ? aiContent.length : 0, errorMessage, historySaveStatus, tabsPendingConfirmBefore: [...tabsPendingConfirm.entries()] });
+  updateHistoryPendingCount(historyPendingCount);
 
   // 如果已经记录过结果（标签页可能已被 onRemoved 提前关闭清理），跳过 handleTabResult
   const existingResult = localResults.find((r) => r.originalIndex === urlIndex);
@@ -1283,15 +1343,11 @@ function filterTimeBucket(elapsedSecs) {
 function renderStats() {
   if (localResults.length === 0) {
     statsPanel.classList.remove('visible');
-    historySaveWarning.style.display = 'none';
+    renderHistorySaveWarning();
     return;
   }
   statsPanel.classList.add('visible');
-  const hasHistorySaveWarning = localResults.some(
-    (result) => result.result === 'success' &&
-      (result.historySaveStatus === 'queued' || result.historySaveStatus === 'failed')
-  );
-  historySaveWarning.style.display = hasHistorySaveWarning ? 'block' : 'none';
+  renderHistorySaveWarning();
 
   const total = localResults.length;
   const success = localResults.filter((r) => r.result === 'success').length;

@@ -420,10 +420,15 @@ test('background migrates an old record before its startup retention check and c
   }
 
   const responses = await dispatchConfirm(message);
-  assert.deepEqual(responses, [{ ok: true, historySaveStatus: 'saved' }]);
+  assert.deepEqual(responses, [{
+    ok: true,
+    historySaveStatus: 'saved',
+    historyPendingCount: 0
+  }]);
   assert.equal(runtimeMessages.length, 1);
   assert.equal(runtimeMessages[0].type, 'BATCH_CONFIRMED');
   assert.equal(runtimeMessages[0].historySaveStatus, 'saved');
+  assert.equal(runtimeMessages[0].historyPendingCount, 0);
 
   for (const [offset, result] of ['', false, 0].entries()) {
     const explicitResultResponses = await dispatchConfirm({

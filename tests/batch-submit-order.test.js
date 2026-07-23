@@ -25,17 +25,19 @@ test('batch confirmation stores and renders the background history save status',
 
   assert.match(
     batch,
-    /handleTabConfirmed\(message\.urlIndex,\s*message\.result,\s*message\.aiContent,\s*message\.errorMessage,\s*message\.historySaveStatus\)/
+    /handleTabConfirmed\([\s\S]*message\.historySaveStatus,\s*message\.historyPendingCount\s*\)/
   );
   assert.match(
     batch,
-    /function handleTabConfirmed\(urlIndex,\s*result,\s*aiContent,\s*errorMessage,\s*historySaveStatus\)/
+    /function handleTabConfirmed\([\s\S]*historySaveStatus,\s*historyPendingCount\s*\)/
   );
   assert.match(batch, /historySaveStatus:\s*historySaveStatus\s*\|\|\s*null/);
+  assert.match(batch, /type:\s*'HISTORY_RETRY_PENDING'/);
+  assert.match(batch, /historyPendingCount\s*=\s*response\.data\.pending/);
   assert.match(batch, /saved:\s*'历史已保存'/);
   assert.match(batch, /queued:\s*'历史待重试'/);
   assert.match(batch, /failed:\s*'历史保存失败'/);
-  assert.match(batch, /historySaveWarning\.style\.display\s*=\s*hasHistorySaveWarning\s*\?\s*'block'\s*:\s*'none'/);
+  assert.match(batch, /historyPendingCount\s*>\s*0/);
 
   assert.match(html, /id="historySaveWarning"/);
   assert.match(html, /<th>历史保存<\/th>/);

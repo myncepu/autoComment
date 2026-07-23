@@ -63,7 +63,8 @@ test('stores exactly one normalized bundle for a confirmed success', async () =>
   });
 
   assert.deepEqual(await service.saveConfirmedSuccess(makeMessage()), {
-    historySaveStatus: 'saved'
+    historySaveStatus: 'saved',
+    pendingCount: 0
   });
   assert.equal(writes.length, 1);
   assert.equal(writes[0].comment.id, 'batch-a:7');
@@ -138,7 +139,8 @@ test('queues a repository failure under the independent record key', async () =>
   });
 
   assert.deepEqual(await service.saveConfirmedSuccess(message), {
-    historySaveStatus: 'queued'
+    historySaveStatus: 'queued',
+    pendingCount: 1
   });
   assert.deepEqual(storageLocal.data['historyPending:batch-a:7'], message);
 });
@@ -171,6 +173,112 @@ test('retry removes only successful pending keys and leaves failures isolated', 
   assert.equal(Object.hasOwn(storageLocal.data, 'historyPending:batch-a:1'), false);
   assert.deepEqual(storageLocal.data['historyPending:batch-a:2'], second);
   assert.deepEqual(storageLocal.data.unrelated, { keep: true });
+});
+
+test('bounds each retry trigger and reports the full remaining pending count', async () => {
+  const pending = {};
+  for (let index = 0; index < 30; index += 1) {
+    pending[`historyPending:batch-retry:${index}`] = makeMessage({
+      batchId: 'batch-retry',
+      urlIndex: index
+    });
+  }
+  const storageLocal = createStorage(pending);
+  const attempts = [];
+  const service = createCommentHistoryService({
+    repository: {
+      async upsertRecord(bundle) {
+        attempts.push(bundle.comment.id);
+      }
+    },
+    storageLocal
+  });
+
+  assert.deepEqual(await service.retryPendingWrites(), {
+    retried: 25,
+    saved: 25,
+    pending: 5
+  });
+  assert.equal(attempts.length, 25);
+  assert.equal(
+    Object.keys(storageLocal.data)
+      .filter((key) => key.startsWith('historyPending:')).length,
+    5
+  );
+});
+
+test('direct save removes its stale key and non-recursively retries other pending records', async () => {
+  const direct = makeMessage({ batchId: 'batch-live', urlIndex: 7 });
+  const pending = {
+    'historyPending:batch-live:7': {
+      ...direct,
+      history: {
+        ...direct.history,
+        commentHtml: 'stale queued body',
+        commentText: 'stale queued body'
+      }
+    }
+  };
+  for (let index = 0; index < 27; index += 1) {
+    pending[`historyPending:batch-other:${index}`] = makeMessage({
+      batchId: 'batch-other',
+      urlIndex: index
+    });
+  }
+  const storageLocal = createStorage(pending);
+  const attempts = [];
+  const service = createCommentHistoryService({
+    repository: {
+      async upsertRecord(bundle) {
+        attempts.push(bundle.comment.id);
+      }
+    },
+    storageLocal
+  });
+
+  assert.deepEqual(await service.saveConfirmedSuccess(direct), {
+    historySaveStatus: 'saved',
+    pendingCount: 2
+  });
+  assert.equal(attempts[0], 'batch-live:7');
+  assert.equal(attempts.filter((id) => id === 'batch-live:7').length, 1);
+  assert.equal(attempts.length, 26);
+  assert.equal(
+    Object.hasOwn(storageLocal.data, 'historyPending:batch-live:7'),
+    false
+  );
+  assert.equal(
+    Object.keys(storageLocal.data)
+      .filter((key) => key.startsWith('historyPending:')).length,
+    2
+  );
+});
+
+test('queue maintenance failures never downgrade an already durable direct save', async () => {
+  let writeCount = 0;
+  const service = createCommentHistoryService({
+    repository: {
+      async upsertRecord() {
+        writeCount += 1;
+      }
+    },
+    storageLocal: {
+      async remove() {
+        throw new Error('storage remove unavailable');
+      },
+      async get() {
+        throw new Error('storage get unavailable');
+      },
+      async set() {
+        throw new Error('must not requeue a saved record');
+      }
+    }
+  });
+
+  assert.deepEqual(await service.saveConfirmedSuccess(makeMessage()), {
+    historySaveStatus: 'saved'
+  });
+  assert.equal(writeCount, 1);
 });
 
 test('returns failed when both repository and retry storage fail', async () => {
@@ -209,7 +317,12 @@ test('migrates successful entries from both legacy shapes and marks the migratio
   });
   const migrated = [];
   const service = createCommentHistoryService({
-    repository: { async upsertRecord(bundle) { migrated.push(bundle); } },
+    repository: {
+      async insertLegacyIfAbsent(bundle) {
+        migrated.push(bundle);
+        return true;
+      }
+    },
     storageLocal
   });
 
@@ -238,7 +351,12 @@ test('migration restart is idempotent after the completion marker is written', a
   });
   let writeCount = 0;
   const service = createCommentHistoryService({
-    repository: { async upsertRecord() { writeCount += 1; } },
+    repository: {
+      async insertLegacyIfAbsent() {
+        writeCount += 1;
+        return true;
+      }
+    },
     storageLocal
   });
 
@@ -248,6 +366,51 @@ test('migration restart is idempotent after the completion marker is written', a
     migrated: 0
   });
   assert.equal(writeCount, 1);
+});
+
+test('an interrupted migration rerun counts only transactional inserts', async () => {
+  const storageLocal = createStorage({
+    batchResults: [{
+      batchId: 'batch-interrupted',
+      result: 'success',
+      urlIndex: 1,
+      url: 'https://legacy.test/one',
+      aiContent: 'Legacy fallback',
+      timestamp: 1721000000000
+    }]
+  });
+  const originalSet = storageLocal.set.bind(storageLocal);
+  let markerAttempts = 0;
+  storageLocal.set = async (values) => {
+    if (Object.hasOwn(values, 'legacyMigrationV1') && markerAttempts++ === 0) {
+      throw new Error('worker stopped before marker write');
+    }
+    return originalSet(values);
+  };
+  let present = false;
+  let insertAttempts = 0;
+  const service = createCommentHistoryService({
+    repository: {
+      async insertLegacyIfAbsent() {
+        insertAttempts += 1;
+        if (present) return false;
+        present = true;
+        return true;
+      }
+    },
+    storageLocal
+  });
+
+  await assert.rejects(
+    service.migrateLegacyResults(),
+    /worker stopped before marker write/
+  );
+  assert.deepEqual(await service.migrateLegacyResults(), {
+    migrationStatus: 'migrated',
+    migrated: 0
+  });
+  assert.equal(insertAttempts, 2);
+  assert.equal(storageLocal.data.legacyMigrationV1, true);
 });
 
 test('exposes repository-backed history queries with the injected clock', async () => {
@@ -408,6 +571,12 @@ test('stores one export snapshot descriptor and serves only 500-row session chun
     exportSessionId: 'export-session-a',
     exportedBefore: EXPORT_NOW,
     expectedCount: 3,
+    cleanupEligible: true,
+    cleanupEligibleCount: 3,
+    snapshotRange: {
+      from: null,
+      to: OLD_TO
+    },
     criteria: {
       to: OLD_TO,
       targetDomain: 'target.test'
@@ -421,6 +590,12 @@ test('stores one export snapshot descriptor and serves only 500-row session chun
     },
     exportedBefore: EXPORT_NOW,
     expectedCount: 3,
+    cleanupEligible: true,
+    cleanupEligibleCount: 3,
+    snapshotRange: {
+      from: null,
+      to: OLD_TO
+    },
     startedAt: EXPORT_NOW,
     filenames: [],
     finalizedAt: null,
@@ -444,6 +619,52 @@ test('stores one export snapshot descriptor and serves only 500-row session chun
     cursor,
     limit: 500
   });
+});
+
+test('marks a mixed-age export as archive-only from authoritative snapshot counts and range', async () => {
+  const repository = createExportRepository({
+    count: 3,
+    expiredCount: 2
+  });
+  const service = createCommentHistoryService({
+    repository,
+    storageLocal: createStorage(),
+    now: () => EXPORT_NOW,
+    createExportSessionId: () => 'mixed-export-session'
+  });
+
+  assert.deepEqual(await service.startExport({ targetDomain: 'mixed.test' }), {
+    exportSessionId: 'mixed-export-session',
+    exportedBefore: EXPORT_NOW,
+    expectedCount: 3,
+    cleanupEligible: false,
+    cleanupEligibleCount: 2,
+    snapshotRange: {
+      from: null,
+      to: EXPORT_NOW
+    },
+    criteria: {
+      targetDomain: 'mixed.test'
+    }
+  });
+  assert.deepEqual(
+    repository.calls.filter(([name]) => name === 'countRecords'),
+    [
+      ['countRecords', {
+        targetDomain: 'mixed.test',
+        exportedBefore: EXPORT_NOW
+      }],
+      ['countRecords', {
+        targetDomain: 'mixed.test',
+        to: OLD_TO,
+        exportedBefore: EXPORT_NOW
+      }]
+    ]
+  );
+  assert.equal(
+    repository.meta.get('historyExport:mixed-export-session').cleanupEligible,
+    false
+  );
 });
 
 test('requires explicit deletion confirmation even for a finalized export', async () => {

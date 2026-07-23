@@ -10,6 +10,7 @@ const QUERY_SAMPLES = 5;
 const QUERY_LIMIT = 50;
 const EXPORT_LIMIT = 500;
 const DELETE_PREPARATION_LIMIT = 50_000;
+const ATOMIC_CLEANUP_COUNT = 1_000;
 const QUERY_MEDIAN_LIMIT_MS = 2_000;
 const FIXED_NOW = Date.UTC(2026, 6, 23, 12);
 const DAY_MS = 24 * 60 * 60 * 1_000;
@@ -251,6 +252,16 @@ function validateDeletePreparation(result, expectedIndices) {
   assert.ok(result.firstIneligibleRecord.submittedAt > result.expiredAt);
 }
 
+function validateRetentionSummary(summary) {
+  assert.deepEqual(summary, {
+    totalCount: RECORD_COUNT,
+    last24HoursCount: RECORDS_PER_DAY_BUCKET + 1,
+    dueSoonCount: 10 * RECORDS_PER_DAY_BUCKET,
+    expiredCount: 30 * RECORDS_PER_DAY_BUCKET,
+    oldestSubmittedAt: expectedSubmittedAt(RECORD_COUNT - 1)
+  });
+}
+
 async function prepareDeleteIds(database) {
   const transaction = database.transaction('comment_records', 'readonly');
   const completion = transactionCompletion(transaction);
@@ -292,6 +303,106 @@ async function prepareDeleteIds(database) {
   return { ids, expiredAt, cutoffRecord, firstIneligibleRecord };
 }
 
+async function runIsolatedAtomicCleanup(cleanupInstrumentation) {
+  const indexedDBImpl = new IDBFactory();
+  const dbName = `${DB_NAME}-atomic-cleanup`;
+  const repository = await openCommentHistoryDb({
+    indexedDBImpl,
+    IDBKeyRangeImpl: IDBKeyRange,
+    dbName,
+    onCleanupCursorVisit({ pass, inFlightRecords }) {
+      cleanupInstrumentation.visits += 1;
+      if (pass === 'validate') cleanupInstrumentation.validateVisits += 1;
+      if (pass === 'delete') cleanupInstrumentation.deleteVisits += 1;
+      cleanupInstrumentation.maxInFlightRecords = Math.max(
+        cleanupInstrumentation.maxInFlightRecords,
+        inFlightRecords
+      );
+    }
+  });
+  const database = await openDatabase(indexedDBImpl, dbName);
+  const exportSessionId = 'benchmark-atomic-cleanup';
+  const exportedBefore = FIXED_NOW;
+  try {
+    const insertTransaction = database.transaction(
+      ['comment_records', 'comment_anchors'],
+      'readwrite'
+    );
+    const insertCompletion = transactionCompletion(insertTransaction);
+    const commentStore = insertTransaction.objectStore('comment_records');
+    const anchorStore = insertTransaction.objectStore('comment_anchors');
+    for (let index = 0; index < ATOMIC_CLEANUP_COUNT; index += 1) {
+      const bundle = generatedBundle(index);
+      const submittedAt = FIXED_NOW - (100 * DAY_MS) - index;
+      commentStore.put({
+        ...bundle.comment,
+        submittedAt,
+        createdAt: submittedAt,
+        updatedAt: submittedAt
+      });
+      anchorStore.put(bundle.anchor);
+    }
+    await insertCompletion;
+
+    await repository.setMeta(`historyExport:${exportSessionId}`, {
+      exportSessionId,
+      criteria: {},
+      exportedBefore,
+      expectedCount: ATOMIC_CLEANUP_COUNT,
+      cleanupEligible: true,
+      cleanupEligibleCount: ATOMIC_CLEANUP_COUNT,
+      snapshotRange: { from: null, to: exportedBefore },
+      startedAt: exportedBefore,
+      filenames: ['comment-history-benchmark-part-001.csv'],
+      finalizedAt: exportedBefore,
+      consumedAt: null
+    });
+
+    cleanupInstrumentation.visits = 0;
+    cleanupInstrumentation.validateVisits = 0;
+    cleanupInstrumentation.deleteVisits = 0;
+    cleanupInstrumentation.maxInFlightRecords = 0;
+    const measurement = await timed(() => repository.deleteExportSessionAtomic({
+      exportSessionId,
+      confirmedAt: FIXED_NOW
+    }));
+    assert.deepEqual(measurement.result, {
+      deletedCount: ATOMIC_CLEANUP_COUNT,
+      exportSessionId
+    });
+    assert.equal(cleanupInstrumentation.visits, ATOMIC_CLEANUP_COUNT * 2);
+    assert.equal(cleanupInstrumentation.validateVisits, ATOMIC_CLEANUP_COUNT);
+    assert.equal(cleanupInstrumentation.deleteVisits, ATOMIC_CLEANUP_COUNT);
+    assert.equal(cleanupInstrumentation.maxInFlightRecords, 1);
+
+    const remainingCommentCount = await requestResult(
+      database.transaction('comment_records', 'readonly')
+        .objectStore('comment_records')
+        .count()
+    );
+    const remainingAnchorCount = await requestResult(
+      database.transaction('comment_anchors', 'readonly')
+        .objectStore('comment_anchors')
+        .count()
+    );
+    assert.equal(remainingCommentCount, 0);
+    assert.equal(remainingAnchorCount, 0);
+    const session = await repository.getMeta(`historyExport:${exportSessionId}`);
+    assert.equal(session.consumedAt, FIXED_NOW);
+    const archive = (await repository.listArchiveEvents())
+      .find(({ id }) => id === `archive:${exportSessionId}`);
+    assert.equal(archive.recordCount, ATOMIC_CLEANUP_COUNT);
+    return {
+      ...measurement,
+      remainingCommentCount,
+      remainingAnchorCount
+    };
+  } finally {
+    database.close();
+    repository.close();
+  }
+}
+
 function logEnvironment() {
   const cpu = os.cpus()[0]?.model || 'unknown';
   console.log('Comment history scale benchmark');
@@ -304,6 +415,7 @@ function logEnvironment() {
   console.log(`Insert batch size: ${INSERT_BATCH_SIZE.toLocaleString('en-US')}`);
   console.log(`Query samples: ${QUERY_SAMPLES}`);
   console.log(`Indexed query median limit: ${formatMilliseconds(QUERY_MEDIAN_LIMIT_MS)}`);
+  console.log(`Atomic cleanup sample: ${ATOMIC_CLEANUP_COUNT.toLocaleString('en-US')} records (fake-indexeddb runtime bound)`);
 }
 
 async function main() {
@@ -311,6 +423,12 @@ async function main() {
   const indexedDBImpl = new IDBFactory();
   globalThis.IDBKeyRange = IDBKeyRange;
   const queryVisits = [];
+  const cleanupInstrumentation = {
+    visits: 0,
+    validateVisits: 0,
+    deleteVisits: 0,
+    maxInFlightRecords: 0
+  };
   let repository;
   let database;
 
@@ -319,7 +437,16 @@ async function main() {
       indexedDBImpl,
       IDBKeyRangeImpl: IDBKeyRange,
       dbName: DB_NAME,
-      onQueryCursorVisit: (visit) => queryVisits.push(visit)
+      onQueryCursorVisit: (visit) => queryVisits.push(visit),
+      onCleanupCursorVisit({ pass, inFlightRecords }) {
+        cleanupInstrumentation.visits += 1;
+        if (pass === 'validate') cleanupInstrumentation.validateVisits += 1;
+        if (pass === 'delete') cleanupInstrumentation.deleteVisits += 1;
+        cleanupInstrumentation.maxInFlightRecords = Math.max(
+          cleanupInstrumentation.maxInFlightRecords,
+          inFlightRecords
+        );
+      }
     });
     database = await openDatabase(indexedDBImpl, DB_NAME);
 
@@ -357,6 +484,10 @@ async function main() {
     const expectedPromotedPage = expectedPageIndices(5, QUERY_LIMIT);
     const expectedExportPage = expectedPageIndices(0, EXPORT_LIMIT);
     const expectedDeletePreparation = expectedDeletePreparationIndices();
+    const retentionSummary = await timed(
+      () => repository.getRetentionSummary(FIXED_NOW)
+    );
+    validateRetentionSummary(retentionSummary.result);
     const coldFirstPage = await timedIndexedQuery({
       operation: () => repository.queryRecords({ limit: QUERY_LIMIT }),
       validate: (result) => validateExactCommentPage(result, expectedFirstPage),
@@ -405,13 +536,23 @@ async function main() {
       deletePreparation.result,
       expectedDeletePreparation
     );
+    database.close();
+    database = null;
+    repository.close();
+    repository = null;
+    const atomicCleanup = await runIsolatedAtomicCleanup(cleanupInstrumentation);
 
+    console.log(`360,000-record retention summary: ${formatMilliseconds(retentionSummary.durationMs)}`);
     console.log(`Cold first-page query (${coldFirstPage.result.records.length} rows): ${formatMilliseconds(coldFirstPage.durationMs)}`);
     console.log(`Warm first-page query median of 5: ${formatMilliseconds(warmFirstPage.medianMs)} [${warmFirstPage.samples.map(formatMilliseconds).join(', ')}]`);
     console.log(`Target-domain filter median of 5: ${formatMilliseconds(targetDomainFilter.medianMs)} [${targetDomainFilter.samples.map(formatMilliseconds).join(', ')}]`);
     console.log(`Promoted-domain filter median of 5: ${formatMilliseconds(promotedDomainFilter.medianMs)} [${promotedDomainFilter.samples.map(formatMilliseconds).join(', ')}]`);
     console.log(`500-row export cursor (${exportCursor.result.records.length} rows): ${formatMilliseconds(exportCursor.durationMs)}`);
     console.log(`50,000-row delete preparation (${deletePreparation.result.ids.length} IDs): ${formatMilliseconds(deletePreparation.durationMs)}`);
+    console.log(`Isolated ${ATOMIC_CLEANUP_COUNT.toLocaleString('en-US')}-record atomic cleanup: ${formatMilliseconds(atomicCleanup.durationMs)}`);
+    console.log(`Remaining comments after cleanup: ${atomicCleanup.remainingCommentCount.toLocaleString('en-US')}`);
+    console.log(`Remaining anchors after cleanup: ${atomicCleanup.remainingAnchorCount.toLocaleString('en-US')}`);
+    console.log(`Atomic cleanup cursor visits: ${cleanupInstrumentation.visits.toLocaleString('en-US')} (max in-flight records: ${cleanupInstrumentation.maxInFlightRecords})`);
 
     const indexedMedians = [
       ['warm first-page', warmFirstPage.medianMs],

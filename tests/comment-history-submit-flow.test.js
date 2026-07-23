@@ -16,6 +16,10 @@ function sourceBetween(startMarker, endMarker) {
   return content.slice(start, end);
 }
 
+function plain(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
 test('captures the fixture editor value and promoted URL at the submission boundary', async () => {
   const html = fs.readFileSync(path.join(__dirname, 'fixtures', 'comment-page.html'), 'utf8');
   const dom = new JSDOM(html, {
@@ -68,7 +72,7 @@ test('captures the final editor before pending context persistence and synthetic
   assert.ok(contextIndex < clickIndex, 'submit context must be durable before the click');
   assert.match(flow, /const editor = findLikelyCommentTextarea\(\{ allowGenericFallback: true \}\);/);
   assert.match(flow, /persistBatchSubmitContext\([^;]+history\)/);
-  assert.match(flow, /history\s*\n\s*\}\)\.then/);
+  assert.match(flow, /confirmBatchHistoryDurably\(\{[\s\S]*history[\s\S]*\}\)/);
 });
 
 test('forwards one captured history payload through direct, restored, and panel confirmations', () => {
@@ -99,9 +103,9 @@ test('forwards one captured history payload through direct, restored, and panel 
     restored,
     /historyUnavailableReason:\s*ctx\.history\s*\?\s*undefined\s*:\s*'legacy_context'/
   );
+  assert.match(restored, /confirmBatchHistoryDurably\(message\)/);
   assert.match(reporter, /async function reportSuccessToBatch\(aiContent, history\)/);
-  assert.match(reporter, /history\s*\n\s*\}\)\.then/);
-  assert.match(reporter, /if \(response && response\.ok\) \{\s*clearBatchSubmitContext\(\);/);
+  assert.match(reporter, /confirmBatchHistoryDurably\(\{[\s\S]*history[\s\S]*\}\)/);
 
   const autoCaptureIndex = autoMode.indexOf('captureCurrentCommentHistory');
   const autoWaitIndex = autoMode.indexOf('waitForNavigate');
@@ -114,11 +118,227 @@ test('forwards one captured history payload through direct, restored, and panel 
   const panelReportIndex = panel.indexOf('reportSuccessToBatch(text, history)');
   assert.ok(panelCaptureIndex < panelClickIndex, 'panel capture must precede the click');
   assert.ok(panelClickIndex < panelReportIndex, 'panel success must reuse the pre-click payload');
-  assert.match(
+  assert.doesNotMatch(
     panel,
-    /else \{\s*if \(_batchCtx\) \{\s*clearBatchSubmitContext\(\);\s*\}/,
-    'a non-batch failure must not clear another tab’s shared submit context'
+    /clearBatchSubmitContext\(\)/,
+    'an ambiguous click failure must preserve the durable submit context'
   );
+});
+
+test('pre-click context persistence rejects quota errors and ambiguous post-click paths preserve it', async () => {
+  const dom = new JSDOM('<!doctype html><body></body>', {
+    url: 'https://target.test/post',
+    runScripts: 'outside-only'
+  });
+  const context = dom.getInternalVMContext();
+  const runtime = { lastError: null };
+  context.chrome = {
+    runtime,
+    storage: {
+      local: {
+        set(_values, callback) {
+          runtime.lastError = { message: 'QUOTA_BYTES quota exceeded' };
+          callback();
+          runtime.lastError = null;
+        }
+      }
+    }
+  };
+  const persistSource = sourceBetween(
+    'async function persistBatchSubmitContext',
+    '\n  function clearBatchSubmitContext'
+  );
+  vm.runInContext(
+    `${persistSource}\nglobalThis.persistBatchSubmitContext = persistBatchSubmitContext;`,
+    context
+  );
+
+  await assert.rejects(
+    context.persistBatchSubmitContext(
+      'batch-a',
+      7,
+      'https://target.test/post',
+      'success',
+      'Generated fallback',
+      null,
+      exactConfirmationMessage().history
+    ),
+    /quota/i
+  );
+
+  const taskFlow = sourceBetween(
+    'async function handleBatchTask(batchId, urlIndex, url, originalIndex)',
+    '\n  /**\n   * 等待页面关键元素加载'
+  );
+  const postClickFlow = taskFlow.slice(taskFlow.indexOf('const clickResult'));
+  assert.doesNotMatch(
+    postClickFlow,
+    /clearBatchSubmitContext\(\)/,
+    'post-click timeout and catch paths must not discard an ambiguous submission'
+  );
+});
+
+function createConfirmationHarness({
+  response,
+  rejection,
+  fallbackLastError,
+  fallbackThrows = false
+} = {}) {
+  const dom = new JSDOM('<!doctype html><body></body>', {
+    url: 'https://target.test/post',
+    runScripts: 'outside-only'
+  });
+  const context = dom.getInternalVMContext();
+  const sentMessages = [];
+  const storageWrites = [];
+  const storageRemovals = [];
+  const runtime = {
+    lastError: null,
+    sendMessage(message) {
+      sentMessages.push(plain(message));
+      return rejection ? Promise.reject(rejection) : Promise.resolve(response);
+    }
+  };
+  context.chrome = {
+    runtime,
+    storage: {
+      local: {
+        set(values, callback) {
+          if (fallbackThrows) throw new Error('fallback storage threw');
+          storageWrites.push(plain(values));
+          runtime.lastError = fallbackLastError || null;
+          callback();
+          runtime.lastError = null;
+        },
+        remove(key, callback) {
+          storageRemovals.push(key);
+          callback?.();
+        }
+      }
+    }
+  };
+  context.console = { log() {}, warn() {}, error() {} };
+  const confirmationSource = sourceBetween(
+    'function clearBatchSubmitContext',
+    '\n  // 从 storage 恢复提交后上下文'
+  );
+  vm.runInContext(`${confirmationSource}
+globalThis.confirmBatchHistoryDurably = confirmBatchHistoryDurably;
+globalThis.confirmRestoredBatchSubmit = confirmRestoredBatchSubmit;`, context);
+  return {
+    context,
+    sentMessages,
+    storageWrites,
+    storageRemovals
+  };
+}
+
+function exactConfirmationMessage(overrides = {}) {
+  return {
+    type: 'BATCH_HANDLE_CONFIRM',
+    batchId: 'batch-a',
+    urlIndex: 7,
+    url: 'https://target.test/post',
+    aiContent: 'Generated fallback',
+    history: {
+      submittedAt: 1721000000000,
+      targetPageUrl: 'https://target.test/post',
+      promotedWebsiteUrl: 'https://promo.test/',
+      commentHtml: 'Exact submitted body',
+      commentText: 'Exact submitted body',
+      anchors: []
+    },
+    ...overrides
+  };
+}
+
+test('rejected and closed confirmation messages durably transfer the exact payload before clearing', async () => {
+  for (const rejection of [
+    new Error('background rejected'),
+    new Error('The message channel closed before a response was received.')
+  ]) {
+    const harness = createConfirmationHarness({ rejection });
+    const message = exactConfirmationMessage();
+
+    assert.deepEqual(
+      plain(await harness.context.confirmBatchHistoryDurably(message)),
+      { durable: true, acknowledgement: null }
+    );
+    assert.deepEqual(harness.sentMessages, [message]);
+    assert.deepEqual(harness.storageWrites, [{
+      'historyPending:batch-a:7': message
+    }]);
+    assert.deepEqual(harness.storageRemovals, ['batchSubmitCtx']);
+  }
+});
+
+test('failed acknowledgement falls back, while a fallback write failure preserves submit context', async () => {
+  const failedAck = createConfirmationHarness({
+    response: { ok: true, historySaveStatus: 'failed' }
+  });
+  const message = exactConfirmationMessage();
+  assert.deepEqual(
+    plain(await failedAck.context.confirmBatchHistoryDurably(message)),
+    {
+      durable: true,
+      acknowledgement: { ok: true, historySaveStatus: 'failed' }
+    }
+  );
+  assert.deepEqual(failedAck.storageWrites, [{
+    'historyPending:batch-a:7': message
+  }]);
+  assert.deepEqual(failedAck.storageRemovals, ['batchSubmitCtx']);
+
+  for (const failureOptions of [
+    { fallbackLastError: { message: 'quota exceeded' } },
+    { fallbackThrows: true }
+  ]) {
+    const failedFallback = createConfirmationHarness({
+      rejection: new Error('background unavailable'),
+      ...failureOptions
+    });
+    assert.deepEqual(
+      plain(await failedFallback.context.confirmBatchHistoryDurably(message)),
+      { durable: false, acknowledgement: null }
+    );
+    assert.deepEqual(failedFallback.storageRemovals, []);
+  }
+});
+
+test('restored exact and marked legacy contexts clear only after a valid acknowledgement', async () => {
+  const exactHarness = createConfirmationHarness({
+    response: { ok: true, historySaveStatus: 'saved' }
+  });
+  const exactContext = {
+    ...exactConfirmationMessage(),
+    type: undefined,
+    result: 'success',
+    errorMessage: null,
+    timestamp: 1
+  };
+  delete exactContext.type;
+  await exactHarness.context.confirmRestoredBatchSubmit(exactContext);
+  assert.equal(exactHarness.sentMessages[0].history.commentHtml, 'Exact submitted body');
+  assert.deepEqual(exactHarness.storageWrites, []);
+  assert.deepEqual(exactHarness.storageRemovals, ['batchSubmitCtx']);
+
+  const legacyHarness = createConfirmationHarness({
+    response: { ok: true, historySaveStatus: 'not_applicable' }
+  });
+  await legacyHarness.context.confirmRestoredBatchSubmit({
+    batchId: 'batch-old',
+    urlIndex: 3,
+    url: 'https://legacy.test/post',
+    aiContent: 'Legacy AI fallback',
+    result: 'success',
+    timestamp: 1
+  });
+  assert.equal(
+    legacyHarness.sentMessages[0].historyUnavailableReason,
+    'legacy_context'
+  );
+  assert.deepEqual(legacyHarness.storageWrites, []);
+  assert.deepEqual(legacyHarness.storageRemovals, ['batchSubmitCtx']);
 });
 
 test('non-success confirmations do not attach history', () => {

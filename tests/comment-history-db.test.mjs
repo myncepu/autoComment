@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
+import {
+  IDBFactory,
+  IDBIndex,
+  IDBKeyRange,
+  IDBObjectStore
+} from 'fake-indexeddb';
 import { openCommentHistoryDb } from '../lib/comment-history-db.mjs';
 
 globalThis.IDBKeyRange = IDBKeyRange;
@@ -145,6 +150,72 @@ test('upsert replaces anchors and rolls back the whole transaction on an invalid
     comment: original.comment,
     anchors: [replacementAnchor]
   });
+});
+
+test('legacy insert-if-absent never downgrades live data across reruns or concurrent writes', async (t) => {
+  const { repo } = await openRepo(t);
+  function legacyBundle(id, createdAt) {
+    const bundle = makeBundle({
+      id,
+      submittedAt: createdAt,
+      anchors: [{ anchorText: 'Legacy', hrefDomain: 'legacy.test' }]
+    });
+    return {
+      comment: {
+        ...bundle.comment,
+        source: 'legacy',
+        commentHtml: 'Legacy AI fallback',
+        commentText: 'Legacy AI fallback',
+        createdAt,
+        updatedAt: createdAt
+      },
+      anchors: bundle.anchors
+    };
+  }
+  function liveBundle(id, createdAt) {
+    const bundle = makeBundle({
+      id,
+      submittedAt: createdAt + 10,
+      anchors: [{ anchorText: 'Exact live', hrefDomain: 'live.test' }]
+    });
+    return {
+      comment: {
+        ...bundle.comment,
+        commentHtml: 'Exact live body',
+        commentText: 'Exact live body',
+        createdAt,
+        updatedAt: createdAt + 20
+      },
+      anchors: bundle.anchors
+    };
+  }
+
+  const interruptedLegacy = legacyBundle('batch-rerun:1', 100);
+  const replacementLive = liveBundle('batch-rerun:1', 500);
+  assert.equal(await repo.insertLegacyIfAbsent(interruptedLegacy), true);
+  await repo.upsertRecord(replacementLive);
+  assert.equal(await repo.insertLegacyIfAbsent(interruptedLegacy), false);
+  assert.deepEqual(await repo.getRecord('batch-rerun:1'), replacementLive);
+  assert.equal(
+    (await repo.getRecord('batch-rerun:1')).comment.createdAt,
+    replacementLive.comment.createdAt
+  );
+
+  const legacyFirst = legacyBundle('batch-concurrent:1', 200);
+  const liveSecond = liveBundle('batch-concurrent:1', 600);
+  await Promise.all([
+    repo.insertLegacyIfAbsent(legacyFirst),
+    repo.upsertRecord(liveSecond)
+  ]);
+  assert.deepEqual(await repo.getRecord('batch-concurrent:1'), liveSecond);
+
+  const liveFirst = liveBundle('batch-concurrent:2', 700);
+  const legacySecond = legacyBundle('batch-concurrent:2', 300);
+  await Promise.all([
+    repo.upsertRecord(liveFirst),
+    repo.insertLegacyIfAbsent(legacySecond)
+  ]);
+  assert.deepEqual(await repo.getRecord('batch-concurrent:2'), liveFirst);
 });
 
 test('paginates comments in descending submission order with a stable cursor', async (t) => {
@@ -339,6 +410,64 @@ test('reports rolling retention counts at exact 24-hour boundaries', async (t) =
     expiredCount: 2,
     oldestSubmittedAt: now - 97 * day
   });
+});
+
+test('retention summary uses range counts and a key cursor without cloning record values', async (t) => {
+  const calls = [];
+  const originalIndexCount = IDBIndex.prototype.count;
+  const originalOpenCursor = IDBIndex.prototype.openCursor;
+  const originalOpenKeyCursor = IDBIndex.prototype.openKeyCursor;
+  const originalStoreCount = IDBObjectStore.prototype.count;
+  IDBIndex.prototype.count = function (...args) {
+    calls.push({ kind: 'index-count', name: this.name });
+    return originalIndexCount.apply(this, args);
+  };
+  IDBIndex.prototype.openCursor = function (...args) {
+    calls.push({ kind: 'value-cursor', name: this.name });
+    return originalOpenCursor.apply(this, args);
+  };
+  IDBIndex.prototype.openKeyCursor = function (...args) {
+    calls.push({ kind: 'key-cursor', name: this.name });
+    return originalOpenKeyCursor.apply(this, args);
+  };
+  IDBObjectStore.prototype.count = function (...args) {
+    calls.push({ kind: 'store-count', name: this.name });
+    return originalStoreCount.apply(this, args);
+  };
+  t.after(() => {
+    IDBIndex.prototype.count = originalIndexCount;
+    IDBIndex.prototype.openCursor = originalOpenCursor;
+    IDBIndex.prototype.openKeyCursor = originalOpenKeyCursor;
+    IDBObjectStore.prototype.count = originalStoreCount;
+  });
+
+  const { repo } = await openRepo(t);
+  const day = 24 * 60 * 60 * 1000;
+  const now = 200 * day;
+  for (const [index, age] of [0, 85, 95].entries()) {
+    const bundle = makeBundle({
+      id: `large-html:${index}`,
+      submittedAt: now - age * day
+    });
+    bundle.comment.commentHtml = 'x'.repeat(250_000);
+    await repo.upsertRecord(bundle);
+  }
+  calls.length = 0;
+
+  assert.deepEqual(await repo.getRetentionSummary(now), {
+    totalCount: 3,
+    last24HoursCount: 1,
+    dueSoonCount: 1,
+    expiredCount: 1,
+    oldestSubmittedAt: now - 95 * day
+  });
+  assert.deepEqual(calls, [
+    { kind: 'store-count', name: 'comment_records' },
+    { kind: 'index-count', name: 'by_submitted_at' },
+    { kind: 'index-count', name: 'by_submitted_at' },
+    { kind: 'index-count', name: 'by_submitted_at' },
+    { kind: 'key-cursor', name: 'by_submitted_at' }
+  ]);
 });
 
 test('exports an updatedAt snapshot and atomically deletes the exact confirmed criteria', async (t) => {
@@ -559,6 +688,74 @@ test('atomic export cleanup commits comments anchors archive and session togethe
     }),
     (error) => error.code === 'EXPORT_SESSION_CONSUMED'
   );
+});
+
+test('atomic cleanup streams two bounded-memory passes without retaining candidate IDs or comments', async (t) => {
+  const cleanupVisits = [];
+  const originalStoreGet = IDBObjectStore.prototype.get;
+  let commentPointReads = 0;
+  IDBObjectStore.prototype.get = function (...args) {
+    if (this.name === 'comment_records') commentPointReads += 1;
+    return originalStoreGet.apply(this, args);
+  };
+  t.after(() => {
+    IDBObjectStore.prototype.get = originalStoreGet;
+  });
+  const { repo } = await openRepo(t, {
+    onCleanupCursorVisit(event) {
+      cleanupVisits.push(event);
+    }
+  });
+  const day = 24 * 60 * 60 * 1000;
+  const confirmedAt = 300 * day;
+  const exportedBefore = confirmedAt - 1;
+  const recordCount = 128;
+  for (let index = 0; index < recordCount; index += 1) {
+    const bundle = makeBundle({
+      id: `stream-cleanup:${index}`,
+      submittedAt: confirmedAt - (100 * day) - index,
+      anchors: [
+        { anchorText: `First ${index}`, hrefDomain: 'links.test' },
+        { anchorText: `Second ${index}`, hrefDomain: 'links.test' }
+      ]
+    });
+    bundle.comment.commentHtml = 'x'.repeat(50_000);
+    await repo.upsertRecord(bundle);
+  }
+  await storeFinalizedExportSession(repo, {
+    exportedBefore,
+    expectedCount: recordCount
+  });
+  commentPointReads = 0;
+
+  assert.deepEqual(await repo.deleteExportSessionAtomic({
+    exportSessionId: 'export-session-a',
+    confirmedAt
+  }), {
+    deletedCount: recordCount,
+    exportSessionId: 'export-session-a'
+  });
+  assert.equal(commentPointReads, 0);
+  assert.equal(cleanupVisits.length, recordCount * 2);
+  assert.equal(
+    cleanupVisits.filter(({ pass }) => pass === 'validate').length,
+    recordCount
+  );
+  assert.equal(
+    cleanupVisits.filter(({ pass }) => pass === 'delete').length,
+    recordCount
+  );
+  assert.equal(
+    Math.max(...cleanupVisits.map(({ inFlightRecords }) => inFlightRecords)),
+    1
+  );
+  assert.ok(cleanupVisits.every(({ kind }) => kind === 'normal'));
+  assert.equal((await repo.getRetentionSummary(confirmedAt)).totalCount, 0);
+  assert.equal(
+    (await repo.getMeta('historyExport:export-session-a')).consumedAt,
+    confirmedAt
+  );
+  assert.equal((await repo.listArchiveEvents())[0].recordCount, recordCount);
 });
 
 test('atomic export cleanup rejects a matching record younger than 90 days without writes', async (t) => {

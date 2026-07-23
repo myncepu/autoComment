@@ -15,6 +15,12 @@ test('escapes spreadsheet formulas and standard CSV control characters safely', 
   assert.equal(escapeCsvCell('+SUM(A1:A2)'), "'+SUM(A1:A2)");
   assert.equal(escapeCsvCell('-1+2'), "'-1+2");
   assert.equal(escapeCsvCell('@payload'), "'@payload");
+  assert.equal(escapeCsvCell('  =cmd()'), "'  =cmd()");
+  assert.equal(escapeCsvCell('\t+SUM(A1:A2)'), "'\t+SUM(A1:A2)");
+  assert.equal(escapeCsvCell('\r-1+2'), '"\'\r-1+2"');
+  assert.equal(escapeCsvCell('\n@payload'), '"\'\n@payload"');
+  assert.equal(escapeCsvCell('\u00a0=cmd()'), "'\u00a0=cmd()");
+  assert.equal(escapeCsvCell(' \t ordinary text'), ' \t ordinary text');
   assert.equal(escapeCsvCell('a,"b"'), '"a,""b"""');
   assert.equal(escapeCsvCell('line 1\r\nline 2'), '"line 1\r\nline 2"');
   assert.equal(escapeCsvCell('中文评论'), '中文评论');

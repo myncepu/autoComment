@@ -163,3 +163,58 @@ test('installs a daily alarm that only reminds and never deletes', async () => {
     url: 'chrome-extension://history-test/history.html?filter=expired'
   }]);
 });
+
+test('a changed eligible-set fingerprint bypasses the prior set cooldown', async () => {
+  const chromeApi = createChromeApi();
+  let checkedAt = NOW;
+  let summary = {
+    totalCount: 2,
+    dueSoonCount: 0,
+    expiredCount: 2,
+    oldestSubmittedAt: daysAgo(100)
+  };
+  let reminderMeta = null;
+  const service = {
+    async getRetentionStatus() {
+      return summary;
+    },
+    async getMeta() {
+      return reminderMeta;
+    },
+    async setMeta(key, value) {
+      assert.equal(key, 'retentionReminder');
+      reminderMeta = structuredClone(value);
+    }
+  };
+  const retention = installCommentHistoryRetention(chromeApi, service, {
+    now: () => checkedAt,
+    startImmediately: false
+  });
+
+  assert.deepEqual(await retention.checkNow(), { notified: true });
+  assert.deepEqual(reminderMeta.fingerprint, {
+    stage: 'expired_pending_confirmation',
+    oldestSubmittedAt: daysAgo(100),
+    dueSoonCount: 0,
+    expiredCount: 2
+  });
+
+  checkedAt += DAY_MS;
+  summary = {
+    totalCount: 1,
+    dueSoonCount: 0,
+    expiredCount: 1,
+    oldestSubmittedAt: daysAgo(95)
+  };
+  assert.deepEqual(await retention.checkNow(), { notified: true });
+  assert.equal(chromeApi.createdNotifications.length, 2);
+  assert.deepEqual(reminderMeta.fingerprint, {
+    stage: 'expired_pending_confirmation',
+    oldestSubmittedAt: daysAgo(95),
+    dueSoonCount: 0,
+    expiredCount: 1
+  });
+
+  assert.deepEqual(await retention.checkNow(), { notified: false });
+  assert.equal(chromeApi.createdNotifications.length, 2);
+});
