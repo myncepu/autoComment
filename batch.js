@@ -1,5 +1,9 @@
 import { loadLlmConfig } from './lib/llm-config.mjs';
 import { getBatchStartError } from './lib/batch-readiness.mjs';
+import {
+  isBatchConfirmationFor,
+  normalizeBatchConcurrency
+} from './lib/batch-scheduler.mjs';
 
 // 批量外链评论自动化 - 扩展端核心逻辑（本地批次管理）
 
@@ -7,6 +11,7 @@ import { getBatchStartError } from './lib/batch-readiness.mjs';
 const POLL_INTERVAL = 3000;
 const TIMEOUT_CHECK_INTERVAL = 5000;
 const TIMEOUT_STORAGE_KEY = 'batch_timeout_seconds';
+const BATCH_CONCURRENCY_KEY = 'batch_concurrency';
 
 // ==================== 状态 ====================
 let batchId = null;
@@ -38,6 +43,7 @@ let activeTabsByIndex = new Map();  // urlIndex -> { urlIndex, startTime }
 // 定时器
 let timeoutCheckTimer = null;
 let timeoutSeconds = 60;
+let concurrency = 3;
 
 // 标签打开锁（防止并发）
 let isOpeningTab = false;
@@ -74,6 +80,7 @@ const exportBtn = document.getElementById('exportBtn');
 const clearBtn = document.getElementById('clearBtn');
 const statusBadge = document.getElementById('statusBadge');
 const timeoutInput = document.getElementById('timeoutInput');
+const concurrencyInput = document.getElementById('concurrencyInput');
 const statsPanel = document.getElementById('statsPanel');
 const statsTotal = document.getElementById('statsTotal');
 const statsSuccess = document.getElementById('statsSuccess');
@@ -138,11 +145,27 @@ async function saveBatchCheckboxSettings() {
 document.addEventListener('DOMContentLoaded', init);
 
 async function init() {
+  await loadConcurrencySetting();
   await loadTimeoutSetting();
   await loadBatchCheckboxSettings(); // 全局记忆的勾选框设置
   bindEvents();
 
   updateUI();
+}
+
+async function loadConcurrencySetting() {
+  const data = await chrome.storage.sync.get(BATCH_CONCURRENCY_KEY);
+  concurrency = normalizeBatchConcurrency(data[BATCH_CONCURRENCY_KEY]);
+  concurrencyInput.value = String(concurrency);
+}
+
+async function saveConcurrencySetting() {
+  concurrency = normalizeBatchConcurrency(
+    concurrencyInput.value,
+    concurrency
+  );
+  concurrencyInput.value = String(concurrency);
+  await chrome.storage.sync.set({ [BATCH_CONCURRENCY_KEY]: concurrency });
 }
 
 async function loadTimeoutSetting() {
@@ -193,6 +216,7 @@ function bindEvents() {
 
   // 设置
   timeoutInput.addEventListener('change', saveTimeoutSetting);
+  concurrencyInput.addEventListener('change', saveConcurrencySetting);
 
   // 勾选框设置（全局记忆）
   batchAutoOpenPanel.addEventListener('change', saveBatchCheckboxSettings);
@@ -202,10 +226,10 @@ function bindEvents() {
   // 监听 background 消息（结果回调）
   chrome.runtime.onMessage.addListener((message) => {
     // background 通知：结果已落盘，标签页可以安全关闭了
-    if (message.type === 'BATCH_CONFIRMED') {
-      console.log('[batch] 收到 BATCH_CONFIRMED >>>', { urlIndex: message.urlIndex, result: message.result, aiContentLen: message.aiContent ? message.aiContent.length : 0, tabsPendingConfirm: [...tabsPendingConfirm.entries()], tabsWaitingClose: [...tabsWaitingClose], time: new Date().toISOString() });
-      handleTabConfirmed(message.urlIndex, message.result, message.aiContent, message.errorMessage);
-    }
+    if (!isBatchConfirmationFor(message, { batchId, totalCount })) return;
+
+    console.log('[batch] 收到 BATCH_CONFIRMED >>>', { urlIndex: message.urlIndex, result: message.result, aiContentLen: message.aiContent ? message.aiContent.length : 0, tabsPendingConfirm: [...tabsPendingConfirm.entries()], tabsWaitingClose: [...tabsWaitingClose], time: new Date().toISOString() });
+    void handleTabConfirmed(message.urlIndex, message.result, message.aiContent, message.errorMessage);
   });
 
   // 统计筛选器
@@ -1011,6 +1035,7 @@ function updateUI() {
 
   exportBtn.disabled = localResults.length === 0;
   clearBtn.disabled = isRunning;
+  concurrencyInput.disabled = isRunning;
 
   // 进度、实时日志、底部操作：终止状态保持显示
   progressSection.style.display = (isIdle) ? 'none' : 'block';
