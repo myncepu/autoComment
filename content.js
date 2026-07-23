@@ -840,19 +840,18 @@
     }
 
     console.log('[AutoComment] 恢复提交后上下文，仅补发确认，不重新生成AI:', ctx);
-    await new Promise((resolve) => {
-      chrome.runtime.sendMessage({
-        type: 'BATCH_HANDLE_CONFIRM',
+    try {
+      await window.AutoCommentBatchSubmitContext.confirm({
         batchId: ctx.batchId,
         urlIndex: ctx.urlIndex,
         url: ctx.url || '',
         aiContent: ctx.aiContent || '',
         result: ctx.result || 'success',
         errorMessage: ctx.errorMessage || null
-      }).then(resolve).catch(resolve);
-    });
-
-    await clearBatchSubmitContext();
+      });
+    } catch (error) {
+      console.warn('[AutoComment] 恢复提交确认失败，保留上下文等待重试:', error);
+    }
   }
 
   // 从 storage 恢复提交后上下文（仅补确认，不再恢复成可执行批处理任务）
@@ -3942,31 +3941,26 @@
       // 同时等待 background 响应后再返回，使 batch.js 能收到确认再关闭标签页
       console.log('[content] 通知 background (BATCH_HANDLE_CONFIRM)...');
       if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
-        await new Promise((resolve) => {
-          chrome.runtime.sendMessage({
-            type: 'BATCH_HANDLE_CONFIRM',
+        try {
+          const response = await window.AutoCommentBatchSubmitContext.confirm({
             batchId,
             urlIndex,
             url: url || '',
             aiContent
-          }).then((res) => {
-            console.log('[content] background 响应:', res);
-            resolve(res);
-          }).catch((err) => {
-            if (err.message && err.message.includes('message channel closed')) {
-              console.log('[content] 消息通道已关闭（标签页可能已关闭），忽略错误');
-            } else {
-              console.warn('[content] background 响应失败:', err);
-            }
-            resolve(null);
           });
-        });
+          console.log('[content] background 响应:', response);
+        } catch (err) {
+          if (err.message && err.message.includes('message channel closed')) {
+            console.log('[content] 消息通道已关闭（标签页可能已关闭），保留上下文等待重试');
+          } else {
+            console.warn('[content] background 响应失败，保留上下文等待重试:', err);
+          }
+          return;
+        }
       }
-      await clearBatchSubmitContext();
       console.log('[content] handleBatchTask 完成 <<<', { batchId, urlIndex });
     } catch (err) {
       console.warn('[content] handleBatchTask 捕获错误:', err.message);
-      await clearBatchSubmitContext();
 
       // 特殊错误：未找到评论框
       if (err.message === '__NO_COMMENT_BOX__') {

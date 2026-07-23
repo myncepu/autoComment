@@ -166,13 +166,17 @@ test('closeAll closes every tracked window and clears their mappings', async () 
   assert.equal(manager.getByIndex(1), null);
 });
 
-test('rejected window removal clears the tracked activity', async () => {
+test('already-absent window removal clears the tracked activity without routing an unexpected close', async () => {
   const windowsApi = createFakeWindowsApi();
   windowsApi.remove = async (windowId) => {
     windowsApi.removeCalls.push(windowId);
-    throw new Error('remove failed');
+    throw new Error(`No window with id: ${windowId}.`);
   };
-  const manager = new BatchWindowManager({ windowsApi });
+  const unexpected = [];
+  const manager = new BatchWindowManager({
+    windowsApi,
+    onUnexpectedClose: (activity) => unexpected.push(activity)
+  });
   await manager.create({ batchId: 'batch-a', urlIndex: 0, url: 'https://a.test' });
 
   await manager.closeByIndex(0);
@@ -180,6 +184,39 @@ test('rejected window removal clears the tracked activity', async () => {
   assert.deepEqual(windowsApi.removeCalls, [10]);
   assert.equal(manager.getByIndex(0), null);
   assert.equal(manager.getByTabId(110), null);
+  assert.deepEqual(unexpected, []);
+});
+
+test('transient window removal failure retains mappings and a later close remains unexpected', async () => {
+  const windowsApi = createFakeWindowsApi();
+  windowsApi.remove = async (windowId) => {
+    windowsApi.removeCalls.push(windowId);
+    throw new Error('Permission denied while removing window');
+  };
+  const unexpected = [];
+  const manager = new BatchWindowManager({
+    windowsApi,
+    onUnexpectedClose: (activity) => unexpected.push(activity)
+  });
+  const activity = await manager.create({
+    batchId: 'batch-a',
+    urlIndex: 0,
+    url: 'https://a.test'
+  });
+
+  await assert.rejects(
+    manager.closeByIndex(0),
+    /Permission denied/
+  );
+
+  assert.deepEqual(windowsApi.removeCalls, [10]);
+  assert.equal(manager.getByIndex(0), activity);
+  assert.equal(manager.getByTabId(110), activity);
+
+  windowsApi.onRemoved.emit(activity.windowId);
+
+  assert.deepEqual(unexpected, [activity]);
+  assert.equal(manager.getByIndex(0), null);
 });
 
 test('dispose detaches the window-removed listener', async () => {

@@ -18,7 +18,10 @@ const BATCH_CONCURRENCY_KEY = 'batch_concurrency';
 // ==================== 状态 ====================
 let batchId = null;
 let parsedUrls = [];                // [{originalIndex, url}]
-let status = 'idle';                // idle | running | completed
+let batchItems = null;              // immutable snapshot owned by the current lifecycle
+let lifecycleToken = null;
+let lifecycleConcurrency = null;
+let status = 'idle';                // idle | starting | running | completed | terminated
 let scheduler = null;
 let windowManager = null;
 let openingActivities = new Map();
@@ -197,8 +200,13 @@ function saveTimeoutSetting() {
 // ==================== 事件绑定 ====================
 function bindEvents() {
   // 上传区域
-  uploadZone.addEventListener('click', () => fileInput.click());
-  uploadZone.addEventListener('dragover', (e) => { e.preventDefault(); uploadZone.classList.add('drag-over'); });
+  uploadZone.addEventListener('click', () => {
+    if (canChangeBatchDataset()) fileInput.click();
+  });
+  uploadZone.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    if (canChangeBatchDataset()) uploadZone.classList.add('drag-over');
+  });
   uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('drag-over'));
   uploadZone.addEventListener('drop', handleFileDrop);
   fileInput.addEventListener('change', handleFileSelect);
@@ -257,16 +265,19 @@ function bindEvents() {
 function handleFileDrop(e) {
   e.preventDefault();
   uploadZone.classList.remove('drag-over');
+  if (!canChangeBatchDataset()) return;
   const file = e.dataTransfer.files[0];
   if (file) processFile(file);
 }
 
 function handleFileSelect(e) {
+  if (!canChangeBatchDataset()) return;
   const file = e.target.files[0];
   if (file) processFile(file);
 }
 
 function processFile(file) {
+  if (!canChangeBatchDataset()) return;
   if (!file.name.endsWith('.csv')) {
     alert('请上传 CSV 文件');
     return;
@@ -349,6 +360,7 @@ function normalizeEncoding(arrayBuffer) {
 }
 
 function parseCSV(raw, fileNameParam) {
+  if (!canChangeBatchDataset()) return;
   const text = normalizeEncoding(raw);
   const lines = text.split(/\r?\n/).filter((line) => line.trim());
   if (lines.length < 2) {
@@ -475,7 +487,12 @@ function parseCSVLine(line) {
   return result;
 }
 
-function resetFile() {
+function canChangeBatchDataset() {
+  return status === 'idle';
+}
+
+function resetFile({ force = false } = {}) {
+  if (!force && !canChangeBatchDataset()) return;
   fileInput.value = '';
   fileInfo.classList.remove('visible');
   uploadZone.classList.remove('has-file');
@@ -489,22 +506,57 @@ function resetFile() {
 
 // ==================== 批量处理核心 ====================
 async function startBatch() {
-  const modelConfig = await loadLlmConfig(chrome.storage);
-  const startError = getBatchStartError(modelConfig, parsedUrls.length);
-  if (startError) {
-    alert(startError);
+  if (status !== 'idle') return;
+
+  const startingToken = {};
+  const startingBatchId = generateUUID();
+  const startingItems = snapshotBatchItems(parsedUrls);
+  const startingConcurrency = concurrency;
+  const startingSettings = {
+    autoOpenPanel: batchAutoOpenPanel.checked,
+    autoGenerate: batchAutoGenerate.checked,
+    autoSubmit: batchAutoSubmit.checked,
+    savedAt: Date.now()
+  };
+  const ownsStartingLifecycle = () =>
+    lifecycleToken === startingToken && status === 'starting';
+
+  lifecycleToken = startingToken;
+  lifecycleConcurrency = startingConcurrency;
+  batchItems = startingItems;
+  batchId = startingBatchId;
+  setStatus('starting');
+  updateUI();
+
+  try {
+    const modelConfig = await loadLlmConfig(chrome.storage);
+    if (!ownsStartingLifecycle()) return;
+
+    const startError = getBatchStartError(modelConfig, startingItems.length);
+    if (startError) {
+      restoreFailedStart(startingToken);
+      alert(startError);
+      return;
+    }
+
+    await removeStoredBatchContext();
+    if (!ownsStartingLifecycle()) return;
+
+    // 保存同步快照，供 content.js 读取
+    await saveBatchTaskSettings({
+      settings: startingSettings,
+      urls: startingItems.map((item) => item.url)
+    });
+    if (!ownsStartingLifecycle()) return;
+  } catch (error) {
+    if (!ownsStartingLifecycle()) return;
+    console.warn('[batch] 批处理启动失败:', error);
+    restoreFailedStart(startingToken);
+    alert(`批处理启动失败：${error.message || error}`);
     return;
   }
 
-  await new Promise((resolve) => {
-    chrome.storage.local.remove(['batchCtx'], resolve);
-  });
-
-  // 保存批量任务设置和 URL 列表到 storage.local，供 content.js 读取
-  await saveBatchTaskSettings();
-
-  batchId = generateUUID();
-  totalCount = parsedUrls.length;
+  totalCount = startingItems.length;
   successCount = 0;
   failCount = 0;
   skippedCount = 0;
@@ -516,7 +568,7 @@ async function startBatch() {
   skippedIndices.clear();
   scheduler = new BatchScheduler({
     totalCount,
-    concurrency
+    concurrency: startingConcurrency
   });
   scheduler.start();
   isTerminated = false;
@@ -528,24 +580,62 @@ async function startBatch() {
   fillAvailableWindows();
 }
 
-// 保存批量任务设置到 storage.local
-async function saveBatchTaskSettings() {
-  return new Promise((resolve) => {
-    const settings = {
-      autoOpenPanel: batchAutoOpenPanel.checked,
-      autoGenerate: batchAutoGenerate.checked,
-      autoSubmit: batchAutoSubmit.checked,
-      savedAt: Date.now()
-    };
-    const urls = parsedUrls.map(item => item.url);
+function snapshotBatchItems(items) {
+  return Object.freeze(items.map((item) => Object.freeze({
+    ...item,
+    illegalCheck: item.illegalCheck ? Object.freeze({ ...item.illegalCheck }) : null,
+    originalRow: Array.isArray(item.originalRow)
+      ? Object.freeze([...item.originalRow])
+      : item.originalRow || null
+  })));
+}
 
-    chrome.storage.local.set({
-      [BATCH_SETTINGS_KEY]: settings,
-      [BATCH_URLS_KEY]: urls
-    }, () => {
-      console.log('[batch] 批量任务设置已保存:', settings, 'URL 数量:', urls.length);
-      resolve();
-    });
+function restoreFailedStart(startingToken) {
+  if (lifecycleToken !== startingToken || status !== 'starting') return;
+  lifecycleToken = null;
+  lifecycleConcurrency = null;
+  batchItems = null;
+  batchId = null;
+  setStatus('idle');
+  updateUI();
+}
+
+async function removeStoredBatchContext() {
+  return new Promise((resolve, reject) => {
+    try {
+      chrome.storage.local.remove(['batchCtx'], () => {
+        const error = chrome.runtime?.lastError;
+        if (error) {
+          reject(new Error(error.message || String(error)));
+          return;
+        }
+        resolve();
+      });
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+// 保存批量任务设置到 storage.local
+async function saveBatchTaskSettings({ settings, urls }) {
+  return new Promise((resolve, reject) => {
+    try {
+      chrome.storage.local.set({
+        [BATCH_SETTINGS_KEY]: settings,
+        [BATCH_URLS_KEY]: urls
+      }, () => {
+        const error = chrome.runtime?.lastError;
+        if (error) {
+          reject(new Error(error.message || String(error)));
+          return;
+        }
+        console.log('[batch] 批量任务设置已保存:', settings, 'URL 数量:', urls.length);
+        resolve();
+      });
+    } catch (error) {
+      reject(error);
+    }
   });
 }
 
@@ -562,26 +652,49 @@ async function clearBatchTaskSettings() {
 async function stopBatch() {
   if (status !== 'running') return;
 
+  const stoppingLifecycle = {
+    batchId,
+    lifecycleToken,
+    scheduler,
+    windowManager,
+    batchItems,
+    openings: new Map(openingActivities)
+  };
+  const activeIndices = [...(stoppingLifecycle.scheduler?.activeIndices || [])];
+
   isTerminated = true;
-  scheduler?.stop();
+  stoppingLifecycle.scheduler?.stop();
   setStatus('terminated');
 
   const terminatedCount = pendingCount;
   if (pollTimer) clearTimeout(pollTimer);
   stopTimeoutChecker();
 
-  const activeIndices = scheduler?.activeIndices || [];
-  for (const urlIndex of activeIndices) {
-    await finalizeTask(
+  await Promise.all(activeIndices.map((urlIndex) =>
+    finalizeTask(
       urlIndex,
       'fail',
       null,
       '手动终止',
-      { suppressCompletion: true }
-    );
+      {
+        suppressCompletion: true,
+        ownership: stoppingLifecycle
+      }
+    )
+  ));
+  await stoppingLifecycle.windowManager?.closeAll();
+
+  for (const [urlIndex, opening] of stoppingLifecycle.openings) {
+    if (openingActivities.get(urlIndex) === opening) {
+      openingActivities.delete(urlIndex);
+    }
   }
-  await windowManager.closeAll();
-  openingActivities.clear();
+
+  const ownsStoppingLifecycle = batchId === stoppingLifecycle.batchId &&
+    lifecycleToken === stoppingLifecycle.lifecycleToken &&
+    scheduler === stoppingLifecycle.scheduler &&
+    windowManager === stoppingLifecycle.windowManager;
+  if (!ownsStoppingLifecycle) return;
 
   updateStatsUI();
   updateUI();
@@ -606,9 +719,10 @@ async function resumeBatch() {
   const processedCount = getProcessedCount();
   pendingCount = totalCount - processedCount;
   const processedIndices = localResults.map((result) => result.originalIndex);
+  lifecycleToken = {};
   scheduler = new BatchScheduler({
     totalCount,
-    concurrency,
+    concurrency: lifecycleConcurrency,
     processedIndices
   });
   scheduler.start();
@@ -629,7 +743,7 @@ function fillAvailableWindows() {
 }
 
 async function openWorkerWindow(urlIndex) {
-  const item = parsedUrls[urlIndex];
+  const item = batchItems?.[urlIndex];
   if (!item) {
     await finalizeTask(
       urlIndex,
@@ -644,7 +758,6 @@ async function openWorkerWindow(urlIndex) {
   const illegalCheck = item.illegalCheck ||
     evaluateIllegalSiteForBatchItem(item.url, item.sourceDomain);
   if (illegalCheck.blocked) {
-    item.illegalCheck = illegalCheck;
     await finalizeTask(
       urlIndex,
       'blocked_illegal',
@@ -656,6 +769,7 @@ async function openWorkerWindow(urlIndex) {
   }
 
   const activityBatchId = batchId;
+  const activityLifecycleToken = lifecycleToken;
   const activityScheduler = scheduler;
   const activityWindowManager = windowManager;
   const opening = {
@@ -665,12 +779,13 @@ async function openWorkerWindow(urlIndex) {
   openingActivities.set(urlIndex, opening);
   startTimeoutChecker();
   try {
-    const activity = await windowManager.create({
+    const activity = await activityWindowManager.create({
       batchId: activityBatchId,
       urlIndex,
       url: item.url
     });
     const ownsActivityLifecycle = () => batchId === activityBatchId &&
+      lifecycleToken === activityLifecycleToken &&
       scheduler === activityScheduler &&
       windowManager === activityWindowManager;
     if (
@@ -694,6 +809,7 @@ async function openWorkerWindow(urlIndex) {
     updateStatsUI();
     sendTaskWhenReady(activity, {
       batchId: activityBatchId,
+      lifecycleToken: activityLifecycleToken,
       scheduler: activityScheduler,
       windowManager: activityWindowManager,
       activity
@@ -704,6 +820,7 @@ async function openWorkerWindow(urlIndex) {
     }
     if (
       batchId !== activityBatchId ||
+      lifecycleToken !== activityLifecycleToken ||
       scheduler !== activityScheduler ||
       windowManager !== activityWindowManager
     ) {
@@ -724,6 +841,7 @@ function ownsCurrentActivity(activity, ownership) {
     ownership &&
     ownership.activity === activity &&
     batchId === ownership.batchId &&
+    lifecycleToken === ownership.lifecycleToken &&
     scheduler === ownership.scheduler &&
     windowManager === ownership.windowManager &&
     ownership.windowManager.getByIndex(activity.urlIndex) === activity
@@ -786,7 +904,14 @@ function sendTaskWhenReady(activity, ownership, retries = 0) {
   });
 }
 
-function recordTaskResult(urlIndex, result, aiContent, errorMessage, elapsed) {
+function recordTaskResult(
+  urlIndex,
+  result,
+  aiContent,
+  errorMessage,
+  elapsed,
+  items = batchItems
+) {
   console.log('[batch] recordTaskResult 被调用:', {
     urlIndex,
     result,
@@ -798,7 +923,7 @@ function recordTaskResult(urlIndex, result, aiContent, errorMessage, elapsed) {
     return;
   }
 
-  const item = parsedUrls[urlIndex] || null;
+  const item = items?.[urlIndex] || null;
   const recordedResult = item ? result : 'fail';
   const recordedAiContent = item ? aiContent : null;
   const recordedErrorMessage = item
@@ -872,15 +997,19 @@ async function finalizeTask(
   {
     closeWindow = true,
     forcedElapsed,
-    suppressCompletion = false
+    suppressCompletion = false,
+    ownership = null
   } = {}
 ) {
   if (localResults.some((entry) => entry.originalIndex === urlIndex)) return false;
 
-  const taskBatchId = batchId;
-  const taskScheduler = scheduler;
-  const taskWindowManager = windowManager;
-  const taskOpening = openingActivities.get(urlIndex);
+  const taskBatchId = ownership?.batchId ?? batchId;
+  const taskLifecycleToken = ownership?.lifecycleToken ?? lifecycleToken;
+  const taskScheduler = ownership?.scheduler ?? scheduler;
+  const taskWindowManager = ownership?.windowManager ?? windowManager;
+  const taskItems = ownership?.batchItems ?? batchItems;
+  const taskOpening = ownership?.openings?.get(urlIndex) ??
+    openingActivities.get(urlIndex);
   const activity = taskWindowManager?.getByIndex(urlIndex);
   const startTime = activity?.startTime || taskOpening?.startTime;
   const elapsed = forcedElapsed !== undefined
@@ -889,7 +1018,7 @@ async function finalizeTask(
       ? Math.round((Date.now() - startTime) / 1000)
       : null;
 
-  recordTaskResult(urlIndex, result, aiContent, errorMessage, elapsed);
+  recordTaskResult(urlIndex, result, aiContent, errorMessage, elapsed, taskItems);
   if (closeWindow && taskWindowManager) {
     await taskWindowManager.closeByIndex(urlIndex);
   }
@@ -904,6 +1033,7 @@ async function finalizeTask(
   }
 
   const ownsCurrentLifecycle = batchId === taskBatchId &&
+    lifecycleToken === taskLifecycleToken &&
     scheduler === taskScheduler &&
     windowManager === taskWindowManager;
   if (!ownsCurrentLifecycle) return true;
@@ -971,6 +1101,7 @@ async function onAllCompleted() {
   if (status !== 'running') return;
 
   const completingBatchId = batchId;
+  const completingLifecycleToken = lifecycleToken;
   const completingScheduler = scheduler;
   const completingWindowManager = windowManager;
   const completingOpenings = new Map(openingActivities);
@@ -989,6 +1120,7 @@ async function onAllCompleted() {
 
   await completingWindowManager?.closeAll();
   const ownsCompletingLifecycle = batchId === completingBatchId &&
+    lifecycleToken === completingLifecycleToken &&
     scheduler === completingScheduler &&
     windowManager === completingWindowManager;
   if (!ownsCompletingLifecycle) return;
@@ -1020,18 +1152,40 @@ function stopTimeoutChecker() {
 }
 
 async function checkTimeouts() {
-  const activeIndices = scheduler?.activeIndices || [];
+  const timeoutLifecycle = {
+    batchId,
+    lifecycleToken,
+    scheduler,
+    windowManager,
+    batchItems,
+    openings: new Map(openingActivities)
+  };
+  const activeIndices = [...(timeoutLifecycle.scheduler?.activeIndices || [])];
   if (activeIndices.length === 0) {
     stopTimeoutChecker();
     return;
   }
 
   for (const urlIndex of activeIndices) {
-    const activity = windowManager.getByIndex(urlIndex);
-    const opening = openingActivities.get(urlIndex);
+    const activity = timeoutLifecycle.windowManager?.getByIndex(urlIndex);
+    const opening = timeoutLifecycle.openings.get(urlIndex);
     const startTime = activity?.startTime || opening?.startTime;
     if (startTime && (Date.now() - startTime) / 1000 > timeoutSeconds) {
-      await finalizeTask(urlIndex, 'fail', null, '处理超时');
+      await finalizeTask(
+        urlIndex,
+        'fail',
+        null,
+        '处理超时',
+        { ownership: timeoutLifecycle }
+      );
+      if (
+        batchId !== timeoutLifecycle.batchId ||
+        lifecycleToken !== timeoutLifecycle.lifecycleToken ||
+        scheduler !== timeoutLifecycle.scheduler ||
+        windowManager !== timeoutLifecycle.windowManager
+      ) {
+        return;
+      }
     }
   }
 }
@@ -1041,6 +1195,7 @@ function setStatus(s) {
   status = s;
   statusBadge.textContent = {
     idle: '空闲',
+    starting: '启动中',
     running: '运行中',
     completed: '已完成',
     terminated: '已终止'
@@ -1050,21 +1205,29 @@ function setStatus(s) {
 
 function updateUI() {
   const isIdle = status === 'idle';
+  const isStarting = status === 'starting';
   const isRunning = status === 'running';
   const isCompleted = status === 'completed';
   const isTerminated = status === 'terminated';
 
   // 开始按钮：空闲时可开始，终止时可重新开始
-  startBtn.disabled = isRunning || isCompleted || parsedUrls.length === 0;
+  startBtn.disabled = isStarting || isRunning || isCompleted ||
+    parsedUrls.length === 0;
   // 终止状态下显示"重新开始"，正常空闲显示"开始批量处理"
   startBtn.textContent = isTerminated ? '▶ 重新开始' : '▶ 开始批量处理';
 
-  stopBtn.disabled = isIdle || isTerminated || isCompleted;
-  stopBtn.style.display = (isTerminated || isCompleted) ? 'none' : 'inline-flex';
+  stopBtn.disabled = !isRunning;
+  stopBtn.style.display = isRunning ? 'inline-flex' : 'none';
 
   exportBtn.disabled = localResults.length === 0;
   clearBtn.disabled = isRunning;
-  concurrencyInput.disabled = isRunning;
+  concurrencyInput.disabled = !isIdle;
+  const datasetLocked = !isIdle;
+  fileInput.disabled = datasetLocked;
+  uploadZone.classList.toggle?.('disabled', datasetLocked);
+  uploadZone.setAttribute('aria-disabled', String(datasetLocked));
+  fileRemove.classList.toggle?.('disabled', datasetLocked);
+  fileRemove.setAttribute('aria-disabled', String(datasetLocked));
 
   // 进度、实时日志、底部操作：终止状态保持显示
   progressSection.style.display = (isIdle) ? 'none' : 'block';
@@ -1180,7 +1343,11 @@ function getExportRunResult(result) {
 }
 
 function clearBatch() {
-  resetFile();
+  if (status === 'running') return;
+  lifecycleToken = null;
+  lifecycleConcurrency = null;
+  batchItems = null;
+  resetFile({ force: true });
   batchId = null;
   totalCount = successCount = failCount = skippedCount = noCommentBoxCount = manualRequiredCount = blockedIllegalCount = pendingCount = 0;
   localResults = [];
@@ -1211,7 +1378,7 @@ function clearBatch() {
 
 // 从 parsedUrls 找到对应行（用 data-url 属性查找）
 function findPreviewRowByIndex(urlIndex) {
-  const { url } = parsedUrls[urlIndex] || {};
+  const { url } = batchItems?.[urlIndex] || parsedUrls[urlIndex] || {};
   if (!url) return null;
   const rows = urlPreviewBody.querySelectorAll('tr');
   for (const row of rows) {

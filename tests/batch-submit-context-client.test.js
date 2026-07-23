@@ -13,7 +13,10 @@ function loadClient(responses = {}) {
       runtime: {
         async sendMessage(message) {
           messages.push(message);
-          return responses[message.type] || { ok: true };
+          const response = responses[message.type];
+          if (response instanceof Error) throw response;
+          if (typeof response === 'function') return response(message);
+          return response || { ok: true };
         }
       }
     }
@@ -39,5 +42,48 @@ test('saves, restores, and clears through background messages', async () => {
     { type: 'BATCH_SAVE_SUBMIT_CONTEXT', context: restored },
     { type: 'BATCH_GET_SUBMIT_CONTEXT' },
     { type: 'BATCH_CLEAR_SUBMIT_CONTEXT' }
+  ]);
+});
+
+test('acknowledged confirmation clears the persisted submit context', async () => {
+  const { client, messages } = loadClient({
+    BATCH_HANDLE_CONFIRM: { ok: true }
+  });
+
+  await client.confirm({ batchId: 'a', urlIndex: 2 });
+
+  assert.deepEqual(JSON.parse(JSON.stringify(messages)), [
+    { type: 'BATCH_HANDLE_CONFIRM', batchId: 'a', urlIndex: 2 },
+    { type: 'BATCH_CLEAR_SUBMIT_CONTEXT' }
+  ]);
+});
+
+test('negative confirmation preserves the persisted submit context', async () => {
+  const { client, messages } = loadClient({
+    BATCH_HANDLE_CONFIRM: { ok: false, error: 'not stored' }
+  });
+
+  await assert.rejects(
+    client.confirm({ batchId: 'a', urlIndex: 2 }),
+    /not stored/
+  );
+
+  assert.deepEqual(JSON.parse(JSON.stringify(messages)), [
+    { type: 'BATCH_HANDLE_CONFIRM', batchId: 'a', urlIndex: 2 }
+  ]);
+});
+
+test('rejected confirmation preserves the persisted submit context', async () => {
+  const { client, messages } = loadClient({
+    BATCH_HANDLE_CONFIRM: new Error('message failed')
+  });
+
+  await assert.rejects(
+    client.confirm({ batchId: 'a', urlIndex: 2 }),
+    /message failed/
+  );
+
+  assert.deepEqual(JSON.parse(JSON.stringify(messages)), [
+    { type: 'BATCH_HANDLE_CONFIRM', batchId: 'a', urlIndex: 2 }
   ]);
 });
