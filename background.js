@@ -1,8 +1,58 @@
 import { installLlmMessageListener } from './lib/llm-message-listener.mjs';
 import { installActionClickHandler } from './lib/action-click-handler.mjs';
+import { openCommentHistoryDb } from './lib/comment-history-db.mjs';
+import { createCommentHistoryService } from './lib/comment-history-service.mjs';
+import { installCommentHistoryMessageListener } from './lib/comment-history-message-listener.mjs';
 
 installLlmMessageListener(chrome);
 installActionClickHandler(chrome);
+
+let commentHistoryRepositoryPromise;
+
+function getCommentHistoryRepository() {
+  if (!commentHistoryRepositoryPromise) {
+    commentHistoryRepositoryPromise = openCommentHistoryDb();
+  }
+  return commentHistoryRepositoryPromise;
+}
+
+async function callCommentHistoryRepository(method, args) {
+  const repository = await getCommentHistoryRepository();
+  return repository[method](...args);
+}
+
+const commentHistoryRepository = {
+  upsertRecord: (...args) => callCommentHistoryRepository('upsertRecord', args),
+  getRecord: (...args) => callCommentHistoryRepository('getRecord', args),
+  queryRecords: (...args) => callCommentHistoryRepository('queryRecords', args),
+  countRecords: (...args) => callCommentHistoryRepository('countRecords', args),
+  getRetentionSummary: (...args) => callCommentHistoryRepository('getRetentionSummary', args),
+  getExportChunk: (...args) => callCommentHistoryRepository('getExportChunk', args),
+  deleteConfirmed: (...args) => callCommentHistoryRepository('deleteConfirmed', args),
+  listArchiveEvents: (...args) => callCommentHistoryRepository('listArchiveEvents', args),
+  getMeta: (...args) => callCommentHistoryRepository('getMeta', args),
+  setMeta: (...args) => callCommentHistoryRepository('setMeta', args)
+};
+
+const commentHistoryService = createCommentHistoryService({
+  repository: commentHistoryRepository,
+  storageLocal: chrome.storage.local
+});
+
+installCommentHistoryMessageListener(chrome, commentHistoryService);
+
+(async () => {
+  try {
+    await commentHistoryService.migrateLegacyResults();
+  } catch (_) {
+    console.warn('[background] Comment history legacy migration deferred');
+  }
+  try {
+    await commentHistoryService.retryPendingWrites();
+  } catch (_) {
+    console.warn('[background] Comment history retry deferred');
+  }
+})();
 
 /**
  * 将批量结果写入 storage（本地存储，由 batch.js 轮询读取）
@@ -58,6 +108,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
         console.log('[background] persistBatchReport 完成，准备发送 BATCH_CONFIRMED');
 
+        const { historySaveStatus } = await commentHistoryService.saveConfirmedSuccess({
+          ...message,
+          result: message.result || 'success'
+        });
+
         // 关键：先通知 batch.js（popup）落盘已完成，batch.js 等到确认后才关闭标签页
         // 再转发给 popup（batch.js），确保 batch.js 收到后再关 tab
         chrome.runtime.sendMessage({
@@ -65,7 +120,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           urlIndex: message.urlIndex,
           result: message.result || 'success',
           aiContent: message.aiContent || null,
-          errorMessage: message.errorMessage || null
+          errorMessage: message.errorMessage || null,
+          historySaveStatus
         }).then(() => {
           console.log('[background] BATCH_CONFIRMED 发送成功');
         }).catch((e) => {
@@ -76,7 +132,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
         });
 
-        sendResponse({ ok: true });
+        sendResponse({ ok: true, historySaveStatus });
         console.log('[background] BATCH_HANDLE_CONFIRM <<< sendResponse({ok:true})');
       } catch (e) {
         console.error('[background] BATCH_HANDLE_CONFIRM 错误:', e);

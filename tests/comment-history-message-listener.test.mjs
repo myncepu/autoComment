@@ -1,0 +1,316 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
+
+import {
+  HISTORY_MESSAGE_TYPES,
+  installCommentHistoryMessageListener
+} from '../lib/comment-history-message-listener.mjs';
+
+function createFixture(service = {}) {
+  const listeners = [];
+  const chromeApi = {
+    runtime: {
+      id: 'extension-id',
+      onMessage: {
+        addListener(listener) {
+          listeners.push(listener);
+        }
+      }
+    }
+  };
+  installCommentHistoryMessageListener(chromeApi, service);
+
+  async function dispatch(message, sender = { id: 'extension-id' }) {
+    const responses = [];
+    const handled = listeners[0](message, sender, (response) => responses.push(response));
+    if (handled) await new Promise(setImmediate);
+    return { handled, response: responses[0], responseCount: responses.length };
+  }
+
+  return { dispatch };
+}
+
+test('exports and routes each exact history message type', async () => {
+  const calls = [];
+  const service = {
+    async getSummary() { calls.push(['getSummary']); return 'summary'; },
+    async listRecords(payload) { calls.push(['listRecords', payload]); return 'list'; },
+    async getAnchors(commentId) { calls.push(['getAnchors', commentId]); return 'anchors'; },
+    async startExport(payload) { calls.push(['startExport', payload]); return 'started'; },
+    async getExportChunk(payload) { calls.push(['getExportChunk', payload]); return 'chunk'; },
+    async finishExport(payload) { calls.push(['finishExport', payload]); return 'finished'; },
+    async getRetentionStatus() { calls.push(['getRetentionStatus']); return 'retention'; },
+    async deleteConfirmed(payload) { calls.push(['deleteConfirmed', payload]); return 'deleted'; },
+    async listArchiveEvents() { calls.push(['listArchiveEvents']); return 'events'; },
+    async retryPendingWrites() { calls.push(['retryPendingWrites']); return 'retried'; }
+  };
+  const { dispatch } = createFixture(service);
+  const requests = [
+    [{ type: HISTORY_MESSAGE_TYPES.SUMMARY }, 'summary'],
+    [{ type: HISTORY_MESSAGE_TYPES.LIST }, 'list'],
+    [{ type: HISTORY_MESSAGE_TYPES.ANCHORS, commentId: 'batch-a:7' }, 'anchors'],
+    [{ type: HISTORY_MESSAGE_TYPES.EXPORT_START }, 'started'],
+    [{ type: HISTORY_MESSAGE_TYPES.EXPORT_CHUNK, exportSessionId: 'session-a' }, 'chunk'],
+    [{
+      type: HISTORY_MESSAGE_TYPES.EXPORT_FINISH,
+      exportSessionId: 'session-a',
+      filenames: ['part.csv']
+    }, 'finished'],
+    [{ type: HISTORY_MESSAGE_TYPES.RETENTION_STATUS }, 'retention'],
+    [{
+      type: HISTORY_MESSAGE_TYPES.DELETE_CONFIRMED,
+      confirmed: true,
+      exportSessionId: 'session-a'
+    }, 'deleted'],
+    [{ type: HISTORY_MESSAGE_TYPES.ARCHIVE_EVENTS }, 'events'],
+    [{ type: HISTORY_MESSAGE_TYPES.RETRY_PENDING }, 'retried']
+  ];
+
+  for (const [message, expected] of requests) {
+    assert.deepEqual((await dispatch(message)).response, {
+      ok: true,
+      data: expected
+    });
+  }
+  assert.deepEqual(calls.map(([method]) => method), [
+    'getSummary',
+    'listRecords',
+    'getAnchors',
+    'startExport',
+    'getExportChunk',
+    'finishExport',
+    'getRetentionStatus',
+    'deleteConfirmed',
+    'listArchiveEvents',
+    'retryPendingWrites'
+  ]);
+});
+
+test('allows only internal extension senders for recognized history messages', async () => {
+  let callCount = 0;
+  const { dispatch } = createFixture({
+    async getSummary() {
+      callCount += 1;
+    }
+  });
+
+  for (const sender of [{}, { id: 'another-extension' }]) {
+    const result = await dispatch({ type: 'HISTORY_SUMMARY' }, sender);
+    assert.equal(result.handled, false);
+    assert.deepEqual(result.response, {
+      ok: false,
+      error: {
+        code: 'FORBIDDEN_SENDER',
+        message: '拒绝外部评论历史请求。'
+      }
+    });
+  }
+  assert.equal(callCount, 0);
+});
+
+test('returns false without responding for unknown message types', async () => {
+  const { dispatch } = createFixture({});
+  assert.deepEqual(await dispatch({ type: 'NOT_HISTORY' }), {
+    handled: false,
+    response: undefined,
+    responseCount: 0
+  });
+});
+
+test('normalizes list filters, cursor, and limit before calling the service', async () => {
+  let received;
+  const { dispatch } = createFixture({
+    async listRecords(payload) {
+      received = payload;
+      return { records: [] };
+    }
+  });
+
+  const result = await dispatch({
+    type: 'HISTORY_LIST',
+    filter: {
+      dateFrom: 100,
+      dateTo: 200,
+      targetDomain: ' Target.Test ',
+      promotedDomain: 'PROMO.TEST',
+      anchorTextPrefix: '  Alpha ',
+      hrefDomain: ' LINKS.TEST ',
+      ignored: 'do not forward'
+    },
+    cursor: { submittedAt: 123, id: 'batch-a:7', injected: true },
+    limit: 10_000,
+    ignored: 'do not forward'
+  });
+
+  assert.deepEqual(result.response, { ok: true, data: { records: [] } });
+  assert.deepEqual(received, {
+    from: 100,
+    to: 200,
+    targetDomain: 'target.test',
+    promotedDomain: 'promo.test',
+    anchorTextPrefix: 'alpha',
+    hrefDomain: 'links.test',
+    cursor: { submittedAt: 123, id: 'batch-a:7' },
+    limit: 100
+  });
+});
+
+test('accepts the history page filter fields at the message top level', async () => {
+  let received;
+  const { dispatch } = createFixture({
+    async listRecords(payload) {
+      received = payload;
+      return { records: [] };
+    }
+  });
+
+  await dispatch({
+    type: 'HISTORY_LIST',
+    from: 100,
+    to: 200,
+    targetDomain: 'TARGET.TEST',
+    limit: 25
+  });
+
+  assert.deepEqual(received, {
+    from: 100,
+    to: 200,
+    targetDomain: 'target.test',
+    limit: 25
+  });
+});
+
+test('rejects deletion without explicit confirmation before calling the service', async () => {
+  let deleteCount = 0;
+  const { dispatch } = createFixture({
+    async deleteConfirmed() {
+      deleteCount += 1;
+    }
+  });
+
+  for (const confirmed of [false, undefined, 1]) {
+    const { response } = await dispatch({
+      type: 'HISTORY_DELETE_CONFIRMED',
+      confirmed,
+      exportSessionId: 'export-session-a'
+    });
+    assert.equal(response.ok, false);
+    assert.equal(response.error.code, 'CONFIRMATION_REQUIRED');
+  }
+  assert.equal(deleteCount, 0);
+});
+
+test('returns a safe structured error without exposing stack or raw failure details', async () => {
+  const { dispatch } = createFixture({
+    async getSummary() {
+      const error = new Error('db failed at chrome-extension://secret/?password=hunter2');
+      error.stack = 'raw stack with private details';
+      throw error;
+    }
+  });
+
+  assert.deepEqual((await dispatch({ type: 'HISTORY_SUMMARY' })).response, {
+    ok: false,
+    error: {
+      code: 'HISTORY_REQUEST_FAILED',
+      message: '评论历史请求失败。'
+    }
+  });
+});
+
+test('background confirms only after history save status is included in both responses', async (t) => {
+  const previousChrome = globalThis.chrome;
+  const previousIndexedDb = globalThis.indexedDB;
+  const previousKeyRange = globalThis.IDBKeyRange;
+  const previousEmitWarning = process.emitWarning;
+  const previousConsoleLog = console.log;
+  const runtimeListeners = [];
+  const runtimeMessages = [];
+  const storageData = { legacyMigrationV1: true };
+  const chromeApi = {
+    runtime: {
+      id: 'extension-id',
+      onMessage: {
+        addListener(listener) {
+          runtimeListeners.push(listener);
+        }
+      },
+      async sendMessage(message) {
+        runtimeMessages.push(message);
+      }
+    },
+    storage: {
+      local: {
+        async get(keys) {
+          if (keys == null) return structuredClone(storageData);
+          const requested = Array.isArray(keys) ? keys : [keys];
+          return Object.fromEntries(
+            requested
+              .filter((key) => Object.hasOwn(storageData, key))
+              .map((key) => [key, structuredClone(storageData[key])])
+          );
+        },
+        async set(values) {
+          Object.assign(storageData, structuredClone(values));
+        },
+        async remove(keys) {
+          for (const key of Array.isArray(keys) ? keys : [keys]) delete storageData[key];
+        }
+      }
+    },
+    action: {
+      onClicked: { addListener() {} }
+    },
+    tabs: {
+      async sendMessage() {},
+      async create() {}
+    }
+  };
+  globalThis.chrome = chromeApi;
+  globalThis.indexedDB = new IDBFactory();
+  globalThis.IDBKeyRange = IDBKeyRange;
+  process.emitWarning = () => {};
+  console.log = () => {};
+  t.after(() => {
+    globalThis.chrome = previousChrome;
+    globalThis.indexedDB = previousIndexedDb;
+    globalThis.IDBKeyRange = previousKeyRange;
+    process.emitWarning = previousEmitWarning;
+    console.log = previousConsoleLog;
+  });
+
+  await import(`../background.js?history-integration=${Date.now()}`);
+  const responses = [];
+  const message = {
+    type: 'BATCH_HANDLE_CONFIRM',
+    batchId: 'batch-integration',
+    urlIndex: 9,
+    result: 'success',
+    url: 'https://target.test/post',
+    aiContent: 'Generated fallback',
+    history: {
+      submittedAt: 1721000000000,
+      targetPageUrl: 'https://target.test/post',
+      promotedWebsiteUrl: 'https://promo.test/',
+      commentHtml: 'Actual submitted comment',
+      commentText: 'Actual submitted comment',
+      anchors: []
+    }
+  };
+
+  const handled = runtimeListeners.map((listener) => listener(
+    message,
+    { id: 'extension-id', tab: { id: 42 } },
+    (response) => responses.push(response)
+  ));
+  assert.ok(handled.includes(true));
+  for (let attempt = 0; attempt < 20 && responses.length === 0; attempt += 1) {
+    await new Promise(setImmediate);
+  }
+
+  assert.deepEqual(responses, [{ ok: true, historySaveStatus: 'saved' }]);
+  assert.equal(runtimeMessages.length, 1);
+  assert.equal(runtimeMessages[0].type, 'BATCH_CONFIRMED');
+  assert.equal(runtimeMessages[0].historySaveStatus, 'saved');
+});
