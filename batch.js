@@ -90,6 +90,10 @@ const statsTableBody = document.getElementById('statsTableBody');
 const statsTableWrap = document.getElementById('statsTableWrap');
 const statsCountLabel = document.getElementById('statsCountLabel');
 const historySaveWarning = document.getElementById('historySaveWarning');
+const openHistoryBtn = document.getElementById('openHistoryBtn');
+const historyRetentionBanner = document.getElementById('historyRetentionBanner');
+const historyRetentionText = document.getElementById('historyRetentionText');
+const historyRetentionLink = document.getElementById('historyRetentionLink');
 
 // 批量任务设置勾选框
 const batchAutoOpenPanel = document.getElementById('batchAutoOpenPanel');
@@ -147,8 +151,23 @@ async function init() {
   await loadTimeoutSetting();
   await loadBatchCheckboxSettings(); // 全局记忆的勾选框设置
   bindEvents();
+  loadHistoryRetentionStatus();
 
   updateUI();
+}
+
+function loadHistoryRetentionStatus() {
+  chrome.runtime.sendMessage({ type: 'HISTORY_RETENTION_STATUS' }, (response) => {
+    if (chrome.runtime.lastError || !response?.ok) return;
+    const dueSoonCount = Number(response.data?.dueSoonCount) || 0;
+    const expiredCount = Number(response.data?.expiredCount) || 0;
+    if (dueSoonCount === 0 && expiredCount === 0) return;
+
+    historyRetentionBanner.hidden = false;
+    historyRetentionText.textContent = expiredCount > 0
+      ? `有 ${expiredCount} 条评论历史已满 90 天，等待导出和确认清理。`
+      : `有 ${dueSoonCount} 条评论历史即将达到 90 天，请提前归档。`;
+  });
 }
 
 async function loadTimeoutSetting() {
@@ -175,6 +194,10 @@ function saveTimeoutSetting() {
 
 // ==================== 事件绑定 ====================
 function bindEvents() {
+  const openHistory = () => chrome.tabs.create({ url: 'history.html' });
+  openHistoryBtn.addEventListener('click', openHistory);
+  historyRetentionLink.addEventListener('click', openHistory);
+
   // 上传区域
   uploadZone.addEventListener('click', () => fileInput.click());
   uploadZone.addEventListener('dragover', (e) => { e.preventDefault(); uploadZone.classList.add('drag-over'); });

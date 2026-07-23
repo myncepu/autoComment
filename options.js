@@ -57,6 +57,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const importConfigFileInput = document.getElementById('importConfigFileInput');
   const importExportStatus = document.getElementById('importExportStatus');
   const openBatchBtn = document.getElementById('openBatchBtn');
+  const openHistoryBtn = document.getElementById('openHistoryBtn');
   const toggleExportOutlinksFloatingBtn = document.getElementById('toggleExportOutlinksFloatingBtn');
 
   if (
@@ -414,6 +415,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   if (openBatchBtn) {
     openBatchBtn.addEventListener('click', () => chrome.tabs.create({ url: 'batch.html' }));
+  }
+  if (openHistoryBtn) {
+    openHistoryBtn.addEventListener('click', () => chrome.tabs.create({ url: 'history.html' }));
   }
 
   const modelConfig = await loadLlmConfig(chrome.storage);
