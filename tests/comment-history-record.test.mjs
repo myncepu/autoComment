@@ -165,3 +165,24 @@ test('converts only successful legacy entries and parses multiline anchors witho
     }
   ]);
 });
+
+test('parses a legacy href after a quoted attribute containing a greater-than sign', () => {
+  const record = buildLegacyCommentHistoryRecord({
+    result: 'success',
+    urlIndex: 5,
+    url: 'https://host.test/posts/1',
+    aiContent: '<a title=">" href="/real">Text</a>',
+    timestamp: 1721000000000
+  }, 'batch-a');
+
+  assert.deepEqual(record.anchors, [{
+    id: 'batch-a:5:0',
+    commentId: 'batch-a:5',
+    position: 0,
+    anchorText: 'Text',
+    anchorTextNormalized: 'text',
+    hrefRaw: '/real',
+    hrefResolved: 'https://host.test/real',
+    hrefDomain: 'host.test'
+  }]);
+});
