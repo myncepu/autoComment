@@ -668,23 +668,25 @@ async function openWorkerWindow(urlIndex) {
       urlIndex,
       url: item.url
     });
-    const isCurrentBatch = batchId === activityBatchId &&
+    const ownsActivityLifecycle = () => batchId === activityBatchId &&
       scheduler === activityScheduler &&
       windowManager === activityWindowManager;
-    if (openingActivities.get(urlIndex) === opening) {
-      openingActivities.delete(urlIndex);
-    }
     if (
-      !isCurrentBatch ||
+      !ownsActivityLifecycle() ||
       status !== 'running' ||
       isTerminated ||
       localResults.some((entry) => entry.originalIndex === urlIndex)
     ) {
       await activityWindowManager.closeByIndex(urlIndex);
-      if (isCurrentBatch && scheduler) {
-        scheduler.settle(urlIndex);
+      if (openingActivities.get(urlIndex) === opening) {
+        openingActivities.delete(urlIndex);
       }
+      activityScheduler?.settle(urlIndex);
+      if (!ownsActivityLifecycle()) return;
       return;
+    }
+    if (openingActivities.get(urlIndex) === opening) {
+      openingActivities.delete(urlIndex);
     }
     highlightPreviewRow(urlIndex, 'processing');
     updateStatsUI();

@@ -330,3 +330,99 @@ Result: 81 passing, 0 failing.
 ### Re-Review Concerns
 
 None.
+
+## Re-Review Fix: Deferred Late-Create Cleanup Ownership
+
+### RED
+
+Added an executable stop/resume regression for `openWorkerWindow`: window
+creation resolves after the old lifecycle is stopped, its cleanup close is
+deferred, then resume installs a replacement scheduler and same-index opening
+entry before that old close resolves.
+
+```bash
+node --test --test-name-pattern="deferred late-create" \
+  tests/batch-multi-window-integration.test.js
+```
+
+Result: 0 passing and 1 failing, as expected. The resumed scheduler's settle
+count was `1` instead of `0`, proving that the old late-create continuation
+used the mutable global scheduler after its close await.
+
+### GREEN
+
+Updated late-create cleanup so that:
+
+- lifecycle identity is evaluated through a function against the captured
+  batch ID, scheduler, and window manager rather than stored in a pre-await
+  boolean;
+- the deferred close always uses the captured window manager;
+- post-close opening cleanup occurs only when the current map still contains
+  the exact captured opening object;
+- reservation settlement always targets the captured `activityScheduler`;
+- no refill or completion action is taken by this cleanup continuation, and
+  replacement state is never reached through mutable globals.
+
+Focused regression:
+
+```bash
+node --check batch.js
+node --test --test-name-pattern="deferred late-create" \
+  tests/batch-multi-window-integration.test.js
+```
+
+Result: syntax passed; 1 passing, 0 failing.
+
+Complete integration:
+
+```bash
+node --test tests/batch-multi-window-integration.test.js
+```
+
+Result: 11 passing, 0 failing.
+
+Focused scheduler/window/integration verification:
+
+```bash
+git diff --check
+node --test \
+  tests/batch-scheduler.test.mjs \
+  tests/batch-window-manager.test.mjs \
+  tests/batch-multi-window-integration.test.js
+```
+
+Result: whitespace check passed; 25 passing, 0 failing.
+
+Full verification:
+
+```bash
+npm test
+```
+
+Result: 82 passing, 0 failing.
+
+### Changed Files
+
+- `batch.js`
+- `tests/batch-multi-window-integration.test.js`
+- `.superpowers/sdd/task-7-report.md`
+
+### Re-Review Self-Check
+
+- The stop/resume case can retain batch and manager identity, but the captured
+  scheduler differs from the resumed scheduler and only the former is settled.
+- A replacement same-index opening object is not equal to the captured
+  opening, so deferred cleanup cannot delete it.
+- Clear/start also remains isolated because both batch and manager identity
+  change; the old window still closes through its captured manager.
+- An already-timed-out or otherwise settled old reservation tolerates the
+  captured scheduler's idempotent `settle`.
+- The active-window success path still removes its exact opening entry before
+  dispatch and retains the existing send ownership gates.
+- Prior close-before-settle ordering, deferred finalizer ownership, pending
+  create timeout, message rejection isolation, missing-item accounting, and
+  completion protections remain covered.
+
+### Re-Review Concerns
+
+None.

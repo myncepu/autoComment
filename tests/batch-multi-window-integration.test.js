@@ -430,3 +430,94 @@ test('deferred finalizer cannot mutate a replacement same-index lifecycle', asyn
   assert.equal(api.getState().localResults.length, 0);
   assert.equal(oldSettleCount, 1);
 });
+
+test('deferred late-create cleanup cannot mutate resumed same-index work', async () => {
+  const { api } = createBatchHarness();
+  let resolveCreate;
+  let resolveClose;
+  let closeCount = 0;
+  let oldSettleCount = 0;
+  const oldOpening = { batchId: 'batch-a', startTime: 1 };
+  const oldOpenings = new Map([[0, oldOpening]]);
+  const oldScheduler = {
+    settle() { oldSettleCount += 1; }
+  };
+  const activity = {
+    batchId: 'batch-a',
+    urlIndex: 0,
+    url: 'https://old.test',
+    tabId: 10,
+    windowId: 20,
+    startTime: 2
+  };
+  const manager = {
+    create() {
+      return new Promise((resolve) => {
+        resolveCreate = resolve;
+      });
+    },
+    closeByIndex() {
+      closeCount += 1;
+      return new Promise((resolve) => {
+        resolveClose = resolve;
+      });
+    }
+  };
+  api.setState({
+    batchId: 'batch-a',
+    parsedUrls: [{ url: 'https://old.test', sourceDomain: '' }],
+    status: 'running',
+    scheduler: oldScheduler,
+    windowManager: manager,
+    openingActivities: oldOpenings,
+    isTerminated: false,
+    localResults: [],
+    totalCount: 2,
+    successCount: 0,
+    failCount: 0,
+    skippedCount: 0,
+    noCommentBoxCount: 0,
+    manualRequiredCount: 0,
+    blockedIllegalCount: 0,
+    pendingCount: 2,
+    timeoutCheckTimer: null
+  });
+
+  const openingWindow = api.openWorkerWindow(0);
+  api.setState({
+    status: 'terminated',
+    isTerminated: true
+  });
+  resolveCreate(activity);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(closeCount, 1);
+
+  let resumedSettleCount = 0;
+  let resumedRefillCount = 0;
+  const resumedOpening = { batchId: 'batch-a', startTime: 3 };
+  const resumedOpenings = new Map([[0, resumedOpening]]);
+  api.setState({
+    status: 'running',
+    scheduler: {
+      settle() { resumedSettleCount += 1; },
+      takeAvailable() {
+        resumedRefillCount += 1;
+        return [];
+      },
+      get activeIndices() { return [0]; }
+    },
+    windowManager: manager,
+    openingActivities: resumedOpenings,
+    isTerminated: false,
+    localResults: []
+  });
+
+  resolveClose();
+  await openingWindow;
+
+  assert.equal(resumedSettleCount, 0);
+  assert.equal(resumedRefillCount, 0);
+  assert.equal(resumedOpenings.get(0), resumedOpening);
+  assert.equal(oldSettleCount, 1);
+  assert.equal(closeCount, 1);
+});
