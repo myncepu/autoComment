@@ -816,32 +816,26 @@
   }
 
   async function persistBatchSubmitContext(batchId, urlIndex, url, result, aiContent, errorMessage) {
-    if (typeof chrome === 'undefined' || !chrome.storage) return;
-    await new Promise((resolve) => {
-      chrome.storage.local.set({
-        batchSubmitCtx: {
-          batchId,
-          urlIndex,
-          url,
-          result,
-          aiContent: aiContent || null,
-          errorMessage: errorMessage || null,
-          timestamp: Date.now()
-        }
-      }, resolve);
+    await window.AutoCommentBatchSubmitContext.save({
+      batchId,
+      urlIndex,
+      url,
+      result,
+      aiContent: aiContent || null,
+      errorMessage: errorMessage || null
     });
   }
 
-  function clearBatchSubmitContext() {
-    if (typeof chrome !== 'undefined' && chrome.storage) {
-      chrome.storage.local.remove('batchSubmitCtx', () => {});
-    }
+  async function clearBatchSubmitContext() {
+    try {
+      await window.AutoCommentBatchSubmitContext.clear();
+    } catch (_) {}
   }
 
   async function confirmRestoredBatchSubmit(ctx) {
     if (!ctx || !ctx.batchId || ctx.urlIndex === undefined) return;
     if (Date.now() - (ctx.timestamp || 0) > 10 * 60 * 1000) {
-      clearBatchSubmitContext();
+      await clearBatchSubmitContext();
       return;
     }
 
@@ -858,21 +852,18 @@
       }).then(resolve).catch(resolve);
     });
 
-    clearBatchSubmitContext();
+    await clearBatchSubmitContext();
   }
 
   // 从 storage 恢复提交后上下文（仅补确认，不再恢复成可执行批处理任务）
   async function restoreBatchContext() {
     console.log('[AutoComment] restoreBatchContext 开始');
-    if (typeof chrome === 'undefined' || !chrome.storage) return;
-    const data = await new Promise((resolve) => chrome.storage.local.get(['batchSubmitCtx', 'batchCtx'], resolve));
-    if (data.batchCtx) {
-      chrome.storage.local.remove('batchCtx', () => {});
-    }
-    console.log('[AutoComment] restoreBatchContext batchSubmitCtx:', data.batchSubmitCtx);
-    if (data.batchSubmitCtx) {
-      await confirmRestoredBatchSubmit(data.batchSubmitCtx);
-    }
+    let context = null;
+    try {
+      context = await window.AutoCommentBatchSubmitContext.restore();
+    } catch (_) {}
+    console.log('[AutoComment] restoreBatchContext batchSubmitCtx:', context);
+    if (context) await confirmRestoredBatchSubmit(context);
   }
 
   // 批处理模式专用：直接上报成功到 background
@@ -3971,11 +3962,11 @@
           });
         });
       }
-      clearBatchSubmitContext();
+      await clearBatchSubmitContext();
       console.log('[content] handleBatchTask 完成 <<<', { batchId, urlIndex });
     } catch (err) {
       console.warn('[content] handleBatchTask 捕获错误:', err.message);
-      clearBatchSubmitContext();
+      await clearBatchSubmitContext();
 
       // 特殊错误：未找到评论框
       if (err.message === '__NO_COMMENT_BOX__') {
