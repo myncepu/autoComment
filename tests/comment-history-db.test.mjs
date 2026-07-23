@@ -47,10 +47,10 @@ function makeBundle({
   };
 }
 
-async function openRepo(t) {
+async function openRepo(t, options = {}) {
   const indexedDBImpl = new IDBFactory();
   const dbName = `comment-history-test-${databaseSequence += 1}`;
-  const repo = await openCommentHistoryDb({ indexedDBImpl, dbName });
+  const repo = await openCommentHistoryDb({ indexedDBImpl, dbName, ...options });
   t.after(() => repo.close());
   return { repo, indexedDBImpl, dbName };
 }
@@ -83,10 +83,13 @@ test('creates the version 1 stores and indexes exactly as designed', async (t) =
   assert.deepEqual([...comments.indexNames], [
     'by_archive_month',
     'by_batch_task',
+    'by_promoted_domain_submitted_at',
     'by_promoted_domain',
     'by_submitted_at',
+    'by_submitted_at_id',
+    'by_target_domain_submitted_at',
     'by_target_domain'
-  ]);
+  ].sort());
   assert.deepEqual([...anchors.indexNames], [
     'by_anchor_text',
     'by_comment_id',
@@ -143,6 +146,40 @@ test('paginates comments in descending submission order with a stable cursor', a
   assert.equal(second.nextCursor, null);
 });
 
+test('uses IndexedDB binary string ordering for normal and anchor cursors', async (t) => {
+  const { repo } = await openRepo(t);
+  await repo.upsertRecord(makeBundle({
+    id: 'A:0',
+    submittedAt: 200,
+    anchors: [{ anchorText: 'Same', hrefDomain: 'links.test' }]
+  }));
+  await repo.upsertRecord(makeBundle({
+    id: 'a:0',
+    submittedAt: 200,
+    anchors: [{ anchorText: 'Same', hrefDomain: 'links.test' }]
+  }));
+
+  const normalFirst = await repo.queryRecords({ limit: 1 });
+  const normalSecond = await repo.queryRecords({ limit: 1, cursor: normalFirst.nextCursor });
+  assert.deepEqual(
+    [normalFirst.records[0].id, normalSecond.records[0].id],
+    ['a:0', 'A:0']
+  );
+  assert.equal(normalSecond.nextCursor, null);
+
+  const anchorFirst = await repo.queryRecords({ hrefDomain: 'links.test', limit: 1 });
+  const anchorSecond = await repo.queryRecords({
+    hrefDomain: 'links.test',
+    limit: 1,
+    cursor: anchorFirst.nextCursor
+  });
+  assert.deepEqual(
+    [anchorFirst.records[0].id, anchorSecond.records[0].id],
+    ['A:0', 'a:0']
+  );
+  assert.equal(anchorSecond.nextCursor, null);
+});
+
 test('filters by target domain, promoted domain, and inclusive date bounds', async (t) => {
   const { repo } = await openRepo(t);
   const records = [
@@ -192,6 +229,52 @@ test('joins unique comments for anchor text prefix and href domain filters', asy
   const byHref = await repo.queryRecords({ hrefDomain: 'links.test', limit: 10 });
   assert.deepEqual(new Set(byHref.records.map((record) => record.id)), new Set(['batch-a:0', 'batch-a:2']));
   assert.equal(await repo.countRecords({ anchorTextPrefix: 'alpha' }), 2);
+});
+
+test('requires combined anchor predicates to match the same anchor row', async (t) => {
+  const { repo } = await openRepo(t);
+  const splitAcrossRows = makeBundle({
+    id: 'batch-a:0',
+    anchors: [
+      { anchorText: 'Alpha text', hrefDomain: 'wrong.test' },
+      { anchorText: 'Other text', hrefDomain: 'links.test' }
+    ]
+  });
+  const sameRow = makeBundle({
+    id: 'batch-a:1',
+    anchors: [{ anchorText: 'Alphabet', hrefDomain: 'links.test' }]
+  });
+  await repo.upsertRecord(splitAcrossRows);
+  await repo.upsertRecord(sameRow);
+
+  const filter = {
+    anchorTextPrefix: 'alpha',
+    hrefDomain: 'links.test',
+    exportedBefore: Number.MAX_SAFE_INTEGER,
+    limit: 10
+  };
+  assert.deepEqual(
+    (await repo.queryRecords(filter)).records.map((record) => record.id),
+    [sameRow.comment.id]
+  );
+  assert.equal(await repo.countRecords(filter), 1);
+  assert.deepEqual(await repo.getExportChunk(filter), {
+    records: [sameRow],
+    nextCursor: null
+  });
+
+  assert.equal(await repo.deleteConfirmed(filter, {
+    id: 'archive-combined',
+    rangeStart: 0,
+    rangeEnd: Date.now(),
+    recordCount: 1,
+    fileNames: ['combined.csv'],
+    exportStartedAt: 1,
+    deleteConfirmedAt: 2,
+    deletedAt: 3
+  }), 1);
+  assert.deepEqual(await repo.getRecord(splitAcrossRows.comment.id), splitAcrossRows);
+  assert.equal(await repo.getRecord(sameRow.comment.id), null);
 });
 
 test('does not repeat a comment across anchor-filter pages', async (t) => {
@@ -290,6 +373,40 @@ test('exports an updatedAt snapshot and atomically deletes the exact confirmed c
   assert.deepEqual(await repo.listArchiveEvents(), [archiveEvent]);
 });
 
+test('reads export comments and anchors from one readonly snapshot', async (t) => {
+  const { repo } = await openRepo(t);
+  const original = makeBundle({
+    id: 'batch-a:0',
+    submittedAt: 100,
+    updatedAt: 150,
+    anchors: [{ anchorText: 'Original', hrefDomain: 'old.test' }]
+  });
+  const newer = {
+    comment: {
+      ...original.comment,
+      commentHtml: '<p>newer</p>',
+      commentText: 'newer',
+      updatedAt: 250
+    },
+    anchors: makeBundle({
+      id: 'batch-a:0',
+      anchors: [{ anchorText: 'Newer', hrefDomain: 'new.test' }]
+    }).anchors
+  };
+  await repo.upsertRecord(original);
+
+  const exportPromise = repo.getExportChunk({
+    exportedBefore: 200,
+    limit: 10
+  });
+  const updatePromise = repo.upsertRecord(newer);
+  const exported = await exportPromise;
+  await updatePromise;
+
+  assert.deepEqual(exported.records, [original]);
+  assert.deepEqual(await repo.getRecord(original.comment.id), newer);
+});
+
 test('confirmed deletion honors anchor criteria', async (t) => {
   const { repo } = await openRepo(t);
   const matching = makeBundle({
@@ -327,4 +444,47 @@ test('stores and retrieves metadata values', async (t) => {
   assert.equal(await repo.getMeta('missing'), undefined);
   await repo.setMeta('retention', { checkedAt: 123 });
   assert.deepEqual(await repo.getMeta('retention'), { checkedAt: 123 });
+});
+
+test('bounds default, date, domain, and anchor query cursor work to page lookahead', async (t) => {
+  const visits = [];
+  const { repo } = await openRepo(t, {
+    onQueryCursorVisit: (event) => visits.push(event)
+  });
+  for (let index = 0; index < 20; index += 1) {
+    await repo.upsertRecord(makeBundle({
+      id: `batch-a:${index}`,
+      submittedAt: 1000 + index,
+      targetDomain: index < 10 ? 'bounded.test' : 'other.test',
+      anchors: [{ anchorText: `Alpha ${index}`, hrefDomain: 'links.test' }]
+    }));
+  }
+
+  await repo.queryRecords({ limit: 2 });
+  assert.deepEqual(visits.splice(0), [
+    { kind: 'normal', indexName: 'by_submitted_at_id' },
+    { kind: 'normal', indexName: 'by_submitted_at_id' },
+    { kind: 'normal', indexName: 'by_submitted_at_id' }
+  ]);
+
+  await repo.queryRecords({ from: 1005, to: 1010, limit: 2 });
+  assert.deepEqual(visits.splice(0), [
+    { kind: 'normal', indexName: 'by_submitted_at_id' },
+    { kind: 'normal', indexName: 'by_submitted_at_id' },
+    { kind: 'normal', indexName: 'by_submitted_at_id' }
+  ]);
+
+  await repo.queryRecords({ targetDomain: 'bounded.test', limit: 2 });
+  assert.deepEqual(visits.splice(0), [
+    { kind: 'normal', indexName: 'by_target_domain_submitted_at' },
+    { kind: 'normal', indexName: 'by_target_domain_submitted_at' },
+    { kind: 'normal', indexName: 'by_target_domain_submitted_at' }
+  ]);
+
+  await repo.queryRecords({ anchorTextPrefix: 'alpha', limit: 2 });
+  assert.deepEqual(visits.splice(0), [
+    { kind: 'anchor', indexName: 'by_anchor_text' },
+    { kind: 'anchor', indexName: 'by_anchor_text' },
+    { kind: 'anchor', indexName: 'by_anchor_text' }
+  ]);
 });
