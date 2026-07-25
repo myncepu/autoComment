@@ -8,7 +8,8 @@
     "storage",
     "unlimitedStorage",
     "alarms",
-    "notifications"
+    "notifications",
+    "power"
   ],
   "host_permissions": [
     "https://openrouter.ai/*"
