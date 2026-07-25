@@ -191,6 +191,40 @@ test('a seal redirects a context saved after timeout into recovery instead of an
   assert.deepEqual(storage.data.batchSubmitRecoverySealsByTab, {});
 });
 
+test('a delayed sealed save recovers the old task without deleting a replacement tab context', async () => {
+  const storage = createStorageArea();
+  let now = 5000;
+  const store = createBatchSubmitContextStore(storage, {
+    now: () => now,
+    maxAgeMs: Number.POSITIVE_INFINITY
+  });
+
+  await store.save(55, { batchId: 'batch-replacement', urlIndex: 9 });
+  await store.sealAndRecover(55, {
+    batchId: 'batch-old',
+    urlIndex: 1
+  }, 'timeout');
+  now += 1;
+  await store.save(55, {
+    batchId: 'batch-old',
+    urlIndex: 1,
+    history: {
+      historyRevision: {
+        capturedAt: 4000,
+        recordedAt: 4001,
+        sequence: 1,
+        id: 'revision-old-late'
+      }
+    }
+  });
+
+  assert.equal((await store.get(55)).batchId, 'batch-replacement');
+  assert.equal(
+    Object.values(storage.data.batchSubmitRecoveriesByTask)[0].batchId,
+    'batch-old'
+  );
+});
+
 test('listener preserves unacknowledged context when its tab closes', async () => {
   let listener;
   let tabRemovedListener;
