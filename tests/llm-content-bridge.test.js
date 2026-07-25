@@ -66,6 +66,7 @@ test('loads the bridge before content code and routes every generation through i
     'lib/llm-content-bridge.js',
     'lib/batch-submit-context-client.js',
     'lib/comment-history-capture.js',
+    'lib/batch-phase-reporter.js',
     'content.js'
   ]);
   assert.equal((content.match(/generatePromotionCopyWithLlm\(\)/g) || []).length, 4);

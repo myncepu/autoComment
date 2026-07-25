@@ -120,6 +120,7 @@ async function broadcastBatchConfirmed(
     attempt: message.attempt,
     result: message.result ?? 'success',
     aiContent: message.aiContent || null,
+    errorCode: message.errorCode || null,
     errorMessage: message.errorMessage || null,
     ...(historySaveStatus ? { historySaveStatus } : {}),
     ...(Number.isInteger(historyPendingCount) || historyPendingCount === null
@@ -177,6 +178,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 {
                   batchId: message.batchId,
                   urlIndex: message.urlIndex,
+                  attempt: message.attempt,
                   historyRevision: message.history?.historyRevision
                 }
               );
@@ -235,6 +237,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           {
             batchId: message.batchId,
             urlIndex: message.urlIndex,
+            attempt: message.attempt,
             historyRevision: message.historyRevision
           }
         );
@@ -297,6 +300,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           && submitContext
           && submitContext.batchId === message.batchId
           && submitContext.urlIndex === message.urlIndex
+          && submitContext.attempt === message.attempt
         );
         if (hasUnacknowledgedSubmission) {
           sendResponse({ ok: true, deferred: true });

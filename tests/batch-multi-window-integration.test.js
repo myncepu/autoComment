@@ -202,6 +202,9 @@ function createBatchHarness(overrides = {}) {
           if ('scheduler' in next) scheduler = next.scheduler;
           if ('windowManager' in next) windowManager = next.windowManager;
           if ('openingActivities' in next) openingActivities = next.openingActivities;
+          if ('taskAttempts' in next && typeof taskAttempts !== 'undefined') {
+            taskAttempts = next.taskAttempts;
+          }
           if ('lifecycleToken' in next && typeof lifecycleToken !== 'undefined') {
             lifecycleToken = next.lifecycleToken;
           } else if ('batchId' in next && typeof lifecycleToken !== 'undefined') {
@@ -504,14 +507,15 @@ test('worker activity is checkpointed before the content task is sent', async ()
     }
   });
   chrome.tabs.sendMessage = async (_tabId, message) => {
-    order.push(['tab', message.type]);
+    order.push(['tab', JSON.parse(JSON.stringify(message))]);
     return { ok: true };
   };
   const manager = {
-    async create({ batchId, urlIndex, url }) {
+    async create({ batchId, urlIndex, attempt, url }) {
       activity = {
         batchId,
         urlIndex,
+        attempt,
         url,
         tabId: 41,
         windowId: 51,
@@ -539,6 +543,7 @@ test('worker activity is checkpointed before the content task is sent', async ()
       settle() {}
     },
     windowManager: manager,
+    taskAttempts: new Map([[0, 2]]),
     openingActivities: new Map(),
     isTerminated: false,
     localResults: [],
@@ -554,11 +559,19 @@ test('worker activity is checkpointed before the content task is sent', async ()
     type: 'BATCH_TASK_ACTIVE',
     batchId: 'batch-active',
     urlIndex: 0,
+    attempt: 2,
     tabId: 41,
     windowId: 51,
     startedAt: 1000
   }]);
-  assert.deepEqual(order[1], ['tab', 'PING']);
+  assert.deepEqual(order[1], ['tab', { type: 'PING' }]);
+  assert.deepEqual(order[2], ['tab', {
+    type: 'BATCH_HANDLE',
+    batchId: 'batch-active',
+    urlIndex: 0,
+    attempt: 2,
+    url: 'https://active.test'
+  }]);
 });
 
 test('a paused checkpoint hydrates the complete page and resumes only on click', async () => {
@@ -733,6 +746,61 @@ test('terminal paths close a worker window before replenishing the queue', () =>
   assert.ok(closeIndex >= 0);
   assert.ok(settleIndex > closeIndex);
   assert.ok(refillIndex > settleIndex);
+});
+
+test('terminal checkpoint messages carry the active attempt and stable error code', async () => {
+  const runtimeMessages = [];
+  const activity = {
+    batchId: 'batch-terminal',
+    urlIndex: 0,
+    attempt: 3,
+    startTime: Date.now()
+  };
+  const { api } = createBatchHarness({
+    runtimeSendMessage(message) {
+      runtimeMessages.push(JSON.parse(JSON.stringify(message)));
+      return Promise.resolve({ ok: true });
+    }
+  });
+  api.setState({
+    batchId: 'batch-terminal',
+    parsedUrls: [{ url: 'https://timeout.test', sourceDomain: '' }],
+    batchItems: [{ url: 'https://timeout.test', sourceDomain: '' }],
+    status: 'running',
+    scheduler: {
+      settle() {},
+      takeAvailable() { return []; }
+    },
+    windowManager: {
+      getByIndex() { return activity; },
+      async closeByIndex() {}
+    },
+    openingActivities: new Map(),
+    isTerminated: false,
+    localResults: [],
+    totalCount: 2,
+    pendingCount: 2
+  });
+
+  await api.finalizeTask(0, 'fail', null, 'timed out', {
+    errorCode: 'task_timeout'
+  });
+
+  assert.deepEqual(
+    runtimeMessages.find((message) => message.type === 'BATCH_TASK_TERMINAL'),
+    {
+      type: 'BATCH_TASK_TERMINAL',
+      batchId: 'batch-terminal',
+      urlIndex: 0,
+      attempt: 3,
+      result: {
+        result: 'fail',
+        aiContent: null,
+        errorCode: 'task_timeout',
+        errorMessage: 'timed out'
+      }
+    }
+  );
 });
 
 test('late window creation stays bound to the batch and manager that opened it', () => {
@@ -919,6 +987,7 @@ test('timeout seals and recovers a worker context before closing its window', as
         return {
           batchId: 'batch-ambiguous',
           urlIndex: 0,
+          attempt: 2,
           tabId: 77,
           startTime: Date.now() - 5000
         };
@@ -946,6 +1015,7 @@ test('timeout seals and recovers a worker context before closing its window', as
     tabId: 77,
     batchId: 'batch-ambiguous',
     urlIndex: 0,
+    attempt: 2,
     reason: 'timeout'
   });
   assert.equal(closeCount, 1);
@@ -1087,7 +1157,12 @@ test('a zero pending count reconciles earlier queued history rows', async () => 
     },
     windowManager: {
       getByIndex() {
-        return { batchId: 'batch-history', urlIndex: 1, startTime: Date.now() };
+        return {
+          batchId: 'batch-history',
+          urlIndex: 1,
+          attempt: 1,
+          startTime: Date.now()
+        };
       },
       async closeByIndex() {}
     },
@@ -1115,8 +1190,10 @@ test('a zero pending count reconciles earlier queued history rows', async () => 
 
   await api.handleTaskConfirmed(
     1,
+    1,
     'success',
     'second',
+    null,
     null,
     'saved',
     0
@@ -1147,6 +1224,7 @@ test('a durable confirmation from an old tab cannot close a replacement worker',
         return {
           batchId: 'batch-confirm',
           urlIndex: 0,
+          attempt: 1,
           tabId: 77,
           startTime: Date.now()
         };
@@ -1168,8 +1246,10 @@ test('a durable confirmation from an old tab cannot close a replacement worker',
 
   await api.handleTaskConfirmed(
     0,
+    1,
     'success',
     'confirmed',
+    null,
     null,
     'saved',
     0,
@@ -1179,6 +1259,25 @@ test('a durable confirmation from an old tab cannot close a replacement worker',
   assert.equal(closeCount, 0);
   assert.equal(settleCount, 0);
   assert.deepEqual(api.getState().localResults, []);
+});
+
+test('a durable confirmation must match the current tab and attempt', () => {
+  const script = read('batch.js');
+  const start = script.indexOf('function isConfirmationForActivity');
+  const end = script.indexOf('\n\nasync function handleTaskConfirmed', start);
+  assert.notEqual(start, -1, 'missing confirmation identity helper');
+  assert.notEqual(end, -1, 'missing confirmation identity helper end');
+  const context = vm.createContext({});
+  vm.runInContext(
+    `${script.slice(start, end)}
+globalThis.isConfirmationForActivity = isConfirmationForActivity;`,
+    context
+  );
+  const activity = { tabId: 77, attempt: 2 };
+
+  assert.equal(context.isConfirmationForActivity(activity, 77, 1), false);
+  assert.equal(context.isConfirmationForActivity(activity, 66, 2), false);
+  assert.equal(context.isConfirmationForActivity(activity, 77, 2), true);
 });
 
 test('deferred finalizer cannot mutate a replacement same-index lifecycle', async () => {
@@ -1504,6 +1603,7 @@ test('Stop recovers an unresolved submit context before closing its worker', asy
         return {
           batchId: 'batch-stop-recovery',
           urlIndex: 0,
+          attempt: 3,
           tabId: 44,
           startTime: Date.now()
         };
@@ -1530,6 +1630,7 @@ test('Stop recovers an unresolved submit context before closing its worker', asy
     tabId: 44,
     batchId: 'batch-stop-recovery',
     urlIndex: 0,
+    attempt: 3,
     reason: 'stop'
   });
   assert.equal(closeCount, 1);

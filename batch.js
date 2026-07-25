@@ -28,6 +28,7 @@ let status = 'idle';                // idle | starting | running | completing | 
 let scheduler = null;
 let windowManager = null;
 let openingActivities = new Map();
+let taskAttempts = new Map();
 let isTerminated = false;
 
 // 实时计数
@@ -386,9 +387,11 @@ function bindEvents() {
     });
     void handleTaskConfirmed(
       message.urlIndex,
+      message.attempt,
       message.result,
       message.aiContent,
       message.errorMessage,
+      message.errorCode,
       message.historySaveStatus,
       message.historyPendingCount,
       message.sourceTabId
@@ -702,6 +705,14 @@ function hydrateBatchFromCheckpoint(checkpoint) {
   lifecycleToken = {};
   isTerminated = false;
   openingActivities.clear();
+  taskAttempts = new Map(
+    Object.entries(checkpoint.tasks || {}).map(([urlIndex, task]) => [
+      Number(urlIndex),
+      Number.isInteger(task?.attempt) && task.attempt > 0
+        ? task.attempt
+        : 1
+    ])
+  );
 
   timeoutInput.value = String(timeoutSeconds);
   concurrencyInput.value = String(concurrency);
@@ -843,6 +854,16 @@ async function startBatch() {
       }
     );
     if (!sessionResponse.checkpoint || !ownsStartingLifecycle()) return;
+    taskAttempts = new Map(
+      Object.entries(sessionResponse.checkpoint.tasks || {}).map(
+        ([urlIndex, task]) => [
+          Number(urlIndex),
+          Number.isInteger(task?.attempt) && task.attempt > 0
+            ? task.attempt
+            : 1
+        ]
+      )
+    );
   } catch (error) {
     if (!ownsStartingLifecycle()) return;
     console.warn('[batch] 批处理启动失败:', error);
@@ -996,7 +1017,10 @@ async function stopBatch() {
       {
         closeWindow: canClose,
         suppressCompletion: true,
-        ownership: stoppingLifecycle
+        ownership: stoppingLifecycle,
+        errorCode: recovery.recovered || !canClose
+          ? 'submission_uncertain'
+          : 'task_failed'
       }
     );
   }));
@@ -1041,7 +1065,22 @@ async function resumeBatch() {
   }
 
   try {
-    await sendBatchRuntimeMessage('BATCH_SESSION_RESUME', { batchId });
+    const response = await sendBatchRuntimeMessage(
+      'BATCH_SESSION_RESUME',
+      { batchId }
+    );
+    if (response.checkpoint) {
+      taskAttempts = new Map(
+        Object.entries(response.checkpoint.tasks || {}).map(
+          ([urlIndex, task]) => [
+            Number(urlIndex),
+            Number.isInteger(task?.attempt) && task.attempt > 0
+              ? task.attempt
+              : 1
+          ]
+        )
+      );
+    }
   } catch (error) {
     alert(error?.code === 'power_request_failed'
       ? '无法阻止系统休眠，任务仍保持暂停。'
@@ -1106,10 +1145,11 @@ async function openWorkerWindow(urlIndex) {
       'fail',
       null,
       'URL 数据不存在',
-      { closeWindow: false }
+      { closeWindow: false, errorCode: 'task_failed' }
     );
     return;
   }
+  const attempt = taskAttempts.get(urlIndex) || 1;
 
   const illegalCheck = item.illegalCheck ||
     evaluateIllegalSiteForBatchItem(item.url, item.sourceDomain);
@@ -1119,7 +1159,11 @@ async function openWorkerWindow(urlIndex) {
       'blocked_illegal',
       null,
       getIllegalSiteBlockMessage(illegalCheck),
-      { closeWindow: false, forcedElapsed: 0 }
+      {
+        closeWindow: false,
+        forcedElapsed: 0,
+        errorCode: 'illegal_site'
+      }
     );
     return;
   }
@@ -1138,6 +1182,7 @@ async function openWorkerWindow(urlIndex) {
     const activity = await activityWindowManager.create({
       batchId: activityBatchId,
       urlIndex,
+      attempt,
       url: item.url
     });
     const ownsActivityLifecycle = () => batchId === activityBatchId &&
@@ -1165,6 +1210,7 @@ async function openWorkerWindow(urlIndex) {
       await sendBatchRuntimeMessage('BATCH_TASK_ACTIVE', {
         batchId: activityBatchId,
         urlIndex,
+        attempt: activity.attempt,
         tabId: activity.tabId,
         windowId: activity.windowId,
         startedAt: activity.startTime
@@ -1208,7 +1254,7 @@ async function openWorkerWindow(urlIndex) {
       'fail',
       null,
       `窗口创建失败：${error.message || error}`,
-      { closeWindow: false }
+      { closeWindow: false, errorCode: 'window_create_failed' }
     );
   }
 }
@@ -1235,7 +1281,7 @@ function canContinueActivity(activity, ownership) {
 }
 
 function sendTaskWhenReady(activity, ownership, retries = 0) {
-  const { tabId, urlIndex, url } = activity;
+  const { tabId, urlIndex, attempt, url } = activity;
   if (!canContinueActivity(activity, ownership)) return;
 
   if (retries > 20) {
@@ -1244,7 +1290,8 @@ function sendTaskWhenReady(activity, ownership, retries = 0) {
         urlIndex,
         'fail',
         null,
-        'content.js 就绪超时'
+        'content.js 就绪超时',
+        { errorCode: 'content_script_unavailable' }
       );
     }
     return;
@@ -1257,6 +1304,7 @@ function sendTaskWhenReady(activity, ownership, retries = 0) {
       type: 'BATCH_HANDLE',
       batchId: ownership.batchId,
       urlIndex,
+      attempt,
       url
     }).then((response) => {
       if (!response?.ok) {
@@ -1268,7 +1316,8 @@ function sendTaskWhenReady(activity, ownership, retries = 0) {
           urlIndex,
           'fail',
           null,
-          `消息发送失败：${error.message || '标签页可能已关闭'}`
+          `消息发送失败：${error.message || '标签页可能已关闭'}`,
+          { errorCode: 'content_script_unavailable' }
         );
       }
     });
@@ -1378,6 +1427,7 @@ async function finalizeTask(
     forcedElapsed,
     suppressCompletion = false,
     ownership = null,
+    errorCode = null,
     historySaveStatus = null,
     historyPendingCount: confirmedHistoryPendingCount
   } = {}
@@ -1403,6 +1453,7 @@ async function finalizeTask(
   const taskOpening = ownership?.openings?.get(urlIndex) ??
     openingActivities.get(urlIndex);
   const activity = taskWindowManager?.getByIndex(urlIndex);
+  const taskAttempt = activity?.attempt ?? taskAttempts.get(urlIndex) ?? 1;
   if (
     batchId !== taskBatchId ||
     lifecycleToken !== taskLifecycleToken ||
@@ -1422,9 +1473,11 @@ async function finalizeTask(
     await sendBatchRuntimeMessage('BATCH_TASK_TERMINAL', {
       batchId: taskBatchId,
       urlIndex,
+      attempt: taskAttempt,
       result: {
         result,
         aiContent: aiContent || null,
+        errorCode,
         errorMessage: errorMessage || null
       }
     });
@@ -1480,11 +1533,25 @@ async function finalizeTask(
   return true;
 }
 
+function isConfirmationForActivity(activity, sourceTabId, attempt) {
+  return Boolean(
+    activity
+    && Number.isInteger(attempt)
+    && activity.attempt === attempt
+    && (
+      !Number.isInteger(sourceTabId)
+      || activity.tabId === sourceTabId
+    )
+  );
+}
+
 async function handleTaskConfirmed(
   urlIndex,
+  attempt,
   result,
   aiContent,
   errorMessage,
+  errorCode,
   historySaveStatus,
   confirmedHistoryPendingCount,
   sourceTabId
@@ -1497,10 +1564,7 @@ async function handleTaskConfirmed(
     batchItems
   };
   const activity = confirmationLifecycle.windowManager?.getByIndex(urlIndex);
-  if (
-    Number.isInteger(sourceTabId)
-    && activity?.tabId !== sourceTabId
-  ) {
+  if (!isConfirmationForActivity(activity, sourceTabId, attempt)) {
     return;
   }
   if (
@@ -1513,6 +1577,7 @@ async function handleTaskConfirmed(
   }
   await finalizeTask(urlIndex, result, aiContent, errorMessage, {
     ownership: confirmationLifecycle,
+    errorCode,
     historySaveStatus,
     historyPendingCount: confirmedHistoryPendingCount
   });
@@ -1525,7 +1590,7 @@ async function handleUnexpectedWindowClose(activity) {
     'fail',
     null,
     '用户手动关闭',
-    { closeWindow: false }
+    { closeWindow: false, errorCode: 'task_failed' }
   );
 }
 
@@ -1660,6 +1725,7 @@ async function recoverSubmitContext(
       tabId: activity.tabId,
       batchId: taskBatchId,
       urlIndex,
+      attempt: activity.attempt,
       reason
     });
     return {
@@ -1720,7 +1786,10 @@ async function checkTimeouts() {
             'manual_required',
             null,
             '提交结果不明确；上下文已保留待恢复',
-            { ownership: timeoutLifecycle }
+            {
+              ownership: timeoutLifecycle,
+              errorCode: 'submission_uncertain'
+            }
           );
           continue;
         }
@@ -1730,7 +1799,10 @@ async function checkTimeouts() {
         'fail',
         null,
         '处理超时',
-        { ownership: timeoutLifecycle }
+        {
+          ownership: timeoutLifecycle,
+          errorCode: 'task_timeout'
+        }
       );
       if (
         batchId !== timeoutLifecycle.batchId ||

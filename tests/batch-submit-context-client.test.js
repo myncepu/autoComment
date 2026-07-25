@@ -32,6 +32,7 @@ test('saves, restores, and clears through background messages', async () => {
   const restored = {
     batchId: 'a',
     urlIndex: 2,
+    attempt: 1,
     history: {
       commentHtml: 'Exact <a href="https://promo.test/">body</a>',
       historyRevision: {
@@ -62,6 +63,7 @@ test('clears only the submit context matching the acknowledged history revision'
   const match = {
     batchId: 'batch-a',
     urlIndex: 2,
+    attempt: 1,
     historyRevision: {
       capturedAt: 1000,
       recordedAt: 1001,
@@ -83,13 +85,34 @@ test('acknowledged confirmation clears the persisted submit context', async () =
     BATCH_HANDLE_CONFIRM: { ok: true }
   });
 
-  await client.confirm({ batchId: 'a', urlIndex: 2 });
+  await client.confirm({ batchId: 'a', urlIndex: 2, attempt: 1 });
 
   assert.deepEqual(JSON.parse(JSON.stringify(messages)), [
-    { type: 'BATCH_HANDLE_CONFIRM', batchId: 'a', urlIndex: 2 },
+    { type: 'BATCH_HANDLE_CONFIRM', batchId: 'a', urlIndex: 2, attempt: 1 },
     {
       type: 'BATCH_CLEAR_SUBMIT_CONTEXT',
-      match: { batchId: 'a', urlIndex: 2 }
+      match: { batchId: 'a', urlIndex: 2, attempt: 1 }
+    }
+  ]);
+});
+
+test('confirmation clear carries the acknowledged attempt identity', async () => {
+  const { client, messages } = loadClient({
+    BATCH_HANDLE_CONFIRM: { ok: true }
+  });
+
+  await client.confirm({ batchId: 'a', urlIndex: 2, attempt: 3 });
+
+  assert.deepEqual(JSON.parse(JSON.stringify(messages)), [
+    {
+      type: 'BATCH_HANDLE_CONFIRM',
+      batchId: 'a',
+      urlIndex: 2,
+      attempt: 3
+    },
+    {
+      type: 'BATCH_CLEAR_SUBMIT_CONTEXT',
+      match: { batchId: 'a', urlIndex: 2, attempt: 3 }
     }
   ]);
 });
@@ -100,12 +123,12 @@ test('negative confirmation preserves the persisted submit context', async () =>
   });
 
   await assert.rejects(
-    client.confirm({ batchId: 'a', urlIndex: 2 }),
+    client.confirm({ batchId: 'a', urlIndex: 2, attempt: 1 }),
     /not stored/
   );
 
   assert.deepEqual(JSON.parse(JSON.stringify(messages)), [
-    { type: 'BATCH_HANDLE_CONFIRM', batchId: 'a', urlIndex: 2 }
+    { type: 'BATCH_HANDLE_CONFIRM', batchId: 'a', urlIndex: 2, attempt: 1 }
   ]);
 });
 
@@ -115,11 +138,11 @@ test('rejected confirmation preserves the persisted submit context', async () =>
   });
 
   await assert.rejects(
-    client.confirm({ batchId: 'a', urlIndex: 2 }),
+    client.confirm({ batchId: 'a', urlIndex: 2, attempt: 1 }),
     /message failed/
   );
 
   assert.deepEqual(JSON.parse(JSON.stringify(messages)), [
-    { type: 'BATCH_HANDLE_CONFIRM', batchId: 'a', urlIndex: 2 }
+    { type: 'BATCH_HANDLE_CONFIRM', batchId: 'a', urlIndex: 2, attempt: 1 }
   ]);
 });

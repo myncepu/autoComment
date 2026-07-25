@@ -20,6 +20,285 @@ function plain(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function loadFieldValidation({ name = '', email = '', reportStatus } = {}) {
+  const context = vm.createContext({
+    console: { log() {}, error() {} },
+    getUserProfile: async () => ({ name, email }),
+    getWebsiteUrl: async () => 'https://promo.test/'
+  });
+  const functionSource = sourceBetween(
+    'async function ensureAllCommentFormFieldsFilled',
+    '\n\n  // 收集当前页面内容'
+  );
+  vm.runInContext(
+    `${functionSource}
+globalThis.ensureAllCommentFormFieldsFilled = ensureAllCommentFormFieldsFilled;`,
+    context
+  );
+  return {
+    validate: (commentText = '', skipCommentValidation = true) => (
+      context.ensureAllCommentFormFieldsFilled(
+        commentText,
+        skipCommentValidation,
+        reportStatus
+      )
+    )
+  };
+}
+
+test('missing profile fields return structured failure without an open panel', async () => {
+  const harness = loadFieldValidation({
+    name: '',
+    email: 'writer@example.test'
+  });
+
+  assert.deepEqual(plain(await harness.validate()), {
+    success: false,
+    missingFields: ['name config missing']
+  });
+});
+
+test('missing profile fields can be reported by an open panel without global state', async () => {
+  const statuses = [];
+  const harness = loadFieldValidation({
+    name: 'Writer',
+    email: '',
+    reportStatus(text, color) {
+      statuses.push({ text, color });
+    }
+  });
+
+  assert.deepEqual(plain(await harness.validate()), {
+    success: false,
+    missingFields: ['email config missing']
+  });
+  assert.equal(statuses.length, 1);
+  assert.match(statuses[0].text, /邮箱/);
+  assert.equal(statuses[0].color, '#f97373');
+});
+
+test('automatic profile failure is attempt-scoped and cannot continue to submit', async () => {
+  const phases = [];
+  const pending = [];
+  const reports = [];
+  let clickCount = 0;
+  const context = vm.createContext({
+    console: { log() {}, warn() {}, error() {} },
+    location: { href: 'https://target.test/post' },
+    lastGeneratedPromotionCopy: '',
+    getBatchTaskKey: (batchId, urlIndex, attempt) => (
+      `${batchId}:${urlIndex}:${attempt}`
+    ),
+    reportBatchPhase: async (batchContext, phase) => {
+      phases.push({ ...batchContext, phase });
+    },
+    waitForPageReady: async () => {},
+    evaluateCurrentPageForIllegalSite: () => ({ blocked: false }),
+    checkExistingBatchResult: async () => null,
+    findCommentForm: () => ({ id: 'commentform' }),
+    findLikelyCommentTextarea: () => ({ value: '' }),
+    triggerCommentFormFlow: async () => {},
+    findCommentTargetsForBatchUsingManualFlow: async () => ({}),
+    detectManualRequiredChallenge: () => ({ found: false }),
+    getCachedPromotionCopy: async () => 'Cached promotion',
+    generatePromotionCopyWithLlm: async () => {
+      throw new Error('generation should not run');
+    },
+    tryFillCommentTextareaWithPromotion: () => true,
+    ensureAllCommentFormFieldsFilled: async () => ({
+      success: false,
+      missingFields: ['name config missing']
+    }),
+    captureCurrentCommentHistory: async () => {
+      throw new Error('history capture should not run');
+    },
+    writePendingResult: async (...args) => {
+      pending.push(args);
+    },
+    reportBatchResult: async (...args) => {
+      reports.push(args);
+    },
+    clickCommentSubmitButton: async () => {
+      clickCount += 1;
+      return { success: true };
+    }
+  });
+  const taskSource = sourceBetween(
+    'async function handleBatchTask(batchId, urlIndex, attempt, url)',
+    '\n  /**\n   * 等待页面关键元素加载'
+  );
+  vm.runInContext(
+    `let runningBatchTaskKey = null;
+${taskSource}
+globalThis.handleBatchTask = handleBatchTask;`,
+    context
+  );
+
+  await context.handleBatchTask(
+    'batch-config',
+    4,
+    2,
+    'https://target.test/post'
+  );
+
+  assert.deepEqual(plain(phases), [
+    {
+      batchId: 'batch-config',
+      urlIndex: 4,
+      attempt: 2,
+      phase: 'loading'
+    },
+    {
+      batchId: 'batch-config',
+      urlIndex: 4,
+      attempt: 2,
+      phase: 'detecting'
+    },
+    {
+      batchId: 'batch-config',
+      urlIndex: 4,
+      attempt: 2,
+      phase: 'filling'
+    }
+  ]);
+  assert.deepEqual(pending, [[
+    'batch-config',
+    4,
+    2,
+    'https://target.test/post',
+    'fail',
+    null,
+    '表单字段缺失: name config missing',
+    'task_failed'
+  ]]);
+  assert.deepEqual(reports, [[
+    'batch-config',
+    4,
+    2,
+    'fail',
+    null,
+    '表单字段缺失: name config missing',
+    'https://target.test/post',
+    'task_failed'
+  ]]);
+  assert.equal(clickCount, 0);
+});
+
+test('batch handles reject a missing attempt before accepting task identity', () => {
+  const identitySource = sourceBetween(
+    'function getBatchTaskKey',
+    '\n\n  function createHistoryUniqueId'
+  );
+  const context = vm.createContext({});
+  vm.runInContext(
+    `${identitySource}
+globalThis.getBatchHandleValidationError = getBatchHandleValidationError;
+globalThis.getBatchTaskKey = getBatchTaskKey;`,
+    context
+  );
+
+  assert.deepEqual(plain(context.getBatchHandleValidationError({
+    batchId: 'batch-a',
+    urlIndex: 3
+  })), {
+    ok: false,
+    error: 'invalid_batch_attempt',
+    urlIndex: 3
+  });
+  assert.equal(context.getBatchHandleValidationError({
+    batchId: 'batch-a',
+    urlIndex: 3,
+    attempt: 2
+  }), null);
+  assert.equal(context.getBatchTaskKey('batch-a', 3, 1), 'batch-a:3:1');
+  assert.equal(context.getBatchTaskKey('batch-a', 3, 2), 'batch-a:3:2');
+});
+
+test('a failed submitting phase write clears pre-click context and prevents a click', async () => {
+  const cleared = [];
+  let clicked = false;
+  let markedSubmitting = false;
+  const form = { id: 'commentform' };
+  const editor = { value: 'Generated promotion' };
+  const context = vm.createContext({
+    console: { log() {}, warn() {}, error() {} },
+    location: { href: 'https://target.test/post' },
+    lastGeneratedPromotionCopy: '',
+    getBatchTaskKey: (batchId, urlIndex, attempt) => (
+      `${batchId}:${urlIndex}:${attempt}`
+    ),
+    async reportBatchPhase(_batchContext, phase) {
+      if (phase === 'submitting') {
+        throw new Error('checkpoint_write_failed');
+      }
+    },
+    waitForPageReady: async () => {},
+    evaluateCurrentPageForIllegalSite: () => ({ blocked: false }),
+    checkExistingBatchResult: async () => null,
+    findCommentForm: () => form,
+    findLikelyCommentTextarea: () => editor,
+    triggerCommentFormFlow: async () => {},
+    findCommentTargetsForBatchUsingManualFlow: async () => ({
+      form,
+      textarea: editor
+    }),
+    detectManualRequiredChallenge: () => ({ found: false }),
+    getCachedPromotionCopy: async () => 'Generated promotion',
+    generatePromotionCopyWithLlm: async () => 'Generated promotion',
+    tryFillCommentTextareaWithPromotion: () => true,
+    ensureAllCommentFormFieldsFilled: async () => ({
+      success: true,
+      missingFields: []
+    }),
+    captureCurrentCommentHistory: async () => ({
+      historyRevision: {
+        capturedAt: 1,
+        recordedAt: 2,
+        sequence: 1,
+        id: 'revision-phase-failure'
+      }
+    }),
+    writePendingResult: async () => {},
+    persistBatchSubmitContext: async () => {},
+    markBatchTaskSubmitting: async () => {
+      markedSubmitting = true;
+    },
+    clearBatchSubmitContext: async (match) => {
+      cleared.push(plain(match));
+    },
+    reportBatchResult: async () => {},
+    clickCommentSubmitButton: async () => {
+      clicked = true;
+      return { success: true };
+    }
+  });
+  const taskSource = sourceBetween(
+    'async function handleBatchTask(batchId, urlIndex, attempt, url)',
+    '\n  /**\n   * 等待页面关键元素加载'
+  );
+  vm.runInContext(
+    `let runningBatchTaskKey = null;
+${taskSource}
+globalThis.handleBatchTask = handleBatchTask;`,
+    context
+  );
+
+  await context.handleBatchTask(
+    'batch-phase',
+    5,
+    2,
+    'https://target.test/post'
+  );
+
+  assert.deepEqual(cleared, [{
+    batchId: 'batch-phase',
+    urlIndex: 5,
+    attempt: 2
+  }]);
+  assert.equal(markedSubmitting, false);
+  assert.equal(clicked, false);
+});
+
 test('captures the fixture editor value and promoted URL at the submission boundary', async () => {
   const html = fs.readFileSync(path.join(__dirname, 'fixtures', 'comment-page.html'), 'utf8');
   const dom = new JSDOM(html, {
@@ -65,7 +344,7 @@ globalThis.captureCurrentCommentHistory = captureCurrentCommentHistory;`, contex
 
 test('captures the final editor before pending context persistence and synthetic click', () => {
   const flow = sourceBetween(
-    'async function handleBatchTask(batchId, urlIndex, url, originalIndex)',
+    'async function handleBatchTask(batchId, urlIndex, attempt, url)',
     '\n  /**\n   * 等待页面关键元素加载'
   );
   const validationIndex = flow.indexOf('const manualCheckBeforeSubmit = detectManualRequiredChallenge(form);');
@@ -93,7 +372,7 @@ test('captures the final editor before pending context persistence and synthetic
     'submitting checkpoint must be durable before the click'
   );
   assert.match(flow, /const editor = findLikelyCommentTextarea\(\{ allowGenericFallback: true \}\);/);
-  assert.match(flow, /persistBatchSubmitContext\([^;]+history\)/);
+  assert.match(flow, /persistBatchSubmitContext\([\s\S]*?history\s*\)/);
   assert.match(flow, /confirmBatchHistoryDurably\(\{[\s\S]*history[\s\S]*\}\)/);
 });
 
@@ -128,26 +407,29 @@ globalThis.markBatchTaskSubmitting = markBatchTaskSubmitting;`,
     context
   );
 
-  await context.markBatchTaskSubmitting('accepted', 7);
+  await context.markBatchTaskSubmitting('accepted', 7, 1);
   await assert.rejects(
-    context.markBatchTaskSubmitting('rejected', 8),
+    context.markBatchTaskSubmitting('rejected', 8, 2),
     /checkpoint_write_failed/
   );
   assert.deepEqual(sentMessages, [
     {
       type: 'BATCH_TASK_SUBMITTING',
       batchId: 'accepted',
-      urlIndex: 7
+      urlIndex: 7,
+      attempt: 1
     },
     {
       type: 'BATCH_TASK_SUBMITTING',
       batchId: 'rejected',
-      urlIndex: 8
+      urlIndex: 8,
+      attempt: 2
     }
   ]);
   assert.deepEqual(clearedContexts, [{
     batchId: 'rejected',
-    urlIndex: 8
+    urlIndex: 8,
+    attempt: 2
   }]);
 });
 
@@ -208,7 +490,7 @@ test('forwards one captured history payload through direct, restored, and panel 
   assert.ok(panelClickIndex < panelReportIndex, 'panel success must reuse the pre-click payload');
   assert.match(
     panel,
-    /else \{\s*if \(_batchCtx\) \{\s*clearBatchSubmitContext\(\);\s*\}/,
+    /else \{\s*if \(_batchCtx\) \{\s*clearBatchSubmitContext\(\{[\s\S]*attempt:\s*_batchCtx\.attempt/,
     'a definite panel no-click result must clear its pre-click success context'
   );
 });
@@ -237,6 +519,7 @@ test('pre-click context persistence rejects quota errors and ambiguous post-clic
     context.persistBatchSubmitContext(
       'batch-a',
       7,
+      1,
       'https://target.test/post',
       'success',
       'Generated fallback',
@@ -247,7 +530,7 @@ test('pre-click context persistence rejects quota errors and ambiguous post-clic
   );
 
   const taskFlow = sourceBetween(
-    'async function handleBatchTask(batchId, urlIndex, url, originalIndex)',
+    'async function handleBatchTask(batchId, urlIndex, attempt, url)',
     '\n  /**\n   * 等待页面关键元素加载'
   );
   const postClickFlow = taskFlow.slice(taskFlow.indexOf('const clickResult'));
@@ -257,7 +540,7 @@ test('pre-click context persistence rejects quota errors and ambiguous post-clic
   );
   assert.match(
     definiteFailure,
-    /if \(!clickResult\.success\) \{\s*await clearBatchSubmitContext\(\);/,
+    /if \(!clickResult\.success\) \{\s*await clearBatchSubmitContext\(\{\s*batchId,\s*urlIndex,\s*attempt\s*\}\);/,
     'a definite no-click result must clear the pre-click success context'
   );
   const ambiguousTimeout = sourceBetween(
@@ -356,8 +639,10 @@ function exactConfirmationMessage(overrides = {}) {
     type: 'BATCH_HANDLE_CONFIRM',
     batchId: 'batch-a',
     urlIndex: 7,
+    attempt: 1,
     url: 'https://target.test/post',
     aiContent: 'Generated fallback',
+    errorCode: null,
     history: {
       submittedAt: 1721000000000,
       targetPageUrl: 'https://target.test/post',
@@ -409,9 +694,11 @@ test('rejected confirmations queue exact history and preserve context until clos
         type: 'BATCH_HISTORY_FALLBACK_DURABLE',
         batchId: message.batchId,
         urlIndex: message.urlIndex,
+        attempt: message.attempt,
         url: message.url,
         result: 'success',
         aiContent: message.aiContent,
+        errorCode: null,
         errorMessage: null,
         historyRevision: message.history.historyRevision
       }
@@ -520,9 +807,11 @@ test('content announces a durable fallback before allowing the worker to close',
       type: 'BATCH_HISTORY_FALLBACK_DURABLE',
       batchId: message.batchId,
       urlIndex: message.urlIndex,
+      attempt: message.attempt,
       url: message.url,
       result: 'success',
       aiContent: message.aiContent,
+      errorCode: null,
       errorMessage: null,
       historyRevision: message.history.historyRevision
     }
@@ -588,6 +877,7 @@ test('restored exact and marked legacy contexts clear only after a valid acknowl
   await legacyHarness.context.confirmRestoredBatchSubmit({
     batchId: 'batch-old',
     urlIndex: 3,
+    attempt: 1,
     url: 'https://legacy.test/post',
     aiContent: 'Legacy AI fallback',
     result: 'success',

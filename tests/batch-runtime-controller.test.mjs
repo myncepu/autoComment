@@ -311,6 +311,31 @@ test('rejects a missing attempt before every untracked terminal return', async (
   }
 });
 
+test('markTerminal preserves the stable error code from content reports', async () => {
+  const { controller } = createHarness();
+  await controller.handleMessage(startMessage(1));
+  await controller.handleMessage({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 11,
+    windowId: 21
+  });
+
+  const response = await controller.markTerminal({
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    result: 'fail',
+    errorCode: 'task_failed',
+    errorMessage: 'profile missing'
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.checkpoint.results[0].errorCode, 'task_failed');
+});
+
 test('serializes simultaneous task updates without losing either activity', async () => {
   const { controller, data } = createHarness();
   const started = await controller.handleMessage(startMessage());

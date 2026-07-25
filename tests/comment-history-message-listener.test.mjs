@@ -496,6 +496,7 @@ test('background migrates an old record before its startup retention check and c
     context: {
       batchId: message.batchId,
       urlIndex: message.urlIndex,
+      attempt: message.attempt,
       result: 'success',
       history: message.history
     }
@@ -541,6 +542,7 @@ test('background migrates an old record before its startup retention check and c
     context: {
       batchId: 'batch-cas',
       urlIndex: 13,
+      attempt: 2,
       result: 'success',
       history: {
         ...message.history,
@@ -577,6 +579,7 @@ test('background migrates an old record before its startup retention check and c
     context: {
       batchId: 'batch-fallback',
       urlIndex: 8,
+      attempt: 1,
       result: 'success',
       history: message.history
     }
@@ -593,6 +596,7 @@ test('background migrates an old record before its startup retention check and c
   }), [{ ok: true }]);
   assert.equal(runtimeMessages.at(-1).historySaveStatus, 'queued');
   assert.equal(runtimeMessages.at(-1).historyPendingCount, null);
+  assert.equal(runtimeMessages.at(-1).attempt, 1);
   assert.equal(storageData.batchSubmitContextsByTab['42'], undefined);
 
   for (const [offset, result] of ['', false, 0].entries()) {
@@ -613,6 +617,7 @@ test('background migrates an old record before its startup retention check and c
     context: {
       batchId: 'batch-ambiguous',
       urlIndex: 12,
+      attempt: 1,
       result: 'success',
       history: message.history
     }
@@ -621,13 +626,15 @@ test('background migrates an old record before its startup retention check and c
     type: 'BATCH_HAS_SUBMIT_CONTEXT',
     tabId: 42,
     batchId: 'batch-ambiguous',
-    urlIndex: 12
+    urlIndex: 12,
+    attempt: 1
   }), [{ ok: true, unresolved: true }]);
   assert.deepEqual(await dispatchConfirm({
     type: 'BATCH_HAS_SUBMIT_CONTEXT',
     tabId: 42,
     batchId: 'stale-batch',
-    urlIndex: 12
+    urlIndex: 12,
+    attempt: 1
   }), [{ ok: true, unresolved: false }]);
   const messagesBeforeAmbiguousFailure = runtimeMessages.length;
   assert.deepEqual(await dispatchConfirm({
@@ -652,7 +659,8 @@ test('background migrates an old record before its startup retention check and c
     type: 'BATCH_HAS_SUBMIT_CONTEXT',
     tabId: 42,
     batchId: 'batch-ambiguous',
-    urlIndex: 12
+    urlIndex: 12,
+    attempt: 1
   }), [{ ok: true, unresolved: false }]);
   assert.deepEqual(await dispatchConfirm({
     type: 'BATCH_REPORT_RESULT',
@@ -664,5 +672,6 @@ test('background migrates an old record before its startup retention check and c
     errorMessage: '确定失败'
   }), [{ ok: true }]);
   assert.equal(runtimeMessages.at(-1).type, 'BATCH_CONFIRMED');
+  assert.equal(runtimeMessages.at(-1).attempt, 1);
   assert.equal(runtimeMessages.at(-1).result, 'fail');
 });
