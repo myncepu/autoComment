@@ -193,8 +193,10 @@ Profile 密码可为空。如果目标页面存在必填密码字段，而当前
 ```
 
 只有后台 Profile secret repository 和批次 secret vault controller 可以读取此键。
-设置页面保存密码时调用独立消息接口；领域配置控制器永远不读取或回传密码。UI 可以根据
-本次保存操作显示“已设置”，但持久化领域对象和 D1 实体不包含 `hasPassword`。
+设置页面保存密码时调用独立消息接口；领域配置控制器永远不读取或回传密码。设置页面
+重新打开时可以通过受限后台接口查询当前 Profile 的 `configured: true | false`，该接口
+不返回密码值。这个状态不写入领域对象、导出或 D1，持久化领域对象也不包含
+`hasPassword`。
 
 ### 旧设置迁移
 
@@ -205,10 +207,12 @@ Profile 密码可为空。如果目标页面存在必填密码字段，而当前
 2. 使用固定迁移 ID 创建默认 Profile、默认 Promotion Site 和默认组合，使同一旧配置
    在不同设备上启用 D1 后不会产生随机重复实体。
 3. 优先读取 Cloudflare 分支已迁移到 local 的 `auto_fill_user_password`。如果密码仍只
-   存在于 sync，则先写入 Profile secret map、回读验证，再删除 sync 中的密码键。
-4. 迁移失败时保留旧密码原值和未完成版本标记，下次启动重试。
-5. 非敏感旧 sync 键暂时保留用于版本回滚，但新运行时不再读取或写入这些键。
-6. 写入 `domainConfigMigrationVersion: 2`。
+   存在于 sync，则把它纳入同一次迁移。
+4. 先写入 Profile secret map 并回读验证；验证成功后才删除 local 和 sync 中的旧全局
+   密码键。删除任一旧副本失败时不写完成版本标记，下次启动继续收敛。
+5. 迁移失败时保留仍可恢复的旧密码原值和未完成版本标记，下次启动重试。
+6. 非敏感旧 sync 键暂时保留用于版本回滚，但新运行时不再读取或写入这些键。
+7. 写入 `domainConfigMigrationVersion: 2`。
 
 如果新领域配置已存在，迁移不得覆盖用户实体。旧值只可补建尚未完成的固定迁移实体。
 
@@ -325,7 +329,7 @@ Promotion Site 引用按以下顺序解析：
     profileId,
     promotionSiteId,
     assignmentPairId,
-    assignmentSource: 'explicit' | 'weighted',
+    assignmentSource: 'explicit' | 'weighted' | 'default_blocked',
     state: 'eligible' | 'blocked',
     blockReason: null | '...'
   }],
@@ -342,17 +346,27 @@ Promotion Site 引用按以下顺序解析：
 
 ### URL 与安全检查顺序
 
-1. 规范化 URL：只接受 `http:`/`https:`，小写主机、移除 fragment、规范化默认端口；
+1. 先解析并校验 CSV 显式引用；引用错误属于计划级错误，即使该 URL 随后会被安全规则
+   拦截也不能静默忽略。
+2. 规范化 URL：只接受 `http:`/`https:`，小写主机、移除 fragment、规范化默认端口；
    保留 path 和 query 的语义顺序。
-2. 验证来源域名和静态黑名单。
-3. 使用非法网站过滤器做 URL 级预检查。过滤器不可用属于配置错误，批次不能启动。
-4. 同批次规范化 URL 去重，只保留第一条可发送行。
-5. 检查最近 24 小时本地成功历史。历史读取失败时不允许跳过安全检查并启动。
-6. 解析 CSV 显式组合或进入自动分配。
-7. 应用批次、目标域名、Profile 和 Promotion Site 配额。
+3. 验证来源域名和静态黑名单。
+4. 使用非法网站过滤器做 URL 级预检查。过滤器不可用属于配置错误，批次不能启动。
+5. 同批次规范化 URL 去重，只保留第一条可发送行。
+6. 检查最近 24 小时本地成功历史。历史读取失败时不允许跳过安全检查并启动。
+7. 对仍可发送的行按 CSV 顺序应用批次总量和目标域名配额。
+8. 为剩余行解析显式组合或执行加权轮询，同时应用 Profile 和 Promotion Site 配额。
 
-非法、重复和历史阻止的行不消耗分配权重或配额。它们仍进入计划和批次结果，以便预览、
-统计和结果 CSV 给出稳定原因。
+每个进入计划和批次结果的有效目标行都必须有一个非敏感 Assignment 快照：
+
+- 已显式分配但被安全或总量规则阻止的行保留其显式组合。
+- 未显式分配且在进入加权轮询前已经被阻止的行绑定默认组合，并使用
+  `assignmentSource: 'default_blocked'`。
+- 自动行因所有组合的 Profile/Site 配额耗尽时，绑定忽略容量后本应选择的确定性组合，
+  记录稳定 quota reason，但不推进平滑权重。
+
+非法、重复、历史阻止、批次总量和目标域名阻止的行不消耗平滑权重或 Profile/Site
+配额。它们仍进入计划和批次结果，以便预览、统计和结果 CSV 给出稳定归属与原因。
 
 ### 确定性加权轮询
 
@@ -635,6 +649,13 @@ Worker 先部署兼容扩展：
 - 接受 `profile`、`promotion_site`、`assignment_pair` 和
   `assignment_policy` mutation。
 - pull/bootstrap 对旧客户端仍返回它们可忽略的版本化变化。
+
+pull 和 bootstrap 请求显式携带客户端协议版本。未携带版本的旧客户端按 v1 处理：
+
+- Worker 不向 v1 响应加入 v2 配置 entity 或 v2-only comment 字段。
+- v1 增量游标可以越过被过滤的 v2 change，避免旧客户端反复拉取同一页。
+- 客户端从 v1 升级到 v2 后，必须先执行一次 v2 domain-config bootstrap，再使用新的
+  v2 增量游标，不能沿用已越过配置变化的 v1 游标。
 
 新扩展连接不具备 capability 的旧 Worker 时，不发送 v2 配置实体或 v2-only comment
 字段；本地 outbox 保留待同步状态并显示“云端协议待升级”，不能把 v2 payload 降级成
