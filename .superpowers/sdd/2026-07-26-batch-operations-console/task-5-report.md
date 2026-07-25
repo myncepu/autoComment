@@ -202,3 +202,47 @@ Password-boundary self-check:
   `BATCH_HANDLE`, or history payloads.
 - The review fix propagates only attempt identity and stable error codes through
   those paths.
+
+## Review-fix follow-up: round 2
+
+The second review found two remaining persistence boundaries:
+
+- `createBatchResultStore().save()` now rejects an incomplete
+  `{ batchId, urlIndex, attempt }` before entering the serialized storage
+  operation. `batchId` must be a non-empty string, `urlIndex` a non-negative
+  integer, and `attempt` a positive integer. The three background result
+  entrypoints therefore return `invalid_batch_result_identity` without
+  changing either results array. A restored legacy content context with no
+  attempt is no longer reported or cleared.
+- Before append or capacity trimming, both the canonical store and the content
+  local fallback detect a higher attempt for the same `{ batchId, urlIndex }`.
+  A delayed lower attempt then performs no storage write, so a full
+  100-result/500-key store cannot evict the current attempt. Same-attempt
+  updates and normal trimming for other tasks or batches are unchanged.
+
+Round 2 RED evidence:
+
+```text
+store: invalid identity and full-capacity stale attempt failed
+content: full-capacity stale attempt and incomplete legacy recovery failed
+background: all three incomplete-identity entrypoints failed the no-mutation contract
+```
+
+Round 2 GREEN verification:
+
+```text
+node --test tests/batch-result-store.test.mjs \
+  tests/comment-history-submit-flow.test.js \
+  tests/comment-history-message-listener.test.mjs
+
+35 tests, 35 passed, 0 failed
+
+npm test
+285 tests, 285 passed, 0 failed
+```
+
+All five changed JavaScript/module/test files passed `node --check`;
+`git diff --check` exited `0`.
+
+The round 2 diff adds no password field or password propagation to result
+records, checkpoints, `BATCH_HANDLE`, submit contexts, or history payloads.

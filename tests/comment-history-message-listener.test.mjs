@@ -288,6 +288,7 @@ test('background migrates an old record before its startup retention check and c
   const previousKeyRange = globalThis.IDBKeyRange;
   const previousEmitWarning = process.emitWarning;
   const previousConsoleLog = console.log;
+  const previousConsoleError = console.error;
   const previousDateNow = Date.now;
   const fixedNow = Date.UTC(2026, 6, 24, 12, 0, 0);
   const runtimeListeners = [];
@@ -393,6 +394,7 @@ test('background migrates an old record before its startup retention check and c
   Date.now = () => fixedNow;
   process.emitWarning = () => {};
   console.log = () => {};
+  console.error = () => {};
   t.after(() => {
     globalThis.chrome = previousChrome;
     globalThis.indexedDB = previousIndexedDb;
@@ -400,6 +402,7 @@ test('background migrates an old record before its startup retention check and c
     Date.now = previousDateNow;
     process.emitWarning = previousEmitWarning;
     console.log = previousConsoleLog;
+    console.error = previousConsoleError;
   });
 
   await import(`../background.js?history-integration=${Date.now()}`);
@@ -442,6 +445,33 @@ test('background migrates an old record before its startup retention check and c
     }
     return responses;
   }
+
+  const resultStorageBeforeInvalidMessages = structuredClone({
+    batchResults: storageData.batchResults,
+    batchReportedUrls: storageData.batchReportedUrls
+  });
+  for (const type of [
+    'BATCH_HANDLE_CONFIRM',
+    'BATCH_PERSIST_PENDING_RESULT',
+    'BATCH_REPORT_RESULT'
+  ]) {
+    const responses = await dispatchConfirm({
+      type,
+      batchId: 'batch-incomplete',
+      urlIndex: 3,
+      result: 'fail',
+      errorCode: 'task_failed'
+    });
+    assert.equal(responses[0]?.ok, false);
+    assert.match(
+      responses[0]?.error || '',
+      /invalid_batch_result_identity/
+    );
+  }
+  assert.deepEqual({
+    batchResults: storageData.batchResults,
+    batchReportedUrls: storageData.batchReportedUrls
+  }, resultStorageBeforeInvalidMessages);
 
   const sourceItems = Array.from({ length: 10 }, (_, originalIndex) => {
     const url = originalIndex === 9

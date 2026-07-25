@@ -848,6 +848,17 @@
     ].join('-');
   }
 
+  function hasCompleteBatchResultIdentity(batchId, urlIndex, attempt) {
+    return (
+      typeof batchId === 'string'
+      && batchId.length > 0
+      && Number.isInteger(urlIndex)
+      && urlIndex >= 0
+      && Number.isInteger(attempt)
+      && attempt >= 1
+    );
+  }
+
   function hasHistoryRevision(history) {
     const revision = history?.historyRevision;
     return Boolean(
@@ -1049,7 +1060,11 @@
   }
 
   async function confirmRestoredBatchSubmit(ctx) {
-    if (!ctx || !ctx.batchId || ctx.urlIndex === undefined) return;
+    if (!hasCompleteBatchResultIdentity(
+      ctx?.batchId,
+      ctx?.urlIndex,
+      ctx?.attempt
+    )) return;
     console.log('[AutoComment] 恢复提交后上下文，仅补发确认，不重新生成AI:', ctx);
     const message = {
       type: 'BATCH_HANDLE_CONFIRM',
@@ -4828,10 +4843,22 @@
     // 兜底：extension 上下文异常时仍尽量写入本地，供 batch 页轮询
     if (typeof chrome !== 'undefined' && chrome.storage) {
       try {
+        if (!hasCompleteBatchResultIdentity(
+          batchId,
+          urlIndex,
+          attempt
+        )) return;
         const data = await new Promise((resolve) => {
           chrome.storage.local.get(['batchResults', 'batchReportedUrls'], (d) => resolve(d));
         });
         const results = Array.isArray(data.batchResults) ? data.batchResults : [];
+        const hasNewerAttempt = results.some((item) =>
+          item.batchId === batchId &&
+          item.urlIndex === urlIndex &&
+          Number.isInteger(item.attempt) &&
+          item.attempt > attempt
+        );
+        if (hasNewerAttempt) return;
         const entry = {
           batchId,
           urlIndex,

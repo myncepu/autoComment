@@ -20,10 +20,11 @@ function plain(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-function createBatchResultFallbackHarness() {
+function createBatchResultFallbackHarness(initial = {}) {
   const storageData = {
     batchResults: [],
-    batchReportedUrls: []
+    batchReportedUrls: [],
+    ...plain(initial)
   };
   const runtime = {
     lastError: null,
@@ -55,8 +56,13 @@ function createBatchResultFallbackHarness() {
     'async function reportBatchResult(',
     '\n})();'
   );
+  const identitySource = sourceBetween(
+    'function hasCompleteBatchResultIdentity(',
+    '\n\n  function hasHistoryRevision'
+  );
   vm.runInContext(
-    `${reporterSource}
+    `${identitySource}
+${reporterSource}
 globalThis.reportBatchResult = reportBatchResult;`,
     context
   );
@@ -69,22 +75,22 @@ test('local result fallback keeps attempts distinct and preserves error codes', 
   await harness.reportBatchResult(
     'batch-fallback',
     5,
-    2,
-    'success',
-    'new content',
-    null,
-    'https://target.test/post',
-    null
-  );
-  await harness.reportBatchResult(
-    'batch-fallback',
-    5,
     1,
     'fail',
     'old content',
     'late failure',
     'https://target.test/post',
     'submission_uncertain'
+  );
+  await harness.reportBatchResult(
+    'batch-fallback',
+    5,
+    2,
+    'success',
+    'new content',
+    null,
+    'https://target.test/post',
+    null
   );
 
   assert.deepEqual(
@@ -101,23 +107,65 @@ test('local result fallback keeps attempts distinct and preserves error codes', 
       {
         batchId: 'batch-fallback',
         urlIndex: 5,
-        attempt: 2,
-        result: 'success',
-        errorCode: null
+        attempt: 1,
+        result: 'fail',
+        errorCode: 'submission_uncertain'
       },
       {
         batchId: 'batch-fallback',
         urlIndex: 5,
-        attempt: 1,
-        result: 'fail',
-        errorCode: 'submission_uncertain'
+        attempt: 2,
+        result: 'success',
+        errorCode: null
       }
     ]
   );
   assert.deepEqual(harness.storageData.batchReportedUrls, [
-    'batch-fallback:5:2',
-    'batch-fallback:5:1'
+    'batch-fallback:5:1',
+    'batch-fallback:5:2'
   ]);
+});
+
+test('full local fallback ignores an older attempt without evicting current data', async () => {
+  const targetResult = {
+    batchId: 'fallback-capacity',
+    urlIndex: 5,
+    attempt: 2,
+    result: 'success',
+    errorCode: null
+  };
+  const initial = {
+    batchResults: [
+      targetResult,
+      ...Array.from({ length: 99 }, (_, index) => ({
+        batchId: 'other-fallback',
+        urlIndex: index,
+        attempt: 1,
+        result: 'success'
+      }))
+    ],
+    batchReportedUrls: [
+      'fallback-capacity:5:2',
+      ...Array.from(
+        { length: 499 },
+        (_, index) => `fallback-reported-${index}:0:1`
+      )
+    ]
+  };
+  const harness = createBatchResultFallbackHarness(initial);
+
+  await harness.reportBatchResult(
+    'fallback-capacity',
+    5,
+    1,
+    'fail',
+    'old content',
+    'late failure',
+    'https://target.test/post',
+    'submission_uncertain'
+  );
+
+  assert.deepEqual(harness.storageData, initial);
 });
 
 function loadFieldValidation({ name = '', email = '', reportStatus } = {}) {
@@ -989,6 +1037,25 @@ test('restored exact and marked legacy contexts clear only after a valid acknowl
   );
   assert.deepEqual(legacyHarness.storageWrites, []);
   assert.deepEqual(legacyHarness.storageRemovals, ['submit-context']);
+});
+
+test('restored legacy context without an attempt is not reported or cleared', async () => {
+  const harness = createConfirmationHarness({
+    response: { ok: true, historySaveStatus: 'not_applicable' }
+  });
+
+  await harness.context.confirmRestoredBatchSubmit({
+    batchId: 'batch-old-incomplete',
+    urlIndex: 3,
+    url: 'https://legacy.test/post',
+    aiContent: 'Legacy AI fallback',
+    result: 'success',
+    timestamp: 1
+  });
+
+  assert.deepEqual(harness.sentMessages, []);
+  assert.deepEqual(harness.storageWrites, []);
+  assert.deepEqual(harness.storageRemovals, []);
 });
 
 test('non-success confirmations do not attach history', () => {
