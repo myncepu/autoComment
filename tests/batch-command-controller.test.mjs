@@ -258,6 +258,32 @@ function runtimeDiagnostic(harness) {
     : null;
 }
 
+function assertPendingRecoveryProjection(harness) {
+  const snapshot = harness.published.findLast(
+    (candidate) => candidate.persisted === false &&
+      candidate.recoveryPersistenceRequired === true
+  );
+  const diagnostic = harness.published.findLast(
+    (candidate) => candidate.type === 'runtime-error'
+  );
+  assert.ok(snapshot);
+  assert.ok(diagnostic);
+  assert.deepEqual(diagnostic.checkpoint, snapshot.checkpoint);
+  assert.equal(diagnostic.persisted, false);
+  assert.equal(diagnostic.recoveryPersistenceRequired, true);
+  assert.deepEqual({
+    status: snapshot.checkpoint.status,
+    persistencePending: snapshot.checkpoint.persistencePending,
+    lastPersistedStatus: snapshot.checkpoint.lastPersistedStatus
+  }, {
+    status: 'paused_recovery',
+    persistencePending: true,
+    lastPersistedStatus: 'running'
+  });
+  assert.equal(harness.checkpoint.status, 'running');
+  return snapshot.checkpoint;
+}
+
 function startDraft() {
   const url = 'https://target.test/page';
   return {
@@ -635,9 +661,128 @@ test('preserves the worker error when cleanup and recovery pause also fail', asy
       'worker_cleanup_fixture',
       'checkpoint_pause_fixture'
     ],
-    checkpointStatus: 'running',
+    checkpointStatus: 'paused_recovery',
     requiresUserResume: true
   });
+  assertPendingRecoveryProjection(harness);
+});
+
+test('blocks resume after a start recovery pause cannot be persisted', async () => {
+  const original = fixtureError('worker_start_fixture');
+  const harness = createCommandHarness({
+    checkpoint: createCheckpoint({
+      status: 'paused_recovery',
+      taskState: 'queued'
+    }),
+    workerFailures: { start: original },
+    runtimeFailures: {
+      BATCH_SESSION_PAUSE: {
+        error: 'checkpoint_pause_fixture'
+      }
+    }
+  });
+
+  await assert.rejects(
+    harness.controller.start(startDraft()),
+    (error) => error === original
+  );
+  assertPendingRecoveryProjection(harness);
+  const callsAfterRecovery = structuredClone(harness.calls);
+
+  await assert.rejects(
+    harness.controller.resume(),
+    (error) => error?.code === 'recovery_persistence_required'
+  );
+
+  assert.deepEqual(harness.calls, callsAfterRecovery);
+});
+
+test('blocks resume after a resume recovery pause cannot be persisted', async () => {
+  const original = fixtureError('worker_resume_fixture');
+  const harness = createCommandHarness({
+    checkpoint: createCheckpoint({
+      status: 'paused_recovery',
+      taskState: 'queued'
+    }),
+    workerFailures: { resume: original },
+    runtimeFailures: {
+      BATCH_SESSION_PAUSE: {
+        error: 'checkpoint_pause_fixture'
+      }
+    }
+  });
+
+  await assert.rejects(
+    harness.controller.resume(),
+    (error) => error === original
+  );
+  assertPendingRecoveryProjection(harness);
+  const callsAfterRecovery = structuredClone(harness.calls);
+
+  await assert.rejects(
+    harness.controller.resume(),
+    (error) => error?.code === 'recovery_persistence_required'
+  );
+
+  assert.deepEqual(harness.calls, callsAfterRecovery);
+});
+
+test('blocks resume after a retry recovery pause cannot be persisted', async () => {
+  const original = fixtureError('worker_refill_fixture');
+  const harness = createCommandHarness({
+    workerFailures: { refill: original },
+    runtimeFailures: {
+      BATCH_SESSION_PAUSE: {
+        error: 'checkpoint_pause_fixture'
+      }
+    }
+  });
+
+  await assert.rejects(
+    harness.controller.retry({
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      retryPolicy: 'safe'
+    }),
+    (error) => error === original
+  );
+  assertPendingRecoveryProjection(harness);
+  const callsAfterRecovery = structuredClone(harness.calls);
+
+  await assert.rejects(
+    harness.controller.resume(),
+    (error) => error?.code === 'recovery_persistence_required'
+  );
+
+  assert.deepEqual(harness.calls, callsAfterRecovery);
+});
+
+test('blocks resume after stop and recovery pause both fail persistence', async () => {
+  const harness = createCommandHarness({
+    runtimeFailures: {
+      BATCH_SESSION_STOP: {
+        error: 'checkpoint_stop_fixture'
+      },
+      BATCH_SESSION_PAUSE: {
+        error: 'checkpoint_pause_fixture'
+      }
+    }
+  });
+
+  await assert.rejects(
+    harness.controller.stop(true),
+    (error) => error?.code === 'checkpoint_stop_fixture'
+  );
+  assertPendingRecoveryProjection(harness);
+  const callsAfterRecovery = structuredClone(harness.calls);
+
+  await assert.rejects(
+    harness.controller.resume(),
+    (error) => error?.code === 'recovery_persistence_required'
+  );
+
+  assert.deepEqual(harness.calls, callsAfterRecovery);
 });
 
 test('requires explicit confirmation for an uncertain retry', async () => {
