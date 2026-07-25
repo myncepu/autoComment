@@ -4,9 +4,9 @@
 
 **Goal:** Replace AutoComment’s single-column batch page with a profile-ready desktop operations console that exposes creation preflight, concurrent worker slots, task-level phases and recovery-safe retry/manual actions.
 
-**Architecture:** Keep the existing scheduler, Chrome window manager, background checkpoint single-writer and submission recovery behavior. Add a versioned attempt-aware checkpoint, pure preflight/error/view-model modules, a command controller around Chrome side effects, local DOM views, and a shared extension shell. `batch.js` becomes the composition root instead of continuing to own parsing, rendering and lifecycle rules.
+**Architecture:** Keep the existing scheduler, background checkpoint single-writer and submission recovery behavior, while replacing automatic worker windows with background tabs in the console's Chrome window. Add a versioned attempt-aware checkpoint, pure preflight/error/view-model modules, a command controller around Chrome side effects, local DOM views, and a shared extension shell. `batch.js` becomes the composition root instead of continuing to own parsing, rendering and lifecycle rules.
 
-**Tech Stack:** Manifest V3 Chrome extension, local ES modules and classic content scripts, Chrome storage/windows/power APIs, HTML/CSS, Node.js `>=18`, `node:test`, `jsdom`, `fake-indexeddb`, vendored PapaParse, local HTTP fixtures.
+**Tech Stack:** Manifest V3 Chrome extension, local ES modules and classic content scripts, Chrome storage/tabs/windows/power APIs, HTML/CSS, Node.js `>=18`, `node:test`, `jsdom`, `fake-indexeddb`, vendored PapaParse, local HTTP fixtures.
 
 ## Global Constraints
 
@@ -17,6 +17,7 @@
 - Background remains the only writer of `batchRuntimeCheckpoint`.
 - Never automatically retry a task whose result may already have been submitted.
 - Manual-processing windows must not receive `BATCH_HANDLE`, must not occupy worker slots, and must not auto-generate, fill or submit.
+- Automatic workers use `chrome.tabs.create({ windowId: consoleWindowId, url, active: false })`; they never create or remove Chrome windows. `tabId` is the managed resource identity.
 - Use only extension-local CSS, SVG and JavaScript plus system fonts; do not add remote images, fonts, modules or inline event handlers.
 - Preserve Manifest V3/CSP compatibility.
 - Real Chrome acceptance must use five local fixture URLs and a local OpenAI-compatible stub; it must not publish comments to a third-party site.
@@ -1261,6 +1262,8 @@ git commit -m "feat: derive batch console snapshots"
 
 ### Task 7: Extract Worker Runtime Side Effects
 
+> **Decision change:** The original Task 7 draft below used one Chrome window per worker. That resource model is superseded. The implementation and tests use multiple inactive worker tabs in the console's single window; the historical window-oriented sample remains only as a record of the changed decision and is not normative.
+
 **Files:**
 - Create: `lib/batch-worker-runtime.mjs`
 - Create: `tests/batch-worker-runtime.test.mjs`
@@ -1271,8 +1274,8 @@ git commit -m "feat: derive batch console snapshots"
 - Produces: `createBatchWorkerRuntime(dependencies)`
 - Methods: `start(checkpoint)`, `pause(reason)`, `resume(checkpoint)`, `refill(checkpoint)`, `stop()`, `focus(urlIndex)`, `handleConfirmation(message)`, `dispose()`
 - Emits: `{ type: "changed" | "confirmed" | "runtime-error", checkpoint }`
-- Consumes adapters: `runtimeRequest`, `sendHandle`, `sealSubmitContext`, `windowsApi`, `clock`, `timers`
-- Accepts optional `windowManagerFactory` and `schedulerFactory` test seams; production defaults construct `BatchWindowManager` and `BatchScheduler`
+- Consumes adapters: `runtimeRequest`, `sendHandle`, `sealSubmitContext`, `tabsApi`, `windowId`, `clock`, `timers`
+- Accepts optional `tabManagerFactory` (plus temporary `windowManagerFactory` compatibility) and `schedulerFactory` test seams; production defaults construct the tab-backed `BatchTabManager` and `BatchScheduler`
 
 - [ ] **Step 1: Write failing worker-runtime tests**
 
@@ -1440,7 +1443,7 @@ Keep these invariants from existing tests:
 
 - lifecycle ownership prevents delayed work from mutating a replacement batch;
 - scheduler processed indices come from tasks whose current core state is `terminal`, never from every historical result;
-- worker creation is `focused: false`, `type: 'normal'`;
+- worker creation is `tabs.create({ windowId, url, active: false })`, with no automatic `windows.create/remove`;
 - `BATCH_TASK_ACTIVE` succeeds before `BATCH_HANDLE`;
 - every handle carries `batchId`, `urlIndex`, `attempt`;
 - terminal persistence succeeds before close;
