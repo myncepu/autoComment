@@ -15,6 +15,12 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+function fixtureError(code) {
+  const error = new Error(`unsafe raw details for ${code}`);
+  error.code = code;
+  return error;
+}
+
 function createCheckpoint({
   status = 'running',
   attempt = 1,
@@ -135,33 +141,54 @@ function createCommandHarness(options = {}) {
   const workerRuntime = {
     async start(nextCheckpoint) {
       calls.push(['worker.start', structuredClone(nextCheckpoint)]);
+      if (options.workerFailures?.start) {
+        throw options.workerFailures.start;
+      }
       return nextCheckpoint;
     },
     async pause(reason) {
       calls.push(['worker.pause', reason]);
       if (pauseGate) await pauseGate.promise;
+      if (options.workerFailures?.pause) {
+        throw options.workerFailures.pause;
+      }
       return checkpoint;
     },
     async resume(nextCheckpoint) {
       calls.push(['worker.resume', structuredClone(nextCheckpoint)]);
+      if (options.workerFailures?.resume) {
+        if (options.workerFailures.resume === 'reject') return false;
+        throw options.workerFailures.resume;
+      }
       return true;
     },
     async stop() {
       calls.push(['worker.stop']);
+      if (options.workerFailures?.stop) {
+        throw options.workerFailures.stop;
+      }
       return checkpoint;
     },
     async refill(nextCheckpoint) {
       calls.push(['worker.refill', structuredClone(nextCheckpoint)]);
+      if (options.workerFailures?.refill) {
+        if (options.workerFailures.refill === 'reject') return false;
+        throw options.workerFailures.refill;
+      }
       return true;
     }
   };
 
   const runtimeRequest = async (type, payload) => {
     calls.push(['runtime', type, structuredClone(payload)]);
-    if (options.runtimeFailure?.type === type) {
+    const runtimeFailure = options.runtimeFailures?.[type] ||
+      (options.runtimeFailure?.type === type
+        ? options.runtimeFailure
+        : null);
+    if (runtimeFailure) {
       return {
         ok: false,
-        error: options.runtimeFailure.error,
+        error: runtimeFailure.error,
         checkpoint
       };
     }
@@ -182,6 +209,10 @@ function createCommandHarness(options = {}) {
       async open(url) {
         calls.push(['manual.open', url]);
         return { id: 91, type: 'normal' };
+      },
+      async close(handle) {
+        calls.push(['manual.close', structuredClone(handle)]);
+        if (options.manualCloseFailure) throw options.manualCloseFailure;
       }
     },
     onlineTarget,
@@ -209,6 +240,22 @@ function createCommandHarness(options = {}) {
     published,
     workerRuntime
   };
+}
+
+function runtimeDiagnostic(harness) {
+  const event = harness.published.findLast(
+    (candidate) => candidate.type === 'runtime-error'
+  );
+  return event
+    ? {
+        type: event.type,
+        command: event.command,
+        errorCode: event.errorCode,
+        recoveryErrorCodes: event.recoveryErrorCodes,
+        checkpointStatus: event.checkpoint?.status,
+        requiresUserResume: event.requiresUserResume
+      }
+    : null;
 }
 
 function startDraft() {
@@ -320,6 +367,98 @@ test('resumes workers only from the checkpoint returned by session resume', asyn
   assert.equal(harness.calls[1][1].status, 'running');
 });
 
+test('safely pauses a persisted start when worker startup fails', async () => {
+  const original = fixtureError('worker_start_fixture');
+  const harness = createCommandHarness({
+    checkpoint: createCheckpoint({
+      status: 'paused_recovery',
+      taskState: 'queued'
+    }),
+    workerFailures: { start: original }
+  });
+
+  await assert.rejects(
+    harness.controller.start(startDraft()),
+    (error) => error === original
+  );
+
+  assert.deepEqual(harness.calls.map(([name, type]) => (
+    name === 'runtime' ? `${name}:${type}` : name
+  )), [
+    'draft.set',
+    'runtime:BATCH_SESSION_START',
+    'worker.start',
+    'worker.pause',
+    'runtime:BATCH_SESSION_PAUSE'
+  ]);
+  assert.equal(harness.calls[3][1], 'runtime_error');
+  assert.deepEqual(runtimeDiagnostic(harness), {
+    type: 'runtime-error',
+    command: 'start',
+    errorCode: 'worker_start_fixture',
+    recoveryErrorCodes: [],
+    checkpointStatus: 'paused_recovery',
+    requiresUserResume: true
+  });
+});
+
+test('safely pauses a persisted resume when worker resume fails', async () => {
+  const original = fixtureError('worker_resume_fixture');
+  const harness = createCommandHarness({
+    checkpoint: createCheckpoint({
+      status: 'paused_recovery',
+      taskState: 'queued'
+    }),
+    workerFailures: { resume: original }
+  });
+
+  await assert.rejects(
+    harness.controller.resume(),
+    (error) => error === original
+  );
+
+  assert.deepEqual(harness.calls.map(([name, type]) => (
+    name === 'runtime' ? `${name}:${type}` : name
+  )), [
+    'runtime:BATCH_SESSION_RESUME',
+    'worker.resume',
+    'worker.pause',
+    'runtime:BATCH_SESSION_PAUSE'
+  ]);
+  assert.deepEqual(runtimeDiagnostic(harness), {
+    type: 'runtime-error',
+    command: 'resume',
+    errorCode: 'worker_resume_fixture',
+    recoveryErrorCodes: [],
+    checkpointStatus: 'paused_recovery',
+    requiresUserResume: true
+  });
+});
+
+test('safely pauses when worker resume rejects the persisted checkpoint', async () => {
+  const harness = createCommandHarness({
+    checkpoint: createCheckpoint({
+      status: 'paused_recovery',
+      taskState: 'queued'
+    }),
+    workerFailures: { resume: 'reject' }
+  });
+
+  await assert.rejects(
+    harness.controller.resume(),
+    (error) => error?.code === 'worker_resume_rejected'
+  );
+
+  assert.deepEqual(harness.calls.map(([name, type]) => (
+    name === 'runtime' ? `${name}:${type}` : name
+  )), [
+    'runtime:BATCH_SESSION_RESUME',
+    'worker.resume',
+    'worker.pause',
+    'runtime:BATCH_SESSION_PAUSE'
+  ]);
+});
+
 test('requires explicit danger confirmation before permanently stopping', async () => {
   const harness = createCommandHarness();
 
@@ -336,6 +475,38 @@ test('requires explicit danger confirmation before permanently stopping', async 
     ['runtime', 'BATCH_SESSION_STOP', { batchId: 'batch-1' }]
   ]);
   assert.equal(harness.published.at(-1).checkpoint.status, 'terminated');
+});
+
+test('pauses recoverably when terminal persistence fails after worker stop', async () => {
+  const harness = createCommandHarness({
+    runtimeFailures: {
+      BATCH_SESSION_STOP: {
+        error: 'checkpoint_stop_fixture'
+      }
+    }
+  });
+
+  await assert.rejects(
+    harness.controller.stop(true),
+    (error) => error?.code === 'checkpoint_stop_fixture'
+  );
+
+  assert.deepEqual(harness.calls, [
+    ['worker.stop'],
+    ['runtime', 'BATCH_SESSION_STOP', { batchId: 'batch-1' }],
+    ['runtime', 'BATCH_SESSION_PAUSE', {
+      batchId: 'batch-1',
+      reason: 'runtime_error'
+    }]
+  ]);
+  assert.deepEqual(runtimeDiagnostic(harness), {
+    type: 'runtime-error',
+    command: 'stop',
+    errorCode: 'checkpoint_stop_fixture',
+    recoveryErrorCodes: [],
+    checkpointStatus: 'paused_recovery',
+    requiresUserResume: true
+  });
 });
 
 test('persists a safe retry before refilling a running worker runtime', async () => {
@@ -362,6 +533,111 @@ test('persists a safe retry before refilling a running worker runtime', async ()
     confirmedRisk: false
   });
   assert.equal(harness.calls[1][1].tasks['0'].attempt, 2);
+});
+
+test('safely pauses a persisted retry when worker refill fails', async () => {
+  const original = fixtureError('worker_refill_fixture');
+  const harness = createCommandHarness({
+    workerFailures: { refill: original }
+  });
+
+  await assert.rejects(
+    harness.controller.retry({
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      retryPolicy: 'safe'
+    }),
+    (error) => error === original
+  );
+
+  assert.deepEqual(harness.calls.map(([name, type]) => (
+    name === 'runtime' ? `${name}:${type}` : name
+  )), [
+    'runtime:BATCH_TASK_RETRY',
+    'worker.refill',
+    'worker.pause',
+    'runtime:BATCH_SESSION_PAUSE'
+  ]);
+  assert.deepEqual(runtimeDiagnostic(harness), {
+    type: 'runtime-error',
+    command: 'retry',
+    errorCode: 'worker_refill_fixture',
+    recoveryErrorCodes: [],
+    checkpointStatus: 'paused_recovery',
+    requiresUserResume: true
+  });
+});
+
+test('safely pauses when worker refill rejects the persisted retry', async () => {
+  const harness = createCommandHarness({
+    workerFailures: { refill: 'reject' }
+  });
+
+  await assert.rejects(
+    harness.controller.retry({
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      retryPolicy: 'safe'
+    }),
+    (error) => error?.code === 'worker_refill_rejected'
+  );
+
+  assert.deepEqual(harness.calls.map(([name, type]) => (
+    name === 'runtime' ? `${name}:${type}` : name
+  )), [
+    'runtime:BATCH_TASK_RETRY',
+    'worker.refill',
+    'worker.pause',
+    'runtime:BATCH_SESSION_PAUSE'
+  ]);
+});
+
+test('preserves the worker error when cleanup and recovery pause also fail', async () => {
+  const original = fixtureError('worker_start_fixture');
+  const cleanupError = fixtureError('worker_cleanup_fixture');
+  const harness = createCommandHarness({
+    checkpoint: createCheckpoint({
+      status: 'paused_recovery',
+      taskState: 'queued'
+    }),
+    workerFailures: {
+      start: original,
+      pause: cleanupError
+    },
+    runtimeFailures: {
+      BATCH_SESSION_PAUSE: {
+        error: 'checkpoint_pause_fixture'
+      }
+    }
+  });
+
+  await assert.rejects(
+    harness.controller.start(startDraft()),
+    (error) => error === original
+  );
+
+  assert.deepEqual(harness.calls.map(([name, type]) => (
+    name === 'runtime' ? `${name}:${type}` : name
+  )), [
+    'draft.set',
+    'runtime:BATCH_SESSION_START',
+    'worker.start',
+    'worker.pause',
+    'runtime:BATCH_SESSION_PAUSE'
+  ]);
+  assert.deepEqual(runtimeDiagnostic(harness), {
+    type: 'runtime-error',
+    command: 'start',
+    errorCode: 'worker_start_fixture',
+    recoveryErrorCodes: [
+      'worker_cleanup_fixture',
+      'checkpoint_pause_fixture'
+    ],
+    checkpointStatus: 'running',
+    requiresUserResume: true
+  });
 });
 
 test('requires explicit confirmation for an uncertain retry', async () => {
@@ -455,6 +731,150 @@ test('opens manual work outside the worker runtime and persists its state', asyn
     false
   );
   assert.equal(JSON.stringify(harness.calls).includes('BATCH_HANDLE'), false);
+});
+
+test('rejects a missing manual task before opening a window', async () => {
+  const harness = createCommandHarness({
+    checkpoint: createCheckpoint({
+      result: 'manual_required',
+      errorCode: 'submission_uncertain'
+    })
+  });
+
+  await assert.rejects(
+    harness.controller.openManual({
+      batchId: 'batch-1',
+      urlIndex: 9,
+      attempt: 1,
+      url: 'https://manual.test/missing'
+    }),
+    (error) => error?.code === 'manual_task_not_found'
+  );
+
+  assert.deepEqual(harness.calls, []);
+});
+
+test('rejects a stale manual attempt before opening a window', async () => {
+  const harness = createCommandHarness({
+    checkpoint: createCheckpoint({
+      result: 'manual_required',
+      errorCode: 'submission_uncertain'
+    })
+  });
+
+  await assert.rejects(
+    harness.controller.openManual({
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 2,
+      url: 'https://manual.test/stale'
+    }),
+    (error) => error?.code === 'stale_attempt'
+  );
+
+  assert.deepEqual(harness.calls, []);
+});
+
+test('rejects a stale manual batch before opening a window', async () => {
+  const harness = createCommandHarness({
+    checkpoint: createCheckpoint({
+      result: 'manual_required',
+      errorCode: 'submission_uncertain'
+    })
+  });
+
+  await assert.rejects(
+    harness.controller.openManual({
+      batchId: 'batch-old',
+      urlIndex: 0,
+      attempt: 1,
+      url: 'https://manual.test/stale-batch'
+    }),
+    (error) => error?.code === 'stale_batch'
+  );
+
+  assert.deepEqual(harness.calls, []);
+});
+test('rejects an ineligible terminal result before opening a manual window', async () => {
+  const harness = createCommandHarness();
+
+  await assert.rejects(
+    harness.controller.openManual({
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      url: 'https://manual.test/ineligible'
+    }),
+    (error) => error?.code === 'manual_not_allowed'
+  );
+
+  assert.deepEqual(harness.calls, []);
+});
+
+test('closes a newly opened manual window when its status update loses a race', async () => {
+  const harness = createCommandHarness({
+    checkpoint: createCheckpoint({
+      result: 'manual_required',
+      errorCode: 'submission_uncertain'
+    }),
+    runtimeFailures: {
+      BATCH_TASK_MANUAL_UPDATE: {
+        error: 'stale_attempt'
+      }
+    }
+  });
+
+  await assert.rejects(
+    harness.controller.openManual({
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      url: 'https://manual.test/race'
+    }),
+    (error) => error?.code === 'stale_attempt'
+  );
+
+  assert.deepEqual(harness.calls, [
+    ['manual.open', 'https://manual.test/race'],
+    ['runtime', 'BATCH_TASK_MANUAL_UPDATE', {
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      status: 'in_progress'
+    }],
+    ['manual.close', { id: 91, type: 'normal' }]
+  ]);
+});
+
+test('preserves a manual update error when rollback close also fails', async () => {
+  const closeError = fixtureError('manual_close_fixture');
+  const harness = createCommandHarness({
+    checkpoint: createCheckpoint({
+      result: 'manual_required',
+      errorCode: 'submission_uncertain'
+    }),
+    runtimeFailures: {
+      BATCH_TASK_MANUAL_UPDATE: {
+        error: 'stale_attempt'
+      }
+    },
+    manualCloseFailure: closeError
+  });
+
+  await assert.rejects(
+    harness.controller.openManual({
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      url: 'https://manual.test/race'
+    }),
+    (error) => error?.code === 'stale_attempt'
+  );
+
+  assert.equal(
+    harness.calls.some(([name]) => name === 'manual.close'),
+    true
+  );
 });
 
 test('persists explicit manual resolution without invoking automation', async () => {
