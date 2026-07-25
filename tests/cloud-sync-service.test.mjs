@@ -123,8 +123,10 @@ function createSyncRepository({ due = [], applyError } = {}) {
     async setSyncMeta(key, value) {
       meta.set(key, structuredClone(value));
     },
-    async initializeBootstrapSentinel({ vaultId, state }) {
-      const stateKey = `bootstrapState:${vaultId}`;
+    async initializeBootstrapSentinel({ vaultId, state, protocolVersion = 1 }) {
+      const stateKey = protocolVersion === 2
+        ? `bootstrapState:v2:${vaultId}`
+        : `bootstrapState:${vaultId}`;
       if (!meta.has(stateKey)) meta.set(stateKey, structuredClone(state));
       meta.set(`authBlocked:${vaultId}`, null);
       return structuredClone(meta.get(stateKey));
@@ -146,7 +148,10 @@ function createSyncRepository({ due = [], applyError } = {}) {
           ...structuredClone(page.pendingInboundSettings)
         });
       }
-      meta.set(`serverCursor:${page.vaultId}`, page.nextCursor);
+      const cursorKey = page.protocolVersion === 2
+        ? `serverCursor:v2:${page.vaultId}`
+        : `serverCursor:${page.vaultId}`;
+      meta.set(cursorKey, page.nextCursor);
     },
     async applyBootstrapPageAtomic(page) {
       bootstrapPages.push(structuredClone(page));
@@ -157,15 +162,32 @@ function createSyncRepository({ due = [], applyError } = {}) {
           ...structuredClone(page.pendingInboundSettings)
         });
       }
-      meta.set(`bootstrapState:${page.vaultId}`, {
+      const stateKey = page.protocolVersion === 2
+        ? `bootstrapState:v2:${page.vaultId}`
+        : `bootstrapState:${page.vaultId}`;
+      const cursorKey = page.protocolVersion === 2
+        ? `serverCursor:v2:${page.vaultId}`
+        : `serverCursor:${page.vaultId}`;
+      meta.set(stateKey, {
         cursor: page.nextCursor,
         serverCursor: page.serverCursor,
         serverNow: page.serverNow,
         phase: page.phase,
-        done: !page.hasMore
+        done: !page.hasMore,
+        ...(page.protocolVersion === 2
+          ? {
+              protocolVersion: 2,
+              domainChanges: page.hasMore
+                ? [
+                    ...(meta.get(stateKey)?.domainChanges || []),
+                    ...(page.domainChanges || [])
+                  ]
+                : []
+            }
+          : {})
       });
       if (!page.hasMore) {
-        meta.set(`serverCursor:${page.vaultId}`, page.serverCursor);
+        meta.set(cursorKey, page.serverCursor);
       }
     },
     async clearPendingInboundSettings({ vaultId, expected }) {
@@ -333,6 +355,441 @@ test('single-flights push receipts and atomically applies each pull page', async
     pendingInboundSettings: { batch_timeout_seconds: 90 },
     nextCursor: 4
   }]);
+});
+
+function makeDomainMutation(mutationId = 'domain-profile-a') {
+  return {
+    mutationId,
+    vaultId: 'AAAAAAAAAAAAAAAAAAAAAA',
+    entityType: 'profile',
+    entityId: 'profile-a',
+    operation: 'upsert',
+    payload: {
+      profile: {
+        id: 'profile-a',
+        displayName: 'Profile A',
+        name: 'Alice',
+        email: 'alice@example.test',
+        createdAt: 10,
+        updatedAt: 20
+      }
+    },
+    createdAt: 100,
+    attemptCount: 0,
+    nextAttemptAt: 100,
+    lastErrorCode: null,
+    state: 'pending'
+  };
+}
+
+function createDomainConfigFixture({ replaceError, initialValue } = {}) {
+  let value = initialValue || {
+    version: 2,
+    revision: 0,
+    profiles: [],
+    promotionSites: [],
+    assignmentPolicy: {
+      defaultPairId: null,
+      pairs: [],
+      quotas: {
+        batch: 100,
+        perProfile: 50,
+        perPromotionSite: 50,
+        perTargetDomain: 3
+      }
+    }
+  };
+  const replacements = [];
+  return {
+    replacements,
+    async load() {
+      return structuredClone(value);
+    },
+    async replace(next) {
+      if (replaceError) throw replaceError;
+      replacements.push(structuredClone(next));
+      value = { ...structuredClone(next), revision: value.revision + 1 };
+      return structuredClone(value);
+    }
+  };
+}
+
+test('keeps v2 domain outbox pending when Worker capability is absent', async () => {
+  const repository = createSyncRepository({
+    due: [makeDomainMutation()]
+  });
+  let pushed = 0;
+  let pulled = 0;
+  const service = createCloudSyncService({
+    repository,
+    domainConfigRepository: createDomainConfigFixture(),
+    storageLocal: createCredentialStorage(),
+    settings: createSettingsFixture(),
+    transportFactory: () => ({
+      async status() {
+        return { protocolVersion: 1, capabilities: [] };
+      },
+      async push() {
+        pushed += 1;
+      },
+      async pull() {
+        pulled += 1;
+      }
+    }),
+    now: () => 500
+  });
+
+  assert.deepEqual(await service.runOnce('manual'), {
+    skipped: 'domain_protocol_upgrade_required',
+    reason: 'manual'
+  });
+  assert.equal(pushed, 0);
+  assert.equal(pulled, 0);
+  assert.equal(repository.outbox.length, 1);
+});
+
+test('keeps assignment-bearing comments pending without the comment v2 capability', async () => {
+  const repository = createSyncRepository({
+    due: [{
+      ...makeSettingMutation('comment-v2'),
+      entityType: 'comment',
+      entityId: 'comment-a',
+      payload: {
+        comment: {
+          id: 'comment-a',
+          profileId: 'profile-a',
+          promotionSiteId: 'site-a'
+        },
+        anchors: []
+      }
+    }]
+  });
+  let pushed = 0;
+  const service = createCloudSyncService({
+    repository,
+    domainConfigRepository: createDomainConfigFixture(),
+    storageLocal: createCredentialStorage(),
+    settings: createSettingsFixture(),
+    transportFactory: () => ({
+      async status() {
+        return {
+          protocolVersion: 2,
+          capabilities: ['domain_config_entities_v2']
+        };
+      },
+      async push() {
+        pushed += 1;
+      }
+    }),
+    now: () => 500
+  });
+
+  assert.deepEqual(await service.runOnce('manual'), {
+    skipped: 'comment_protocol_upgrade_required',
+    reason: 'manual'
+  });
+  assert.equal(pushed, 0);
+  assert.equal(repository.outbox.length, 1);
+});
+
+test('applies a v2 domain pull before advancing the isolated v2 cursor', async () => {
+  const repository = createSyncRepository();
+  repository.meta.set(
+    'domainBootstrapVersion:AAAAAAAAAAAAAAAAAAAAAA',
+    2
+  );
+  const domainConfigRepository = createDomainConfigFixture();
+  const service = createCloudSyncService({
+    repository,
+    domainConfigRepository,
+    storageLocal: createCredentialStorage(),
+    settings: createSettingsFixture(),
+    transportFactory: () => ({
+      async status() {
+        return {
+          protocolVersion: 2,
+          capabilities: ['domain_config_entities_v2']
+        };
+      },
+      async pull({ cursor }) {
+        assert.equal(cursor, 0);
+        return {
+          changes: [{
+            serverSeq: 1,
+            entityType: 'profile',
+            entityId: 'profile-a',
+            operation: 'upsert',
+            payload: makeDomainMutation().payload
+          }],
+          nextCursor: 1,
+          highWatermark: 1,
+          hasMore: false
+        };
+      }
+    }),
+    now: () => 500
+  });
+
+  assert.deepEqual(await service.runOnce('manual'), {
+    pushed: 0,
+    pulled: 1,
+    cursor: 1
+  });
+  assert.equal(domainConfigRepository.replacements.length, 1);
+  assert.equal(
+    domainConfigRepository.replacements[0].profiles[0].id,
+    'profile-a'
+  );
+  assert.equal(
+    repository.meta.get('serverCursor:v2:AAAAAAAAAAAAAAAAAAAAAA'),
+    1
+  );
+  assert.equal(
+    repository.meta.has('serverCursor:AAAAAAAAAAAAAAAAAAAAAA'),
+    false
+  );
+});
+
+test('does not advance the v2 cursor when the domain replacement fails', async () => {
+  const repository = createSyncRepository();
+  repository.meta.set(
+    'domainBootstrapVersion:AAAAAAAAAAAAAAAAAAAAAA',
+    2
+  );
+  const replacementError = new Error('local storage unavailable');
+  const service = createCloudSyncService({
+    repository,
+    domainConfigRepository: createDomainConfigFixture({
+      replaceError: replacementError
+    }),
+    storageLocal: createCredentialStorage(),
+    settings: createSettingsFixture(),
+    transportFactory: () => ({
+      async status() {
+        return {
+          protocolVersion: 2,
+          capabilities: ['domain_config_entities_v2']
+        };
+      },
+      async pull() {
+        return {
+          changes: [{
+            serverSeq: 1,
+            entityType: 'profile',
+            entityId: 'profile-a',
+            operation: 'upsert',
+            payload: makeDomainMutation().payload
+          }],
+          nextCursor: 1,
+          highWatermark: 1,
+          hasMore: false
+        };
+      }
+    }),
+    now: () => 500
+  });
+
+  await assert.rejects(service.runOnce('manual'), replacementError);
+  assert.equal(repository.appliedPages.length, 0);
+  assert.equal(
+    repository.meta.has('serverCursor:v2:AAAAAAAAAAAAAAAAAAAAAA'),
+    false
+  );
+});
+
+test('imports v2 domain bootstrap entities before starting the v2 delta cursor', async () => {
+  const repository = createSyncRepository();
+  const domainConfigRepository = createDomainConfigFixture();
+  const storageLocal = createStorage();
+  const service = createCloudSyncService({
+    repository,
+    domainConfigRepository,
+    storageLocal,
+    settings: createSettingsFixture(),
+    transportFactory: () => ({
+      async status() {
+        return {
+          protocolVersion: 2,
+          capabilities: ['domain_config_entities_v2']
+        };
+      },
+      async bootstrap() {
+        return {
+          comments: [],
+          settings: [],
+          tombstones: [],
+          domainEntities: [{
+            entityType: 'profile',
+            entityId: 'profile-a',
+            operation: 'upsert',
+            payload: makeDomainMutation().payload
+          }],
+          nextCursor: null,
+          hasMore: false,
+          serverCursor: 4,
+          serverNow: 2_000
+        };
+      },
+      async pull({ cursor }) {
+        assert.equal(cursor, 4);
+        return {
+          changes: [],
+          nextCursor: 4,
+          highWatermark: 4,
+          hasMore: false
+        };
+      }
+    }),
+    now: () => 2_000
+  });
+
+  const imported = await service.importKey(VALID_SYNC_KEY);
+  assert.equal(imported.bootstrapPending, false);
+  assert.equal(domainConfigRepository.replacements.length, 1);
+  assert.equal(
+    repository.meta.get('domainBootstrapVersion:AAAAAAAAAAAAAAAAAAAAAA'),
+    2
+  );
+  assert.equal(
+    repository.meta.get('serverCursor:v2:AAAAAAAAAAAAAAAAAAAAAA'),
+    4
+  );
+  assert.equal(
+    repository.meta.has('serverCursor:AAAAAAAAAAAAAAAAAAAAAA'),
+    false
+  );
+});
+
+test('queues local domain changes once and suppresses a remote replacement echo', async () => {
+  const repository = createSyncRepository();
+  repository.meta.set(
+    'domainBootstrapVersion:AAAAAAAAAAAAAAAAAAAAAA',
+    2
+  );
+  const domainConfigRepository = createDomainConfigFixture();
+  const initial = await domainConfigRepository.load();
+  const service = createCloudSyncService({
+    repository,
+    domainConfigRepository,
+    storageLocal: createCredentialStorage(),
+    settings: createSettingsFixture(),
+    transportFactory: () => ({
+      async status() {
+        return {
+          protocolVersion: 2,
+          capabilities: ['domain_config_entities_v2']
+        };
+      },
+      async pull() {
+        return {
+          changes: [{
+            serverSeq: 1,
+            entityType: 'profile',
+            entityId: 'profile-a',
+            operation: 'upsert',
+            payload: makeDomainMutation().payload
+          }],
+          nextCursor: 1,
+          highWatermark: 1,
+          hasMore: false
+        };
+      }
+    }),
+    now: () => 500
+  });
+
+  await service.runOnce('manual');
+  const remoteValue = {
+    ...structuredClone(domainConfigRepository.replacements[0]),
+    revision: 1
+  };
+  assert.deepEqual(await service.enqueueDomainConfigChanges({
+    oldValue: initial,
+    newValue: remoteValue
+  }, 'local'), { queued: 0 });
+
+  const localValue = structuredClone(remoteValue);
+  localValue.revision = 2;
+  localValue.profiles[0].displayName = 'Locally renamed';
+  assert.deepEqual(await service.enqueueDomainConfigChanges({
+    oldValue: remoteValue,
+    newValue: localValue
+  }, 'local'), { queued: 1 });
+  assert.equal(repository.outbox.at(-1).entityType, 'profile');
+  assert.equal(
+    repository.outbox.at(-1).payload.profile.displayName,
+    'Locally renamed'
+  );
+});
+
+test('queues a deterministic initial domain snapshot after v2 bootstrap', async () => {
+  const repository = createSyncRepository();
+  repository.meta.set(
+    'domainBootstrapVersion:AAAAAAAAAAAAAAAAAAAAAA',
+    2
+  );
+  const initialValue = {
+    version: 2,
+    revision: 3,
+    profiles: [makeDomainMutation().payload.profile],
+    promotionSites: [],
+    assignmentPolicy: {
+      defaultPairId: null,
+      pairs: [],
+      quotas: {
+        batch: 100,
+        perProfile: 50,
+        perPromotionSite: 50,
+        perTargetDomain: 3
+      }
+    }
+  };
+  const pushes = [];
+  const service = createCloudSyncService({
+    repository,
+    domainConfigRepository: createDomainConfigFixture({ initialValue }),
+    storageLocal: createCredentialStorage(),
+    settings: createSettingsFixture(),
+    transportFactory: () => ({
+      async status() {
+        return {
+          protocolVersion: 2,
+          capabilities: ['domain_config_entities_v2']
+        };
+      },
+      async push({ mutations }) {
+        pushes.push(structuredClone(mutations));
+        return {
+          results: mutations.map(({ mutationId }, index) => ({
+            mutationId,
+            status: 'applied',
+            serverSeq: index + 1
+          }))
+        };
+      },
+      async pull() {
+        return {
+          changes: [],
+          nextCursor: 0,
+          highWatermark: 0,
+          hasMore: false
+        };
+      }
+    }),
+    now: () => 500
+  });
+
+  assert.deepEqual(await service.runOnce('startup'), {
+    pushed: 1,
+    pulled: 0,
+    cursor: 0
+  });
+  assert.equal(pushes[0][0].entityType, 'profile');
+  assert.equal(
+    repository.meta.get('initialDomainConfigVersion:AAAAAAAAAAAAAAAAAAAAAA'),
+    2
+  );
+  assert.doesNotMatch(JSON.stringify(pushes), /password|secret/iu);
 });
 
 test('never sends more than 100 due mutations in one push', async () => {
@@ -975,7 +1432,7 @@ test('creates a vault with local-only credentials and queues only present allowl
   assert.equal(Object.hasOwn(storageLocal.data, 'cloud_sync_key'), false);
   assert.deepEqual(
     repository.enqueued.map(({ entityId }) => entityId).sort(),
-    ['batch_concurrency', 'promotion_website_url']
+    ['batch_concurrency']
   );
   assert.doesNotMatch(
     JSON.stringify(repository.enqueued),
@@ -2056,11 +2513,10 @@ test('enqueues real options and batch sync changes while ignoring local secrets 
     batch_concurrency: { newValue: 4 },
     auto_fill_user_password: { newValue: 'must-not-leave' },
     llm_api_key: { newValue: 'sk-must-not-leave' }
-  }, 'sync'), { queued: 2 });
+  }, 'sync'), { queued: 1 });
   assert.deepEqual(
     repository.enqueued.map(({ entityId, payload }) => [entityId, payload]),
     [
-      ['promotion_website_url', { value: 'https://promo.test' }],
       ['batch_concurrency', { value: 4 }]
     ]
   );
@@ -2080,7 +2536,7 @@ test('enqueues real options and batch sync changes while ignoring local secrets 
   assert.deepEqual(await service.enqueueSettingChanges({
     batch_concurrency: { oldValue: 4, newValue: 7 }
   }, 'sync'), { queued: 0 });
-  assert.equal(repository.enqueued.length, 2);
+  assert.equal(repository.enqueued.length, 1);
 });
 
 test('delegates cloud history APIs and deletes locally only after cloud success', async () => {

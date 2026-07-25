@@ -62,10 +62,12 @@ function createChromeFixture() {
 function createSyncService(overrides = {}) {
   const runReasons = [];
   const settingChanges = [];
+  const domainChanges = [];
   let initialUploads = 0;
   return {
     runReasons,
     settingChanges,
+    domainChanges,
     get initialUploads() {
       return initialUploads;
     },
@@ -80,6 +82,10 @@ function createSyncService(overrides = {}) {
     async enqueueSettingChanges(changes, areaName) {
       settingChanges.push({ changes, areaName });
       return { queued: Object.keys(changes).length };
+    },
+    async enqueueDomainConfigChanges(change, areaName) {
+      domainChanges.push({ change, areaName });
+      return { queued: 1 };
     },
     ...overrides
   };
@@ -156,6 +162,30 @@ test('each matching alarm advances one initial-history page before sync', async 
   await fixture.triggerAlarm(CLOUD_SYNC_ALARM_NAME);
 
   assert.deepEqual(sequence, ['initial', 'run:alarm']);
+});
+
+test('queues local domain config changes without treating them as sync settings', async () => {
+  const fixture = createChromeFixture();
+  const service = createSyncService();
+  await installCloudSyncBackground(fixture.chromeApi, service, {
+    migratePassword: async () => undefined
+  });
+  service.runReasons.length = 0;
+
+  const change = {
+    oldValue: { version: 2, revision: 1 },
+    newValue: { version: 2, revision: 2 }
+  };
+  await fixture.triggerStorage({
+    autoCommentDomainConfig: change
+  }, 'local');
+
+  assert.deepEqual(service.domainChanges, [{
+    change,
+    areaName: 'local'
+  }]);
+  assert.deepEqual(service.settingChanges, []);
+  assert.deepEqual(service.runReasons, ['domain_config_change']);
 });
 
 test('more than 100 initial records finish through three bounded alarm pages', async () => {
@@ -267,10 +297,6 @@ test('storage listener forwards only allowlisted sync changes and runs after que
 
   assert.deepEqual(sequence, [
     ['enqueue', {
-      promotion_website_url: {
-        oldValue: '',
-        newValue: 'https://promo.test'
-      },
       batch_concurrency: {
         oldValue: 2,
         newValue: 3
@@ -414,9 +440,11 @@ test('runtime wiring creates transports only with the shipped fixed origin', () 
     sync: {}
   };
   let capturedServiceOptions;
+  const domainConfigRepository = {};
 
   const service = createCloudSyncRuntime({
     repository,
+    domainConfigRepository,
     storage,
     fetchImpl: async () => {
       throw new Error('not called');
@@ -437,6 +465,10 @@ test('runtime wiring creates transports only with the shipped fixed origin', () 
 
   assert.deepEqual(service, { kind: 'service' });
   assert.strictEqual(capturedServiceOptions.repository, repository);
+  assert.strictEqual(
+    capturedServiceOptions.domainConfigRepository,
+    domainConfigRepository
+  );
   assert.strictEqual(capturedServiceOptions.storageLocal, storage.local);
   assert.equal(typeof capturedServiceOptions.settings.load, 'function');
   assert.deepEqual(transport, { kind: 'transport' });

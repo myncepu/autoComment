@@ -40,7 +40,7 @@ test('sends the sync key only in Authorization to the fixed origin', async () =>
 
   await transport.status('device-a');
 
-  assert.equal(calls[0].url, 'https://sync.example.workers.dev/v1/status?deviceId=device-a');
+  assert.equal(calls[0].url, 'https://sync.example.workers.dev/v1/status?deviceId=device-a&protocolVersion=2');
   assert.equal(calls[0].init.headers.Authorization, `Bearer ${VALID_SYNC_KEY}`);
   assert.doesNotMatch(JSON.stringify(calls[0].init.body ?? null), /acsync_/u);
   assert.equal(calls[0].init.headers['Content-Type'], 'application/json');
@@ -77,12 +77,12 @@ test('uses the documented JSON methods and endpoint paths', async () => {
       body: JSON.stringify({ deviceId: 'device-a', mutations: [{ mutationId: 'mutation-a' }] })
     },
     {
-      url: 'https://sync.example.workers.dev/v1/sync/pull?cursor=7&limit=100&deviceId=device-a',
+      url: 'https://sync.example.workers.dev/v1/sync/pull?cursor=7&limit=100&deviceId=device-a&protocolVersion=2',
       method: 'GET',
       body: undefined
     },
     {
-      url: 'https://sync.example.workers.dev/v1/sync/bootstrap?cursor=4&limit=50&deviceId=device-a',
+      url: 'https://sync.example.workers.dev/v1/sync/bootstrap?cursor=4&limit=50&deviceId=device-a&protocolVersion=2',
       method: 'GET',
       body: undefined
     },

@@ -94,7 +94,7 @@ test('preserves a local password while removing the legacy sync copy', async () 
   assert.equal(Object.hasOwn(storage.syncData, 'auto_fill_user_password'), false);
 });
 
-test('loads only allowlisted cloud settings from sync storage', async () => {
+test('does not load legacy flat identity settings into the v2 cloud outbox', async () => {
   const storage = createObservedStorage({
     sync: {
       promotion_website_url: 'https://promo.test',
@@ -103,9 +103,7 @@ test('loads only allowlisted cloud settings from sync storage', async () => {
     }
   });
 
-  assert.deepEqual(await loadSyncableSettings(storage), {
-    promotion_website_url: 'https://promo.test'
-  });
+  assert.deepEqual(await loadSyncableSettings(storage), {});
 });
 
 test('new configuration exports omit passwords and API keys', () => {
@@ -115,9 +113,7 @@ test('new configuration exports omit passwords and API keys', () => {
   }, {
     llm_api_key: 'sk-local',
     auto_fill_user_password: 'local-secret'
-  }), {
-    promotion_website_url: 'https://promo.test'
-  });
+  }), {});
 });
 
 test('imports a legacy password into local storage only', () => {
@@ -126,7 +122,7 @@ test('imports a legacy password into local storage only', () => {
     auto_fill_user_password: 'legacy-password',
     llm_api_key: 'legacy-api-key'
   }), {
-    syncValues: { promotion_website_url: 'https://promo.test' },
+    syncValues: {},
     localValues: { auto_fill_user_password: 'legacy-password' }
   });
 });
@@ -149,14 +145,7 @@ test('consumes a remote setting echo before creating another mutation', async ()
     now: () => 500,
     createMutationId: () => 'mutation-a',
     echoGuard
-  }), [{
-    mutationId: 'mutation-a',
-    entityType: 'setting',
-    entityId: 'promotion_website_url',
-    operation: 'upsert',
-    payload: { value: 'https://remote.test' },
-    createdAt: 500
-  }]);
+  }), []);
 });
 
 test('creates one normalized mutation for an allowed local setting change', () => {

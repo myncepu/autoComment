@@ -1,10 +1,141 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  CLOUD_SYNC_LEGACY_SETTING_KEYS,
+  CLOUD_SYNC_PROTOCOL_VERSION,
   normalizeCommentRevision,
   normalizeSyncMutation,
   pickCloudSyncSettings
 } from '../lib/cloud-sync-protocol.mjs';
+
+function domainMutation(entityType, entityId, payload, operation = 'upsert') {
+  return {
+    mutationId: `mutation-${entityType}`,
+    entityType,
+    entityId,
+    operation,
+    payload,
+    createdAt: 1721000000000
+  };
+}
+
+test('defines v2 and accepts exact non-sensitive domain entities', () => {
+  assert.equal(CLOUD_SYNC_PROTOCOL_VERSION, 2);
+  assert.deepEqual(CLOUD_SYNC_LEGACY_SETTING_KEYS, [
+    'promotion_website_url',
+    'promotion_website_content',
+    'auto_fill_user_name',
+    'auto_fill_user_email'
+  ]);
+  assert.equal(normalizeSyncMutation(domainMutation('profile', 'profile-a', {
+    profile: {
+      id: 'profile-a',
+      displayName: 'Profile A',
+      name: 'Alice',
+      email: 'alice@example.test',
+      createdAt: 1,
+      updatedAt: 2
+    }
+  })).entityType, 'profile');
+  assert.equal(normalizeSyncMutation(domainMutation('promotion_site', 'site-a', {
+    promotionSite: {
+      id: 'site-a',
+      name: 'Site A',
+      url: 'https://site-a.test/',
+      content: 'Description',
+      enabled: true,
+      createdAt: 1,
+      updatedAt: 2
+    }
+  })).entityType, 'promotion_site');
+  assert.equal(normalizeSyncMutation(domainMutation('assignment_pair', 'pair-a', {
+    assignmentPair: {
+      id: 'pair-a',
+      profileId: 'profile-a',
+      promotionSiteId: 'site-a',
+      weight: 2,
+      enabled: true
+    }
+  })).entityType, 'assignment_pair');
+  assert.equal(normalizeSyncMutation(domainMutation(
+    'assignment_policy',
+    'default-assignment-policy',
+    {
+      assignmentPolicy: {
+        id: 'default-assignment-policy',
+        defaultPairId: 'pair-a',
+        quotas: {
+          batch: 100,
+          perProfile: 50,
+          perPromotionSite: 50,
+          perTargetDomain: 3
+        }
+      }
+    }
+  )).entityType, 'assignment_policy');
+});
+
+test('rejects domain secrets, unknown fields, mismatched IDs, and invalid operations', () => {
+  assert.throws(() => normalizeSyncMutation(domainMutation('profile', 'profile-a', {
+    profile: {
+      id: 'profile-a',
+      displayName: 'Profile A',
+      name: 'Alice',
+      email: 'alice@example.test',
+      createdAt: 1,
+      updatedAt: 2,
+      password: 'DO_NOT_SYNC'
+    }
+  })), /SENSITIVE_FIELD_NOT_SYNCABLE/);
+  assert.throws(() => normalizeSyncMutation(domainMutation('profile', 'profile-a', {
+    profile: {
+      id: 'profile-b',
+      displayName: 'Profile B',
+      name: 'Bob',
+      email: 'bob@example.test',
+      createdAt: 1,
+      updatedAt: 2
+    }
+  })), /INVALID_MUTATION_PAYLOAD/);
+  assert.equal(normalizeSyncMutation(domainMutation(
+    'profile',
+    'profile-a',
+    { deletedAt: 3 },
+    'delete'
+  )).operation, 'delete');
+  assert.throws(() => normalizeSyncMutation(domainMutation(
+    'assignment_policy',
+    'default-assignment-policy',
+    { deletedAt: 3 },
+    'delete'
+  )), /INVALID_MUTATION_OPERATION/);
+  assert.throws(() => normalizeSyncMutation(domainMutation('profile', 'profile-a', {
+    profile: {
+      id: 'profile-a',
+      displayName: 'Profile A',
+      name: 'Alice',
+      email: 'alice@example.test',
+      createdAt: 1,
+      updatedAt: 2,
+      accessToken: 'DO_NOT_SYNC'
+    }
+  })), /SENSITIVE_FIELD_NOT_SYNCABLE/);
+  assert.throws(() => normalizeSyncMutation(domainMutation(
+    'promotion_site',
+    'site-a',
+    {
+      promotionSite: {
+        id: 'site-a',
+        name: 'Site A',
+        url: 'https://user:pass@site-a.test/',
+        content: 'Description',
+        enabled: true,
+        createdAt: 1,
+        updatedAt: 2
+      }
+    }
+  )), /INVALID_MUTATION_PAYLOAD/);
+});
 
 test('keeps only the approved non-sensitive setting keys', () => {
   assert.deepEqual(pickCloudSyncSettings({
@@ -23,10 +154,6 @@ test('keeps only the approved non-sensitive setting keys', () => {
     llm_api_key: 'sk-secret',
     batch_urls: ['https://target.test']
   }), {
-    promotion_website_url: 'https://promo.test',
-    promotion_website_content: 'description',
-    auto_fill_user_name: 'CloudHu',
-    auto_fill_user_email: 'owner@example.test',
     llm_api_base_url: 'https://openrouter.ai/api/v1',
     llm_model: 'qwen/qwen-plus',
     show_export_outlinks_floating_button: false,

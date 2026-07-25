@@ -52,12 +52,13 @@ const commentHistoryRepository = createLazyCloudSyncRepository(
   () => openCommentHistoryDb()
 );
 
+const domainConfigRepository = createDomainConfigRepository(chrome.storage.local);
 const cloudSyncService = createCloudSyncRuntime({
   repository: commentHistoryRepository,
+  domainConfigRepository,
   storage: chrome.storage,
   fetchImpl: fetch
 });
-const domainConfigRepository = createDomainConfigRepository(chrome.storage.local);
 const profileSecretRepository = createProfileSecretRepository(chrome.storage.local);
 const batchSecretVaultStore = createBatchSecretVaultStore(chrome.storage.local);
 const secretAwareBatchRuntimeController = createBatchSecretAwareRuntimeController(

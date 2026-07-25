@@ -1100,6 +1100,100 @@ test('bootstrap finalization cannot regress an existing incremental cursor', asy
   assert.equal(await repo.getSyncMeta('serverCursor:vault-a'), 50);
 });
 
+test('keeps v1 and v2 cursors isolated while recording domain entity progress', async (t) => {
+  const { repo } = await openRepo(t);
+  await repo.setSyncMeta('serverCursor:vault-a', 50);
+
+  await repo.applyRemoteChangesAtomic({
+    vaultId: 'vault-a',
+    protocolVersion: 2,
+    changes: [{
+      serverSeq: 1,
+      entityType: 'profile',
+      entityId: 'profile-a',
+      operation: 'upsert',
+      payload: {
+        profile: {
+          id: 'profile-a',
+          displayName: 'Profile A',
+          name: 'Alice',
+          email: 'alice@example.test',
+          createdAt: 10,
+          updatedAt: 20
+        }
+      }
+    }],
+    nextCursor: 1
+  });
+
+  assert.equal(await repo.getSyncMeta('serverCursor:vault-a'), 50);
+  assert.equal(await repo.getSyncMeta('serverCursor:v2:vault-a'), 1);
+  await assert.rejects(repo.applyRemoteChangesAtomic({
+    vaultId: 'vault-a',
+    protocolVersion: 2,
+    changes: [],
+    nextCursor: 0
+  }), (error) => error.code === 'SYNC_CURSOR_REGRESSION');
+});
+
+test('finalizes a v2 bootstrap without replacing the legacy bootstrap state or cursor', async (t) => {
+  const { repo } = await openRepo(t);
+  await repo.setSyncMeta('serverCursor:vault-a', 8);
+  await repo.initializeBootstrapSentinel({
+    vaultId: 'vault-a',
+    protocolVersion: 2,
+    state: {
+      cursor: null,
+      serverCursor: null,
+      serverNow: null,
+      phase: 'comments',
+      done: false
+    }
+  });
+
+  await repo.applyBootstrapPageAtomic({
+    vaultId: 'vault-a',
+    protocolVersion: 2,
+    comments: [],
+    settings: [],
+    tombstones: [],
+    pendingInboundSettings: {},
+    domainChanges: [{
+      entityType: 'profile',
+      entityId: 'profile-a',
+      operation: 'upsert',
+      payload: {
+        profile: {
+          id: 'profile-a',
+          displayName: 'Profile A',
+          name: 'Alice',
+          email: 'alice@example.test',
+          createdAt: 10,
+          updatedAt: 20
+        }
+      }
+    }],
+    nextCursor: null,
+    serverCursor: 12,
+    serverNow: 2_000,
+    phase: 'comments',
+    hasMore: false
+  });
+
+  assert.equal(await repo.getSyncMeta('serverCursor:vault-a'), 8);
+  assert.equal(await repo.getSyncMeta('serverCursor:v2:vault-a'), 12);
+  assert.equal(await repo.getSyncMeta('bootstrapState:vault-a'), undefined);
+  assert.deepEqual(await repo.getSyncMeta('bootstrapState:v2:vault-a'), {
+    cursor: null,
+    serverCursor: 12,
+    serverNow: 2_000,
+    phase: 'comments',
+    done: true,
+    protocolVersion: 2,
+    domainChanges: []
+  });
+});
+
 test('remote changes preserve fresher comments and apply tombstones without an outbox row', async (t) => {
   const { repo } = await openRepo(t);
   const local = makeBundle({
