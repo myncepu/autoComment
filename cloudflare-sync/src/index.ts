@@ -8,6 +8,7 @@ import {
   withCors
 } from './http';
 import { requireVault } from './auth';
+import { deleteHistory, queryHistory } from './history';
 import { pushMutations } from './push';
 import { bootstrapSnapshot, pullChanges } from './pull';
 import { deleteVault, getStatus, putVault } from './vault';
@@ -100,6 +101,64 @@ function readPreflight(
   });
 }
 
+function historyRecordPath(pathname: string): boolean {
+  if (!pathname.startsWith('/v1/history/')) return false;
+  const encodedId = pathname.slice('/v1/history/'.length);
+  return encodedId.length > 0 && !encodedId.includes('/');
+}
+
+function historyPreflight(
+  request: Request,
+  env: Env,
+  requestId: string
+): Response {
+  const pathname = new URL(request.url).pathname;
+  const methods =
+    pathname === '/v1/history'
+      ? 'GET, OPTIONS'
+      : historyRecordPath(pathname)
+        ? 'DELETE, OPTIONS'
+        : null;
+  if (!methods) return apiError('NOT_FOUND', 404, false, requestId);
+  if (!allowedOrigin(request, env)) {
+    return apiError('CORS_ORIGIN_FORBIDDEN', 403, false, requestId);
+  }
+  const requestedMethod = request.headers.get(
+    'Access-Control-Request-Method'
+  );
+  if (!requestedMethod || !methods.split(', ').includes(requestedMethod)) {
+    const response = apiError(
+      'METHOD_NOT_ALLOWED',
+      405,
+      false,
+      requestId
+    );
+    response.headers.set('Allow', methods);
+    return response;
+  }
+  const requestedHeaders = request.headers.get(
+    'Access-Control-Request-Headers'
+  );
+  if (requestedHeaders) {
+    const supported = new Set(['authorization', 'content-type']);
+    const valid = requestedHeaders
+      .split(',')
+      .map((header) => header.trim().toLowerCase())
+      .every((header) => supported.has(header));
+    if (!valid) {
+      return apiError('CORS_HEADER_NOT_ALLOWED', 403, false, requestId);
+    }
+  }
+  return new Response(null, {
+    status: 204,
+    headers: {
+      'Access-Control-Allow-Methods': methods,
+      'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+      'Cache-Control': 'no-store'
+    }
+  });
+}
+
 function methodNotAllowed(pathname: string, requestId: string): Response {
   const response = apiError(
     'METHOD_NOT_ALLOWED',
@@ -120,6 +179,12 @@ async function route(
   const pathname = new URL(request.url).pathname;
 
   if (request.method === 'OPTIONS') {
+    if (
+      pathname === '/v1/history' ||
+      historyRecordPath(pathname)
+    ) {
+      return historyPreflight(request, env, requestId);
+    }
     if (pathname === '/v1/sync/push') {
       return pushPreflight(request, env, requestId);
     }
@@ -191,6 +256,36 @@ async function route(
       requestId
     );
     response.headers.set('Allow', 'GET, OPTIONS');
+    return response;
+  }
+
+  if (pathname === '/v1/history') {
+    if (request.method === 'GET') {
+      const vault = await requireVault(request, env);
+      return queryHistory(request, env, vault, requestId);
+    }
+    const response = apiError(
+      'METHOD_NOT_ALLOWED',
+      405,
+      false,
+      requestId
+    );
+    response.headers.set('Allow', 'GET, OPTIONS');
+    return response;
+  }
+
+  if (historyRecordPath(pathname)) {
+    if (request.method === 'DELETE') {
+      const vault = await requireVault(request, env);
+      return deleteHistory(request, env, vault, requestId);
+    }
+    const response = apiError(
+      'METHOD_NOT_ALLOWED',
+      405,
+      false,
+      requestId
+    );
+    response.headers.set('Allow', 'DELETE, OPTIONS');
     return response;
   }
 

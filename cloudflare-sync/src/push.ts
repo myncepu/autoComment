@@ -194,6 +194,8 @@ export type MutationReceipt =
     };
 
 interface StoredReceipt {
+  entity_type: string;
+  entity_id: string;
   result_status: string;
   server_seq: number | null;
 }
@@ -1019,7 +1021,8 @@ async function readStoredReceipt(
   mutationId: string
 ): Promise<StoredReceipt | null> {
   return env.DB.prepare(
-    `SELECT stored_mutation.result_status, stored_mutation.server_seq
+    `SELECT stored_mutation.entity_type, stored_mutation.entity_id,
+       stored_mutation.result_status, stored_mutation.server_seq
      FROM sync_mutations AS stored_mutation
      JOIN sync_vaults AS active_vault
        ON active_vault.vault_id = stored_mutation.vault_id
@@ -1045,13 +1048,23 @@ async function failForMissingReceipt(
 }
 
 function mutationReceipt(
-  mutationId: string,
+  mutation: ApplicableMutation,
   stored: StoredReceipt,
   inserted: boolean
 ): MutationReceipt {
+  if (
+    stored.entity_type !== mutation.entityType ||
+    stored.entity_id !== mutation.entityId
+  ) {
+    return {
+      mutationId: mutation.mutationId,
+      status: 'rejected',
+      errorCode: 'MUTATION_ID_CONFLICT'
+    };
+  }
   if (!inserted) {
     return {
-      mutationId,
+      mutationId: mutation.mutationId,
       status: 'duplicate',
       serverSeq: stored.server_seq
     };
@@ -1059,7 +1072,7 @@ function mutationReceipt(
   if (stored.result_status === 'applied') {
     if (stored.server_seq === null) fail('INTERNAL_ERROR', 500, true);
     return {
-      mutationId,
+      mutationId: mutation.mutationId,
       status: 'applied',
       serverSeq: stored.server_seq
     };
@@ -1068,7 +1081,7 @@ function mutationReceipt(
     fail('INTERNAL_ERROR', 500, true);
   }
   return {
-    mutationId,
+    mutationId: mutation.mutationId,
     status: 'stale',
     serverSeq: stored.server_seq
   };
@@ -1103,7 +1116,7 @@ export async function applyCommentMutation(
     mutation.mutationId
   );
   if (!stored) return failForMissingReceipt(env, vaultId);
-  return mutationReceipt(mutation.mutationId, stored, inserted);
+  return mutationReceipt(mutation, stored, inserted);
 }
 
 function insertTombstoneStatement(
@@ -1340,7 +1353,7 @@ export async function applyCommentDeleteMutation(
     mutation.mutationId
   );
   if (!stored) return failForMissingReceipt(env, vaultId);
-  return mutationReceipt(mutation.mutationId, stored, inserted);
+  return mutationReceipt(mutation, stored, inserted);
 }
 
 function canonicalJson(value: unknown): string {
@@ -1528,7 +1541,7 @@ export async function applySettingMutation(
     mutation.mutationId
   );
   if (!stored) return failForMissingReceipt(env, vaultId);
-  return mutationReceipt(mutation.mutationId, stored, inserted);
+  return mutationReceipt(mutation, stored, inserted);
 }
 
 function rejectedMutationId(input: unknown): string {
