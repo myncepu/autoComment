@@ -385,6 +385,38 @@ test('sync outbox write failure rolls freshness changes back with a stable code'
   }), [originalMutation]);
 });
 
+test('local outbox fallback stores the comment and repair marker atomically', async (t) => {
+  const { repo } = await openRepo(t);
+  const record = makeBundle({
+    id: 'sync-repair:1',
+    submittedAt: 100
+  });
+
+  assert.equal(await repo.upsertIfFresher(record, {
+    syncRepairMarker: {
+      vaultId: 'vault-a',
+      markerId: 'repair-mutation-1'
+    }
+  }), true);
+  assert.deepEqual(await repo.getRecord(record.comment.id), record);
+  assert.equal(
+    await repo.getSyncMeta('initialUploadRepair:vault-a'),
+    'repair-mutation-1'
+  );
+
+  const invalid = makeBundle({
+    id: 'sync-repair:2',
+    submittedAt: 200
+  });
+  await assert.rejects(repo.upsertIfFresher(invalid, {
+    syncRepairMarker: {
+      vaultId: '',
+      markerId: 'repair-mutation-2'
+    }
+  }));
+  assert.equal(await repo.getRecord(invalid.comment.id), null);
+});
+
 test('sync outbox rejects missing vaults and does not mislabel comment write failures', async (t) => {
   const { repo } = await openRepo(t);
   await assert.rejects(repo.enqueueSyncMutation({
@@ -587,6 +619,78 @@ test('sync outbox completion ignores a late old receipt instead of regressing en
   assert.equal(await repo.getRecord(record.comment.id), null);
 });
 
+test('sync outbox completion rejects receipts without a safe server sequence', async (t) => {
+  const { repo } = await openRepo(t);
+  const mutation = {
+    mutationId: 'invalid-server-sequence',
+    vaultId: 'vault-a',
+    entityType: 'comment',
+    entityId: 'invalid-sequence:1',
+    operation: 'upsert',
+    payload: { comment: { id: 'invalid-sequence:1' }, anchors: [] },
+    createdAt: 100,
+    attemptCount: 0,
+    nextAttemptAt: 100,
+    lastErrorCode: null,
+    state: 'pending'
+  };
+  await repo.enqueueSyncMutation(mutation);
+
+  for (const serverSeq of [null, -1, Number.MAX_SAFE_INTEGER + 1]) {
+    await assert.rejects(
+      repo.completeSyncMutations([{
+        mutationId: mutation.mutationId,
+        vaultId: mutation.vaultId,
+        entityKey: `${mutation.vaultId}:comment:${mutation.entityId}`,
+        revisionId: 'revision-invalid-sequence',
+        serverSeq
+      }]),
+      (error) => error.code === 'INVALID_SYNC_RECEIPT'
+    );
+  }
+  assert.deepEqual(await repo.listDueSyncMutations({
+    vaultId: 'vault-a',
+    now: 1_000,
+    limit: 100
+  }), [mutation]);
+});
+
+test('synced cache eviction ignores corrupted entity state without a safe server sequence', async (t) => {
+  const { repo, indexedDBImpl, dbName } = await openRepo(t);
+  const record = makeBundle({
+    id: 'corrupted-entity:1',
+    submittedAt: 100
+  });
+  record.comment.historyRevision = {
+    capturedAt: 100,
+    recordedAt: 101,
+    sequence: 0,
+    id: 'revision-corrupted'
+  };
+  await repo.upsertRecord(record);
+
+  const database = await openDatabase(indexedDBImpl, dbName);
+  const transaction = database.transaction('sync_entities', 'readwrite');
+  transaction.objectStore('sync_entities').put({
+    entityKey: `vault-a:comment:${record.comment.id}`,
+    vaultId: 'vault-a',
+    revisionId: 'revision-corrupted',
+    serverSeq: null
+  });
+  await new Promise((resolve, reject) => {
+    transaction.oncomplete = resolve;
+    transaction.onabort = () => reject(transaction.error);
+    transaction.onerror = () => {};
+  });
+  database.close();
+
+  assert.equal(await repo.evictSyncedCacheBefore({
+    vaultId: 'vault-a',
+    cutoff: 200
+  }), 0);
+  assert.deepEqual(await repo.getRecord(record.comment.id), record);
+});
+
 test('remote change page aborts every record and cursor when a later change is invalid', async (t) => {
   const { repo } = await openRepo(t);
   await assert.rejects(repo.applyRemoteChangesAtomic({
@@ -605,10 +709,136 @@ test('remote change page aborts every record and cursor when a later change is i
         record: { comment: { id: '' }, anchors: [] }
       }
     ],
+    pendingInboundSettings: { batch_concurrency: 4 },
     nextCursor: 9
   }));
   assert.equal(await repo.getRecord('remote:1'), null);
   assert.equal(await repo.getSyncMeta('serverCursor:vault-a'), undefined);
+  assert.equal(
+    await repo.getSyncMeta('pendingInboundSettings:vault-a'),
+    undefined
+  );
+});
+
+test('remote change transaction rejects cursor regression and out-of-order sequences', async (t) => {
+  const { repo } = await openRepo(t);
+  await repo.setSyncMeta('serverCursor:vault-a', 8);
+  const record = makeBundle({ id: 'cursor-guard:1', submittedAt: 100 });
+
+  for (const page of [
+    {
+      changes: [],
+      nextCursor: 7
+    },
+    {
+      changes: [{
+        serverSeq: 8,
+        entityType: 'comment',
+        operation: 'upsert',
+        record
+      }],
+      nextCursor: 8
+    },
+    {
+      changes: [
+        {
+          serverSeq: 10,
+          entityType: 'comment',
+          operation: 'upsert',
+          record
+        },
+        {
+          serverSeq: 9,
+          entityType: 'comment_delete',
+          entityId: record.comment.id,
+          operation: 'delete'
+        }
+      ],
+      nextCursor: 9
+    }
+  ]) {
+    await assert.rejects(
+      repo.applyRemoteChangesAtomic({
+        vaultId: 'vault-a',
+        ...page
+      }),
+      (error) => error.code === 'SYNC_CURSOR_REGRESSION'
+    );
+  }
+
+  assert.equal(await repo.getRecord(record.comment.id), null);
+  assert.equal(await repo.getSyncMeta('serverCursor:vault-a'), 8);
+});
+
+test('remote settings, entity state, and cursor commit before guarded pending flush', async (t) => {
+  const { repo, indexedDBImpl, dbName } = await openRepo(t);
+  await repo.applyRemoteChangesAtomic({
+    vaultId: 'vault-a',
+    changes: [{
+      serverSeq: 8,
+      entityType: 'setting',
+      entityId: 'batch_concurrency',
+      operation: 'upsert',
+      value: 4
+    }],
+    pendingInboundSettings: { batch_concurrency: 4 },
+    nextCursor: 8
+  });
+  assert.equal(await repo.getSyncMeta('serverCursor:vault-a'), 8);
+  assert.deepEqual(
+    await repo.getSyncMeta('pendingInboundSettings:vault-a'),
+    { batch_concurrency: 4 }
+  );
+
+  const database = await openDatabase(indexedDBImpl, dbName);
+  const entityTransaction = database.transaction('sync_entities', 'readonly');
+  const entity = await new Promise((resolve, reject) => {
+    const request = entityTransaction.objectStore('sync_entities').get(
+      'vault-a:setting:batch_concurrency'
+    );
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  database.close();
+  assert.deepEqual(entity, {
+    entityKey: 'vault-a:setting:batch_concurrency',
+    vaultId: 'vault-a',
+    revisionId: null,
+    serverSeq: 8
+  });
+
+  await repo.applyRemoteChangesAtomic({
+    vaultId: 'vault-a',
+    changes: [{
+      serverSeq: 9,
+      entityType: 'setting',
+      entityId: 'batch_timeout_seconds',
+      operation: 'upsert',
+      value: 90
+    }],
+    pendingInboundSettings: { batch_timeout_seconds: 90 },
+    nextCursor: 9
+  });
+  await repo.clearPendingInboundSettings({
+    vaultId: 'vault-a',
+    expected: { batch_concurrency: 4 }
+  });
+  const merged = {
+    batch_concurrency: 4,
+    batch_timeout_seconds: 90
+  };
+  assert.deepEqual(
+    await repo.getSyncMeta('pendingInboundSettings:vault-a'),
+    merged
+  );
+  await repo.clearPendingInboundSettings({
+    vaultId: 'vault-a',
+    expected: merged
+  });
+  assert.equal(
+    await repo.getSyncMeta('pendingInboundSettings:vault-a'),
+    undefined
+  );
 });
 
 test('bootstrap pages atomically apply entities and advance only signed progress', async (t) => {
@@ -627,8 +857,11 @@ test('bootstrap pages atomically apply entities and advance only signed progress
     vaultId: 'vault-a',
     comments: [first],
     tombstones: [{ recordId: deleted.comment.id, deletedAt: 120 }],
+    pendingInboundSettings: { batch_concurrency: 4 },
     nextCursor: 'signed-tombstone-phase',
     serverCursor: 42,
+    serverNow: 2_000,
+    phase: 'tombstones',
     hasMore: true
   });
 
@@ -637,9 +870,15 @@ test('bootstrap pages atomically apply entities and advance only signed progress
   assert.deepEqual(await repo.getSyncMeta('bootstrapState:vault-a'), {
     cursor: 'signed-tombstone-phase',
     serverCursor: 42,
+    serverNow: 2_000,
+    phase: 'tombstones',
     done: false
   });
   assert.equal(await repo.getSyncMeta('serverCursor:vault-a'), undefined);
+  assert.deepEqual(
+    await repo.getSyncMeta('pendingInboundSettings:vault-a'),
+    { batch_concurrency: 4 }
+  );
 
   await repo.applyBootstrapPageAtomic({
     vaultId: 'vault-a',
@@ -647,11 +886,15 @@ test('bootstrap pages atomically apply entities and advance only signed progress
     tombstones: [{ recordId: 'bootstrap-deleted:2', deletedAt: 130 }],
     nextCursor: null,
     serverCursor: 42,
+    serverNow: 2_000,
+    phase: 'tombstones',
     hasMore: false
   });
   assert.deepEqual(await repo.getSyncMeta('bootstrapState:vault-a'), {
     cursor: null,
     serverCursor: 42,
+    serverNow: 2_000,
+    phase: 'tombstones',
     done: true
   });
   assert.equal(await repo.getSyncMeta('serverCursor:vault-a'), 42);
@@ -673,11 +916,75 @@ test('invalid bootstrap entities roll back the page and signed progress', async 
     tombstones: [],
     nextCursor: 'signed-comments-phase',
     serverCursor: 42,
+    serverNow: 2_000,
+    phase: 'comments',
     hasMore: true
   }));
 
   assert.equal(await repo.getRecord(valid.comment.id), null);
   assert.equal(await repo.getSyncMeta('bootstrapState:vault-a'), undefined);
+  assert.equal(await repo.getSyncMeta('serverCursor:vault-a'), undefined);
+});
+
+test('bootstrap transaction rejects snapshot and phase regression without advancing', async (t) => {
+  const { repo } = await openRepo(t);
+  await repo.applyBootstrapPageAtomic({
+    vaultId: 'vault-a',
+    comments: [],
+    tombstones: [{ recordId: 'phase-delete:1', deletedAt: 100 }],
+    nextCursor: 'signed-tombstones',
+    serverCursor: 42,
+    serverNow: 2_000,
+    phase: 'tombstones',
+    hasMore: true
+  });
+  const expectedState = {
+    cursor: 'signed-tombstones',
+    serverCursor: 42,
+    serverNow: 2_000,
+    phase: 'tombstones',
+    done: false
+  };
+
+  for (const page of [
+    {
+      comments: [],
+      tombstones: [],
+      serverCursor: 43,
+      serverNow: 2_000,
+      phase: 'tombstones'
+    },
+    {
+      comments: [],
+      tombstones: [],
+      serverCursor: 42,
+      serverNow: 2_001,
+      phase: 'tombstones'
+    },
+    {
+      comments: [makeBundle({ id: 'phase-illegal:1', submittedAt: 100 })],
+      tombstones: [],
+      serverCursor: 42,
+      serverNow: 2_000,
+      phase: 'comments'
+    }
+  ]) {
+    await assert.rejects(
+      repo.applyBootstrapPageAtomic({
+        vaultId: 'vault-a',
+        ...page,
+        nextCursor: null,
+        hasMore: false
+      }),
+      (error) => error.code === 'INVALID_BOOTSTRAP_PAGE'
+    );
+  }
+
+  assert.deepEqual(
+    await repo.getSyncMeta('bootstrapState:vault-a'),
+    expectedState
+  );
+  assert.equal(await repo.getRecord('phase-illegal:1'), null);
   assert.equal(await repo.getSyncMeta('serverCursor:vault-a'), undefined);
 });
 

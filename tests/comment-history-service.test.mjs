@@ -165,7 +165,8 @@ test('cloud outbox failure retries only the local comment and reports queue reco
     async upsertIfFresher(bundle, options = {}) {
       calls.push({
         commentId: bundle.comment.id,
-        hasSyncMutation: Boolean(options.syncMutation)
+        hasSyncMutation: Boolean(options.syncMutation),
+        syncRepairMarker: structuredClone(options.syncRepairMarker)
       });
       if (options.syncMutation) {
         const error = new Error('outbox unavailable');
@@ -204,10 +205,67 @@ test('cloud outbox failure retries only the local comment and reports queue reco
     pendingCount: 0
   });
   assert.deepEqual(calls, [
-    { commentId: 'batch-a:7', hasSyncMutation: true },
-    { commentId: 'batch-a:7', hasSyncMutation: false }
+    {
+      commentId: 'batch-a:7',
+      hasSyncMutation: true,
+      syncRepairMarker: undefined
+    },
+    {
+      commentId: 'batch-a:7',
+      hasSyncMutation: false,
+      syncRepairMarker: {
+        vaultId: 'vault-a',
+        markerId: 'comment-mutation-1'
+      }
+    }
   ]);
   assert.deepEqual(storageLocal.data, {});
+});
+
+test('cannot report a saved fallback when its durable sync repair marker fails', async () => {
+  const repository = {
+    async upsertIfFresher(_bundle, options = {}) {
+      const error = new Error(
+        options.syncMutation ? 'outbox unavailable' : 'repair marker unavailable'
+      );
+      error.code = options.syncMutation
+        ? 'SYNC_OUTBOX_WRITE_FAILED'
+        : 'SYNC_REPAIR_MARKER_FAILED';
+      throw error;
+    }
+  };
+  const storageLocal = createStorage();
+  const service = createCommentHistoryService({
+    repository,
+    storageLocal,
+    cloudSync: {
+      async isEnabled() {
+        return true;
+      },
+      buildCommentMutation(bundle) {
+        return {
+          mutationId: 'comment-mutation-repair-failure',
+          vaultId: 'vault-a',
+          entityType: 'comment',
+          entityId: bundle.comment.id,
+          operation: 'upsert',
+          payload: structuredClone(bundle),
+          createdAt: 1721000000100
+        };
+      }
+    },
+    now: () => 1721000000100,
+    createPendingEntryId: () => 'repair-failure'
+  });
+
+  assert.deepEqual(await service.saveConfirmedSuccess(makeMessage()), {
+    historySaveStatus: 'queued',
+    pendingCount: 1
+  });
+  assert.equal(
+    storageLocal.data['historyPending:v2:repair-failure'].commentId,
+    'batch-a:7'
+  );
 });
 
 test('skips history writes for every non-success result', async () => {
