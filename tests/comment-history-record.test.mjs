@@ -62,6 +62,54 @@ test('builds stable comment and anchor records with local archive metadata', () 
   }]);
 });
 
+test('adds non-sensitive Assignment metadata when captured by a batch task', () => {
+  const record = buildCommentHistoryRecord({
+    batchId: 'batch-a',
+    urlIndex: 7,
+    history: {
+      ...captured,
+      profileId: 'profile-a',
+      profileDisplayName: 'Operator A',
+      promotionSiteId: 'site-a',
+      promotionSiteName: 'Promo A',
+      promotionSiteUrl: 'https://promo-a.test/',
+      assignmentPairId: 'pair-a',
+      assignmentSource: 'explicit',
+      configRevision: 7,
+      attemptCount: 1,
+      errorCode: null,
+      skipReason: null
+    }
+  }, { now: 1721000000100 });
+
+  assert.deepEqual({
+    profileId: record.comment.profileId,
+    profileDisplayName: record.comment.profileDisplayName,
+    promotionSiteId: record.comment.promotionSiteId,
+    promotionSiteName: record.comment.promotionSiteName,
+    promotionSiteUrl: record.comment.promotionSiteUrl,
+    assignmentPairId: record.comment.assignmentPairId,
+    assignmentSource: record.comment.assignmentSource,
+    configRevision: record.comment.configRevision,
+    attemptCount: record.comment.attemptCount,
+    errorCode: record.comment.errorCode,
+    skipReason: record.comment.skipReason
+  }, {
+    profileId: 'profile-a',
+    profileDisplayName: 'Operator A',
+    promotionSiteId: 'site-a',
+    promotionSiteName: 'Promo A',
+    promotionSiteUrl: 'https://promo-a.test/',
+    assignmentPairId: 'pair-a',
+    assignmentSource: 'explicit',
+    configRevision: 7,
+    attemptCount: 1,
+    errorCode: null,
+    skipReason: null
+  });
+  assert.doesNotMatch(JSON.stringify(record.comment), /alice@example|real name|site description|password/i);
+});
+
 test('rejects comments with invalid required fields', () => {
   const cases = [
     [{ batchId: '', urlIndex: 7, history: captured }, /batchId/],

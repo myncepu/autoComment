@@ -134,6 +134,8 @@ test('normalizes list filters, cursor, and limit before calling the service', as
       dateTo: 200,
       targetDomain: ' Target.Test ',
       promotedDomain: 'PROMO.TEST',
+      profileId: ' profile-a ',
+      promotionSiteId: ' site-a ',
       anchorTextPrefix: '  Alpha ',
       hrefDomain: ' LINKS.TEST ',
       ignored: 'do not forward'
@@ -149,6 +151,8 @@ test('normalizes list filters, cursor, and limit before calling the service', as
     to: 200,
     targetDomain: 'target.test',
     promotedDomain: 'promo.test',
+    profileId: 'profile-a',
+    promotionSiteId: 'site-a',
     anchorTextPrefix: 'alpha',
     hrefDomain: 'links.test',
     cursor: { submittedAt: 123, id: 'batch-a:7' },

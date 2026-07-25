@@ -17,6 +17,8 @@ function makeBundle({
   submittedAt = 1721000000000,
   targetDomain = 'target.test',
   promotedDomain = 'promo.test',
+  profileId,
+  promotionSiteId,
   updatedAt = submittedAt + 1,
   anchors = []
 } = {}) {
@@ -37,7 +39,9 @@ function makeBundle({
       submitStatus: 'submitted',
       source: 'live',
       createdAt: submittedAt,
-      updatedAt
+      updatedAt,
+      ...(profileId ? { profileId } : {}),
+      ...(promotionSiteId ? { promotionSiteId } : {})
     },
     anchors: anchors.map((anchor, position) => ({
       id: `${id}:${position}`,
@@ -149,7 +153,7 @@ test('upgrades version 1 without recreating stores or losing records', async (t)
   const database = await openDatabase(indexedDBImpl, dbName);
   t.after(() => database.close());
 
-  assert.equal(database.version, 2);
+  assert.equal(database.version, 3);
   assert.deepEqual([...database.objectStoreNames], [
     'archive_events',
     'comment_anchors',
@@ -162,13 +166,13 @@ test('upgrades version 1 without recreating stores or losing records', async (t)
   assert.equal((await repo.getRecord('batch-upgrade:1')).comment.commentText, 'preserved');
 });
 
-test('creates the version 2 stores while preserving version 1 indexes', async (t) => {
+test('creates the version 3 stores and assignment indexes while preserving prior indexes', async (t) => {
   const { repo, indexedDBImpl, dbName } = await openRepo(t);
   repo.close();
 
   const db = await openDatabase(indexedDBImpl, dbName);
   t.after(() => db.close());
-  assert.equal(db.version, 2);
+  assert.equal(db.version, 3);
   assert.deepEqual([...db.objectStoreNames], [
     'archive_events',
     'comment_anchors',
@@ -185,8 +189,10 @@ test('creates the version 2 stores while preserving version 1 indexes', async (t
   assert.deepEqual([...comments.indexNames], [
     'by_archive_month',
     'by_batch_task',
+    'by_profile_submitted_at',
     'by_promoted_domain_submitted_at',
     'by_promoted_domain',
+    'by_promotion_site_submitted_at',
     'by_submitted_at',
     'by_submitted_at_id',
     'by_target_domain_submitted_at',
@@ -198,6 +204,44 @@ test('creates the version 2 stores while preserving version 1 indexes', async (t
     'by_href_domain'
   ]);
   assert.equal(comments.index('by_batch_task').unique, true);
+});
+
+test('filters history by Profile and Promotion Site and lists recent successful targets', async (t) => {
+  const { repo } = await openRepo(t);
+  await repo.upsertRecord(makeBundle({
+    id: 'batch-a:0',
+    submittedAt: 1_000,
+    targetDomain: 'first.test',
+    profileId: 'profile-a',
+    promotionSiteId: 'site-a'
+  }));
+  await repo.upsertRecord(makeBundle({
+    id: 'batch-a:1',
+    submittedAt: 2_000,
+    targetDomain: 'second.test',
+    profileId: 'profile-b',
+    promotionSiteId: 'site-a'
+  }));
+  await repo.upsertRecord(makeBundle({
+    id: 'batch-a:2',
+    submittedAt: 3_000,
+    targetDomain: 'third.test',
+    profileId: 'profile-a',
+    promotionSiteId: 'site-b'
+  }));
+
+  assert.deepEqual(
+    (await repo.queryRecords({ profileId: 'profile-a' })).records.map(({ id }) => id),
+    ['batch-a:2', 'batch-a:0']
+  );
+  assert.deepEqual(
+    (await repo.queryRecords({ promotionSiteId: 'site-a' })).records.map(({ id }) => id),
+    ['batch-a:1', 'batch-a:0']
+  );
+  assert.deepEqual(await repo.listRecentSuccessfulTargetUrls({ since: 2_000 }), [
+    'https://third.test/post',
+    'https://second.test/post'
+  ]);
 });
 
 test('sync outbox schedules due mutations per vault and completes acknowledgements', async (t) => {

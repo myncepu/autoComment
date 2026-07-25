@@ -1612,3 +1612,21 @@ test('delegates confirmed cleanup to one atomic repository operation without ser
     confirmedAt: EXPORT_NOW
   }]);
 });
+
+test('delegates the recent successful target URL cutoff to the repository', async () => {
+  const calls = [];
+  const service = createCommentHistoryService({
+    repository: {
+      async listRecentSuccessfulTargetUrls(input) {
+        calls.push(input);
+        return ['https://target.test/post'];
+      }
+    },
+    storageLocal: createStorage()
+  });
+
+  assert.deepEqual(await service.listRecentSuccessfulTargetUrls({ since: 123 }), [
+    'https://target.test/post'
+  ]);
+  assert.deepEqual(calls, [{ since: 123 }]);
+});
