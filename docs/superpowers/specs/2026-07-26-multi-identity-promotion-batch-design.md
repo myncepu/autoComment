@@ -167,6 +167,7 @@ Profile 密码可为空。如果目标页面存在必填密码字段，而当前
 {
   autoCommentDomainConfig: {
     version: 2,
+    revision: 0,
     profiles: [],
     promotionSites: [],
     assignmentPolicy: {}
@@ -175,7 +176,8 @@ Profile 密码可为空。如果目标页面存在必填密码字段，而当前
 ```
 
 普通仓库 API 只读写和返回上述非敏感文档。它不接受额外属性，保存前执行严格 schema
-校验和深拷贝，避免调用者把密码混入领域对象。
+校验和深拷贝，避免调用者把密码混入领域对象。每次成功写入把 `revision` 精确增加 1；
+批次计划用该值判断预览确认后配置是否发生变化。
 
 ### Profile 密钥库
 
