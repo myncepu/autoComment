@@ -611,6 +611,76 @@ test('remote change page aborts every record and cursor when a later change is i
   assert.equal(await repo.getSyncMeta('serverCursor:vault-a'), undefined);
 });
 
+test('bootstrap pages atomically apply entities and advance only signed progress', async (t) => {
+  const { repo } = await openRepo(t);
+  const deleted = makeBundle({
+    id: 'bootstrap-deleted:1',
+    submittedAt: 50
+  });
+  await repo.upsertRecord(deleted);
+  const first = makeBundle({
+    id: 'bootstrap:1',
+    submittedAt: 100
+  });
+
+  await repo.applyBootstrapPageAtomic({
+    vaultId: 'vault-a',
+    comments: [first],
+    tombstones: [{ recordId: deleted.comment.id, deletedAt: 120 }],
+    nextCursor: 'signed-tombstone-phase',
+    serverCursor: 42,
+    hasMore: true
+  });
+
+  assert.deepEqual(await repo.getRecord(first.comment.id), first);
+  assert.equal(await repo.getRecord(deleted.comment.id), null);
+  assert.deepEqual(await repo.getSyncMeta('bootstrapState:vault-a'), {
+    cursor: 'signed-tombstone-phase',
+    serverCursor: 42,
+    done: false
+  });
+  assert.equal(await repo.getSyncMeta('serverCursor:vault-a'), undefined);
+
+  await repo.applyBootstrapPageAtomic({
+    vaultId: 'vault-a',
+    comments: [],
+    tombstones: [{ recordId: 'bootstrap-deleted:2', deletedAt: 130 }],
+    nextCursor: null,
+    serverCursor: 42,
+    hasMore: false
+  });
+  assert.deepEqual(await repo.getSyncMeta('bootstrapState:vault-a'), {
+    cursor: null,
+    serverCursor: 42,
+    done: true
+  });
+  assert.equal(await repo.getSyncMeta('serverCursor:vault-a'), 42);
+});
+
+test('invalid bootstrap entities roll back the page and signed progress', async (t) => {
+  const { repo } = await openRepo(t);
+  const valid = makeBundle({
+    id: 'bootstrap-valid:1',
+    submittedAt: 100
+  });
+
+  await assert.rejects(repo.applyBootstrapPageAtomic({
+    vaultId: 'vault-a',
+    comments: [
+      valid,
+      { comment: { id: '' }, anchors: [] }
+    ],
+    tombstones: [],
+    nextCursor: 'signed-comments-phase',
+    serverCursor: 42,
+    hasMore: true
+  }));
+
+  assert.equal(await repo.getRecord(valid.comment.id), null);
+  assert.equal(await repo.getSyncMeta('bootstrapState:vault-a'), undefined);
+  assert.equal(await repo.getSyncMeta('serverCursor:vault-a'), undefined);
+});
+
 test('remote changes preserve fresher comments and apply tombstones without an outbox row', async (t) => {
   const { repo } = await openRepo(t);
   const local = makeBundle({
@@ -668,6 +738,26 @@ test('remote changes preserve fresher comments and apply tombstones without an o
   });
   assert.equal(await repo.getRecord(local.comment.id), null);
   assert.equal(await repo.getSyncMeta('serverCursor:vault-a'), 11);
+});
+
+test('confirmed cloud history deletion removes the local copy without skipping pull changes', async (t) => {
+  const { repo } = await openRepo(t);
+  const record = makeBundle({
+    id: 'cloud-delete:1',
+    submittedAt: 100,
+    anchors: [{ anchorText: 'Delete', hrefDomain: 'delete.test' }]
+  });
+  await repo.upsertRecord(record);
+  await repo.setSyncMeta('serverCursor:vault-a', 4);
+
+  await repo.applyCloudHistoryDeletion({
+    vaultId: 'vault-a',
+    recordId: record.comment.id,
+    serverSeq: 9
+  });
+
+  assert.equal(await repo.getRecord(record.comment.id), null);
+  assert.equal(await repo.getSyncMeta('serverCursor:vault-a'), 4);
 });
 
 test('synced cache eviction requires matching vault revision and no outbox mutation', async (t) => {
