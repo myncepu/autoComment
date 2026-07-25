@@ -10,7 +10,7 @@
   "d1_databases": [{
     "binding": "DB",
     "database_name": "auto-comment-sync",
-    "database_id": "11111111-1111-1111-1111-111111111111",
+    "database_id": "b182a08b-84ba-49ef-9129-a0354bc7c770",
     "migrations_dir": "migrations"
   }],
   "observability": {
