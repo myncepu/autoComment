@@ -22,6 +22,11 @@ import { createDomainConfigRepository } from './lib/domain-config-repository.mjs
 import { createProfileSecretRepository } from './lib/profile-secret-repository.mjs';
 import { migrateLegacyDomainConfig } from './lib/domain-config-migration.mjs';
 import {
+  createBatchSecretAwareRuntimeController,
+  createBatchSecretVaultStore,
+  installBatchSecretVaultListener
+} from './lib/batch-secret-vault.mjs';
+import {
   createBatchSubmitContextStore,
   installBatchSubmitContextListener
 } from './lib/batch-submit-context-store.mjs';
@@ -54,6 +59,11 @@ const cloudSyncService = createCloudSyncRuntime({
 });
 const domainConfigRepository = createDomainConfigRepository(chrome.storage.local);
 const profileSecretRepository = createProfileSecretRepository(chrome.storage.local);
+const batchSecretVaultStore = createBatchSecretVaultStore(chrome.storage.local);
+const secretAwareBatchRuntimeController = createBatchSecretAwareRuntimeController(
+  batchRuntimeController,
+  batchSecretVaultStore
+);
 const domainConfigReady = (async () => {
   await migratePasswordToLocal(chrome.storage);
   return migrateLegacyDomainConfig({
@@ -71,7 +81,26 @@ const commentHistoryService = createCommentHistoryService({
 
 installCommentHistoryMessageListener(chrome, commentHistoryService);
 void domainConfigReady.then(() => {
-  installBatchRuntimeController(chrome, batchRuntimeController);
+  installBatchRuntimeController(chrome, secretAwareBatchRuntimeController);
+  installBatchSecretVaultListener(chrome, {
+    vaultStore: batchSecretVaultStore,
+    checkpointReader: async () => {
+      const response = await batchRuntimeController.handleMessage({
+        type: 'BATCH_SESSION_GET'
+      });
+      return response.ok ? response.checkpoint : null;
+    }
+  });
+  void batchRuntimeController.handleMessage({
+    type: 'BATCH_SESSION_GET'
+  }).then((response) => {
+    if (response.ok) {
+      return batchSecretVaultStore.cleanupOrphans(response.checkpoint);
+    }
+    return undefined;
+  }).catch(() => {
+    console.warn('[background] Batch secret cleanup deferred');
+  });
   installCloudSyncMessageListener(chrome, cloudSyncService);
   if (typeof chrome.storage?.onChanged?.addListener === 'function') {
     void installCloudSyncBackground(chrome, cloudSyncService);
