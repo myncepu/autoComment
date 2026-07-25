@@ -3,6 +3,12 @@ import {
   normalizeSyncMutation
 } from '../../lib/cloud-sync-protocol.mjs';
 import {
+  applyDomainMutation,
+  domainMutationStatementCount,
+  type DomainEntityType,
+  type DomainMutation
+} from './domain-config';
+import {
   type AuthenticatedVault
 } from './auth';
 import { fail, json } from './http';
@@ -66,7 +72,31 @@ const COMMENT_KEYS = [
   'source',
   'createdAt',
   'updatedAt',
-  'historyRevision'
+  'historyRevision',
+  'profileId',
+  'profileDisplayName',
+  'promotionSiteId',
+  'promotionSiteName',
+  'promotionSiteUrl',
+  'assignmentPairId',
+  'assignmentSource',
+  'configRevision',
+  'attemptCount',
+  'errorCode',
+  'skipReason'
+] as const;
+const COMMENT_ASSIGNMENT_KEYS = [
+  'profileId',
+  'profileDisplayName',
+  'promotionSiteId',
+  'promotionSiteName',
+  'promotionSiteUrl',
+  'assignmentPairId',
+  'assignmentSource',
+  'configRevision',
+  'attemptCount',
+  'errorCode',
+  'skipReason'
 ] as const;
 
 const ANCHOR_KEYS = [
@@ -114,6 +144,17 @@ interface CommentRecord {
   createdAt: number;
   updatedAt: number;
   revision: CommentRevision;
+  profileId: string | null;
+  profileDisplayName: string | null;
+  promotionSiteId: string | null;
+  promotionSiteName: string | null;
+  promotionSiteUrl: string | null;
+  assignmentPairId: string | null;
+  assignmentSource: string | null;
+  configRevision: number | null;
+  attemptCount: number | null;
+  errorCode: string | null;
+  skipReason: string | null;
 }
 
 interface CommentAnchor {
@@ -164,12 +205,14 @@ export interface SettingMutation {
 type IncomingMutation =
   | CommentMutation
   | CommentDeleteMutation
-  | SettingMutation;
+  | SettingMutation
+  | DomainMutation;
 
 type ApplicableMutation =
   | CommentMutation
   | CommentDeleteMutation
-  | SettingMutation;
+  | SettingMutation
+  | DomainMutation;
 
 export type MutationReceipt =
   | {
@@ -213,6 +256,17 @@ type PreparedMutation =
         errorCode: string;
       };
     };
+
+function isDomainMutation(
+  mutation: ApplicableMutation
+): mutation is DomainMutation {
+  return [
+    'profile',
+    'promotion_site',
+    'assignment_pair',
+    'assignment_policy'
+  ].includes(mutation.entityType);
+}
 
 function invalid(code: string): never {
   throw new MutationValidationError(code);
@@ -384,6 +438,30 @@ function parseComment(
   }
   const source = comment.source;
   if (source !== 'legacy' && source !== 'live') invalid('INVALID_COMMENT');
+  const hasAssignment = COMMENT_ASSIGNMENT_KEYS.some(
+    (key) => Object.hasOwn(comment, key)
+  );
+  if (
+    hasAssignment
+    && COMMENT_ASSIGNMENT_KEYS.some((key) => !Object.hasOwn(comment, key))
+  ) {
+    invalid('INVALID_COMMENT_ASSIGNMENT');
+  }
+  const assignmentString = (key: string, maximum = MAX_ID_LENGTH) => (
+    hasAssignment
+      ? stringValue(comment[key], 1, maximum, 'INVALID_COMMENT_ASSIGNMENT', true)
+      : null
+  );
+  const nullableAssignmentString = (key: string) => {
+    if (!hasAssignment || comment[key] === null) return null;
+    return stringValue(
+      comment[key],
+      1,
+      MAX_STATUS_LENGTH,
+      'INVALID_COMMENT_ASSIGNMENT',
+      true
+    );
+  };
 
   return {
     id,
@@ -440,6 +518,34 @@ function parseComment(
       true
     ),
     source,
+    profileId: assignmentString('profileId'),
+    profileDisplayName: assignmentString('profileDisplayName', 512),
+    promotionSiteId: assignmentString('promotionSiteId'),
+    promotionSiteName: assignmentString('promotionSiteName', 512),
+    promotionSiteUrl: assignmentString('promotionSiteUrl', MAX_URL_LENGTH),
+    assignmentPairId: assignmentString('assignmentPairId'),
+    assignmentSource: assignmentString(
+      'assignmentSource',
+      MAX_STATUS_LENGTH
+    ),
+    configRevision: hasAssignment
+      ? integerValue(
+          comment.configRevision,
+          0,
+          Number.MAX_SAFE_INTEGER,
+          'INVALID_COMMENT_ASSIGNMENT'
+        )
+      : null,
+    attemptCount: hasAssignment
+      ? integerValue(
+          comment.attemptCount,
+          0,
+          Number.MAX_SAFE_INTEGER,
+          'INVALID_COMMENT_ASSIGNMENT'
+        )
+      : null,
+    errorCode: nullableAssignmentString('errorCode'),
+    skipReason: nullableAssignmentString('skipReason'),
     createdAt: integerValue(
       comment.createdAt,
       0,
@@ -659,6 +765,50 @@ function parseMutation(input: unknown): IncomingMutation {
       createdAt
     };
   }
+  if ([
+    'profile',
+    'promotion_site',
+    'assignment_pair',
+    'assignment_policy'
+  ].includes(String(mutation.entityType))) {
+    const entityType = mutation.entityType as DomainEntityType;
+    const operation = mutation.operation;
+    if (operation !== 'upsert' && operation !== 'delete') {
+      invalid('INVALID_MUTATION_OPERATION');
+    }
+    const payload = exactObject(
+      mutation.payload,
+      operation === 'delete'
+        ? ['deletedAt']
+        : [entityType === 'promotion_site'
+            ? 'promotionSite'
+            : entityType === 'assignment_pair'
+              ? 'assignmentPair'
+              : entityType === 'assignment_policy'
+                ? 'assignmentPolicy'
+                : 'profile'],
+      'INVALID_MUTATION_PAYLOAD'
+    );
+    if (
+      new TextEncoder().encode(JSON.stringify(payload)).byteLength
+      > MAX_SETTING_VALUE_JSON_BYTES
+    ) {
+      invalid('DOMAIN_ENTITY_TOO_LARGE');
+    }
+    return {
+      mutationId,
+      entityType,
+      entityId,
+      operation,
+      payload,
+      createdAt: integerValue(
+        mutation.createdAt,
+        0,
+        Number.MAX_SAFE_INTEGER,
+        'INVALID_MUTATION_TIMESTAMP'
+      )
+    };
+  }
   if (mutation.entityType !== 'comment') {
     invalid('INVALID_ENTITY_TYPE');
   }
@@ -698,6 +848,9 @@ function mutationBatchStatementCount(
 ): number {
   if (mutation.entityType === 'comment') {
     return COMMENT_FIXED_BATCH_STATEMENTS + mutation.payload.anchors.length;
+  }
+  if (isDomainMutation(mutation)) {
+    return domainMutationStatementCount(mutation);
   }
   return mutation.entityType === 'setting'
     ? SETTING_BATCH_STATEMENTS
@@ -750,10 +903,14 @@ function commentUpsertStatement(
        comment_html, comment_text, submit_status, source, created_at, updated_at,
        revision_source_rank, revision_captured_at, revision_recorded_at,
        revision_sequence, revision_id, accepted_mutation_id, cloud_created_at,
-       cloud_updated_at
+       cloud_updated_at, profile_id, profile_display_name, promotion_site_id,
+       promotion_site_name, promotion_site_url, assignment_pair_id,
+       assignment_source, config_revision, attempt_count, error_code,
+       skip_reason
      )
      SELECT active_vault.vault_id, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-       ?, ?, ?, ?, ?, ?, ?, ?, ?
+       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
      FROM sync_vaults AS active_vault
      WHERE active_vault.vault_id = ?
        AND active_vault.deleted_at IS NULL
@@ -786,6 +943,17 @@ function commentUpsertStatement(
        revision_recorded_at = excluded.revision_recorded_at,
        revision_sequence = excluded.revision_sequence,
        revision_id = excluded.revision_id,
+       profile_id = excluded.profile_id,
+       profile_display_name = excluded.profile_display_name,
+       promotion_site_id = excluded.promotion_site_id,
+       promotion_site_name = excluded.promotion_site_name,
+       promotion_site_url = excluded.promotion_site_url,
+       assignment_pair_id = excluded.assignment_pair_id,
+       assignment_source = excluded.assignment_source,
+       config_revision = excluded.config_revision,
+       attempt_count = excluded.attempt_count,
+       error_code = excluded.error_code,
+       skip_reason = excluded.skip_reason,
        cloud_updated_at = excluded.cloud_updated_at
      WHERE
        excluded.revision_source_rank > comment_records.revision_source_rank
@@ -843,6 +1011,17 @@ function commentUpsertStatement(
     mutation.mutationId,
     now,
     now,
+    comment.profileId,
+    comment.profileDisplayName,
+    comment.promotionSiteId,
+    comment.promotionSiteName,
+    comment.promotionSiteUrl,
+    comment.assignmentPairId,
+    comment.assignmentSource,
+    comment.configRevision,
+    comment.attemptCount,
+    comment.errorCode,
+    comment.skipReason,
     vaultId,
     vaultId,
     mutation.mutationId,
@@ -1671,6 +1850,15 @@ export async function pushMutations(
     } else if (item.mutation.entityType === 'setting') {
       results.push(
         await applySettingMutation(
+          env,
+          vault.vaultId,
+          item.mutation,
+          Date.now()
+        )
+      );
+    } else if (isDomainMutation(item.mutation)) {
+      results.push(
+        await applyDomainMutation(
           env,
           vault.vaultId,
           item.mutation,

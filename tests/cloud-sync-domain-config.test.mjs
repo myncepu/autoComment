@@ -115,15 +115,27 @@ test('creates tombstones for removed profiles, sites, and pairs', () => {
     createMutationId: () => crypto.randomUUID()
   });
 
-  assert.deepEqual(mutations.slice(0, 3).map((mutation) => [
+  assert.deepEqual(mutations.map((mutation) => [
     mutation.entityType,
     mutation.entityId,
     mutation.operation,
     mutation.payload
   ]), [
+    [
+      'assignment_policy',
+      'default-assignment-policy',
+      'upsert',
+      {
+        assignmentPolicy: {
+          id: 'default-assignment-policy',
+          defaultPairId: null,
+          quotas: after.assignmentPolicy.quotas
+        }
+      }
+    ],
+    ['assignment_pair', 'pair-a', 'delete', { deletedAt: 900 }],
     ['profile', 'profile-a', 'delete', { deletedAt: 900 }],
-    ['promotion_site', 'site-a', 'delete', { deletedAt: 900 }],
-    ['assignment_pair', 'pair-a', 'delete', { deletedAt: 900 }]
+    ['promotion_site', 'site-a', 'delete', { deletedAt: 900 }]
   ]);
 });
 

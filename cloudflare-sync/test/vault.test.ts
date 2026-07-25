@@ -544,6 +544,21 @@ test('a completed delete prevents a previously authenticated touch from recreati
 test('requires exact vault confirmation and permanently clears every vault table', async () => {
   await seedVault();
   await seedVaultContents();
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO sync_profiles (
+         vault_id, entity_id, display_name, profile_name, email,
+         created_at, updated_at, accepted_mutation_id, server_updated_at,
+         server_seq
+       ) VALUES (?, 'profile-a', 'Profile A', 'Alice', 'alice@example.test',
+         1, 1, 'profile-mutation', 1, 1)`
+    ).bind(VALID_VAULT_ID),
+    env.DB.prepare(
+      `INSERT INTO domain_entity_tombstones (
+         vault_id, entity_type, entity_id, mutation_id, deleted_at, server_seq
+       ) VALUES (?, 'promotion_site', 'site-deleted', 'site-delete', 1, 2)`
+    ).bind(VALID_VAULT_ID)
+  ]);
 
   const mismatch = await vaultRequest('DELETE', {
     confirmation: 'BBBBBBBBBBBBBBBBBBBBBB'
@@ -570,6 +585,11 @@ test('requires exact vault confirmation and permanently clears every vault table
     'comment_records',
     'synced_settings',
     'comment_tombstones',
+    'sync_profiles',
+    'sync_promotion_sites',
+    'sync_assignment_pairs',
+    'sync_assignment_policy',
+    'domain_entity_tombstones',
     'sync_devices',
     'sync_changes',
     'sync_mutations'

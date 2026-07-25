@@ -156,3 +156,12 @@ export function boundedQueryInteger(
   }
   return boundedInteger(Number(values[0]), minimum, maximum, code);
 }
+
+export function protocolVersionFromQuery(url: URL): 1 | 2 {
+  const values = url.searchParams.getAll('protocolVersion');
+  if (values.length === 0) return 1;
+  if (values.length !== 1 || (values[0] !== '1' && values[0] !== '2')) {
+    fail('INVALID_REQUEST', 400);
+  }
+  return Number(values[0]) as 1 | 2;
+}

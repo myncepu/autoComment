@@ -29,6 +29,9 @@ interface CommentOptions {
   targetDomain?: string;
   promotedDomain?: string;
   anchors?: AnchorSeed[];
+  profileId?: string;
+  promotionSiteId?: string;
+  withAssignment?: boolean;
 }
 
 function commentMutation({
@@ -37,7 +40,10 @@ function commentMutation({
   submittedAt = 1_721_000_000_000,
   targetDomain = 'target.test',
   promotedDomain = 'promoted.test',
-  anchors = [{ text: 'Product', hrefDomain: 'docs.test' }]
+  anchors = [{ text: 'Product', hrefDomain: 'docs.test' }],
+  profileId = 'profile-a',
+  promotionSiteId = 'site-a',
+  withAssignment = false
 }: CommentOptions = {}) {
   return {
     mutationId,
@@ -59,6 +65,21 @@ function commentMutation({
         commentText: 'Product link',
         submitStatus: 'submitted',
         source: 'live',
+        ...(withAssignment
+          ? {
+              profileId,
+              profileDisplayName: `Display ${profileId}`,
+              promotionSiteId,
+              promotionSiteName: `Name ${promotionSiteId}`,
+              promotionSiteUrl: `https://${promotionSiteId}.example.test/`,
+              assignmentPairId: `pair-${profileId}-${promotionSiteId}`,
+              assignmentSource: 'explicit',
+              configRevision: 2,
+              attemptCount: 1,
+              errorCode: null,
+              skipReason: null
+            }
+          : {}),
         createdAt: 1_721_000_000_001,
         updatedAt: 1_721_000_000_002,
         historyRevision: {
@@ -164,6 +185,67 @@ test('returns an authenticated bounded cloud history page from real D1 rows', as
       }
     ]
   });
+});
+
+test('stores and filters non-sensitive Assignment history fields', async () => {
+  await pushComment({
+    recordId: 'assigned:a',
+    mutationId: 'assigned:a',
+    submittedAt: 1_721_000_000_003,
+    withAssignment: true
+  });
+  await pushComment({
+    recordId: 'assigned:b',
+    mutationId: 'assigned:b',
+    submittedAt: 1_721_000_000_002,
+    profileId: 'profile-b',
+    withAssignment: true
+  });
+  await pushComment({
+    recordId: 'legacy:no-assignment',
+    mutationId: 'legacy:no-assignment',
+    submittedAt: 1_721_000_000_001
+  });
+
+  const response = await SELF.fetch(
+    'https://worker.test/v1/history?profileId=profile-a&promotionSiteId=site-a&limit=50',
+    { headers: authHeaders() }
+  );
+  expect(response.status).toBe(200);
+  const body = await response.json<{
+    records: Array<{ comment: Record<string, unknown> }>;
+  }>();
+  expect(body.records).toHaveLength(1);
+  expect(body.records[0]?.comment).toMatchObject({
+    id: 'assigned:a',
+    profileId: 'profile-a',
+    profileDisplayName: 'Display profile-a',
+    promotionSiteId: 'site-a',
+    promotionSiteName: 'Name site-a',
+    promotionSiteUrl: 'https://site-a.example.test/',
+    assignmentSource: 'explicit',
+    configRevision: 2,
+    attemptCount: 1,
+    errorCode: null,
+    skipReason: null
+  });
+  expect(JSON.stringify(body)).not.toMatch(/alice@example|About Site|password/iu);
+
+  const v1Pull = await SELF.fetch(
+    'https://worker.test/v1/sync/pull?cursor=0&limit=100&deviceId=history-v1',
+    { headers: authHeaders() }
+  ).then((result) => result.json<{
+    changes: Array<{ record?: { comment: Record<string, unknown> } }>;
+  }>());
+  expect(v1Pull.changes[0]?.record?.comment).not.toHaveProperty('profileId');
+
+  const v2Pull = await SELF.fetch(
+    'https://worker.test/v1/sync/pull?cursor=0&limit=100&deviceId=history-v2&protocolVersion=2',
+    { headers: authHeaders() }
+  ).then((result) => result.json<{
+    changes: Array<{ record?: { comment: Record<string, unknown> } }>;
+  }>());
+  expect(v2Pull.changes[0]?.record?.comment).toHaveProperty('profileId');
 });
 
 test('permanently deletes a real D1 comment through the history route', async () => {

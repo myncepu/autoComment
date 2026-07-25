@@ -21,6 +21,8 @@ const MAX_DELETE_BODY_BYTES = 4_096;
 const HISTORY_QUERY_NAMES = [
   'targetDomain',
   'promotedDomain',
+  'profileId',
+  'promotionSiteId',
   'anchorTextPrefix',
   'hrefDomain',
   'from',
@@ -38,6 +40,8 @@ interface HistoryCursor {
 interface HistoryQuery {
   targetDomain?: string;
   promotedDomain?: string;
+  profileId?: string;
+  promotionSiteId?: string;
   anchorTextPrefix?: string;
   hrefDomain?: string;
   from?: number;
@@ -66,6 +70,17 @@ interface StoredHistoryRow {
   revision_recorded_at: number;
   revision_sequence: number;
   revision_id: string;
+  profile_id: string | null;
+  profile_display_name: string | null;
+  promotion_site_id: string | null;
+  promotion_site_name: string | null;
+  promotion_site_url: string | null;
+  assignment_pair_id: string | null;
+  assignment_source: string | null;
+  config_revision: number | null;
+  attempt_count: number | null;
+  error_code: string | null;
+  skip_reason: string | null;
   anchors_json: string;
 }
 
@@ -146,6 +161,12 @@ function parseHistoryQuery(url: URL): HistoryQuery {
   const promotedDomain = normalizedDomain(
     optionalQueryString(url, 'promotedDomain', MAX_DOMAIN_LENGTH)
   );
+  const profileId = optionalQueryString(url, 'profileId', MAX_ID_LENGTH);
+  const promotionSiteId = optionalQueryString(
+    url,
+    'promotionSiteId',
+    MAX_ID_LENGTH
+  );
   const hrefDomain = normalizedDomain(
     optionalQueryString(url, 'hrefDomain', MAX_DOMAIN_LENGTH)
   );
@@ -192,6 +213,8 @@ function parseHistoryQuery(url: URL): HistoryQuery {
   return {
     ...(targetDomain === undefined ? {} : { targetDomain }),
     ...(promotedDomain === undefined ? {} : { promotedDomain }),
+    ...(profileId === undefined ? {} : { profileId }),
+    ...(promotionSiteId === undefined ? {} : { promotionSiteId }),
     ...(anchorTextPrefix === undefined ? {} : { anchorTextPrefix }),
     ...(hrefDomain === undefined ? {} : { hrefDomain }),
     ...(from === undefined ? {} : { from }),
@@ -237,6 +260,14 @@ async function readHistoryPage(
   if (query.promotedDomain !== undefined) {
     clauses.push('comment.promoted_domain = ?');
     bindings.push(query.promotedDomain);
+  }
+  if (query.profileId !== undefined) {
+    clauses.push('comment.profile_id = ?');
+    bindings.push(query.profileId);
+  }
+  if (query.promotionSiteId !== undefined) {
+    clauses.push('comment.promotion_site_id = ?');
+    bindings.push(query.promotionSiteId);
   }
   if (query.from !== undefined) {
     clauses.push('comment.submitted_at >= ?');
@@ -304,6 +335,11 @@ async function readHistoryPage(
        comment.source, comment.created_at, comment.updated_at,
        comment.revision_captured_at, comment.revision_recorded_at,
        comment.revision_sequence, comment.revision_id,
+       comment.profile_id, comment.profile_display_name,
+       comment.promotion_site_id, comment.promotion_site_name,
+       comment.promotion_site_url, comment.assignment_pair_id,
+       comment.assignment_source, comment.config_revision,
+       comment.attempt_count, comment.error_code, comment.skip_reason,
        (
          SELECT json_group_array(json(anchor_row.anchor_json))
          FROM (
@@ -361,6 +397,21 @@ function materializeHistoryRow(row: StoredHistoryRow): {
       source: row.source,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
+      ...(row.profile_id === null
+        ? {}
+        : {
+            profileId: row.profile_id,
+            profileDisplayName: row.profile_display_name,
+            promotionSiteId: row.promotion_site_id,
+            promotionSiteName: row.promotion_site_name,
+            promotionSiteUrl: row.promotion_site_url,
+            assignmentPairId: row.assignment_pair_id,
+            assignmentSource: row.assignment_source,
+            configRevision: row.config_revision,
+            attemptCount: row.attempt_count,
+            errorCode: row.error_code,
+            skipReason: row.skip_reason
+          }),
       historyRevision: {
         capturedAt: row.revision_captured_at,
         recordedAt: row.revision_recorded_at,

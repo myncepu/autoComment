@@ -7,6 +7,7 @@ import { fail, json } from './http';
 import {
   boundedQueryInteger,
   boundedQueryString,
+  protocolVersionFromQuery,
   rejectUnknownQuery
 } from './validation';
 import { CLOUD_SYNC_SETTING_KEYS } from '../../lib/cloud-sync-protocol.mjs';
@@ -40,6 +41,17 @@ interface StoredCommentRow {
   revision_recorded_at: number | null;
   revision_sequence: number | null;
   revision_id: string | null;
+  profile_id: string | null;
+  profile_display_name: string | null;
+  promotion_site_id: string | null;
+  promotion_site_name: string | null;
+  promotion_site_url: string | null;
+  assignment_pair_id: string | null;
+  assignment_source: string | null;
+  config_revision: number | null;
+  attempt_count: number | null;
+  error_code: string | null;
+  skip_reason: string | null;
   anchors_json: string | null;
 }
 
@@ -51,6 +63,7 @@ interface PullRow extends StoredCommentRow {
   operation: string | null;
   setting_value_json: string | null;
   tombstone_deleted_at: number | null;
+  domain_payload_json: string | null;
 }
 
 interface BootstrapCommentCursor {
@@ -71,9 +84,20 @@ interface BootstrapTombstoneCursor {
   tombstoneId: string;
 }
 
+interface BootstrapDomainCursor {
+  serverCursor: number;
+  serverNow: number;
+  phase: 'domains';
+  domainKey: string;
+  submittedAt: null;
+  id: null;
+  tombstoneId: null;
+}
+
 type BootstrapCursor =
   | BootstrapCommentCursor
-  | BootstrapTombstoneCursor;
+  | BootstrapTombstoneCursor
+  | BootstrapDomainCursor;
 
 interface SettingRow {
   setting_key: string;
@@ -83,6 +107,14 @@ interface SettingRow {
 interface TombstoneRow {
   record_id: string;
   deleted_at: number;
+}
+
+interface DomainBootstrapRow {
+  sort_key: string;
+  entity_type: string;
+  entity_id: string;
+  operation: 'upsert' | 'delete';
+  payload_json: string;
 }
 
 interface StoredAnchor {
@@ -98,7 +130,14 @@ interface StoredAnchor {
 
 export interface MaterializedChange {
   serverSeq: number;
-  entityType: 'comment' | 'comment_delete' | 'setting';
+  entityType:
+    | 'comment'
+    | 'comment_delete'
+    | 'setting'
+    | 'profile'
+    | 'promotion_site'
+    | 'assignment_pair'
+    | 'assignment_policy';
   entityId: string;
   operation: 'upsert' | 'delete';
   value?: unknown;
@@ -108,6 +147,7 @@ export interface MaterializedChange {
   };
   recordId?: string;
   deletedAt?: number;
+  payload?: Record<string, unknown>;
 }
 
 interface CommentBundle {
@@ -149,7 +189,10 @@ function tombstoneChange(
   };
 }
 
-function materializeComment(row: StoredCommentRow): CommentBundle {
+function materializeComment(
+  row: StoredCommentRow,
+  includeAssignment = true
+): CommentBundle {
   const anchors = parseStoredJson(row.anchors_json);
   if (!Array.isArray(anchors)) fail('INTERNAL_ERROR', 500, true);
 
@@ -170,6 +213,21 @@ function materializeComment(row: StoredCommentRow): CommentBundle {
       source: requiredString(row.source),
       createdAt: requiredNumber(row.created_at),
       updatedAt: requiredNumber(row.updated_at),
+      ...(includeAssignment && row.profile_id !== null
+        ? {
+            profileId: row.profile_id,
+            profileDisplayName: requiredString(row.profile_display_name),
+            promotionSiteId: requiredString(row.promotion_site_id),
+            promotionSiteName: requiredString(row.promotion_site_name),
+            promotionSiteUrl: requiredString(row.promotion_site_url),
+            assignmentPairId: requiredString(row.assignment_pair_id),
+            assignmentSource: requiredString(row.assignment_source),
+            configRevision: requiredNumber(row.config_revision),
+            attemptCount: requiredNumber(row.attempt_count),
+            errorCode: row.error_code,
+            skipReason: row.skip_reason
+          }
+        : {}),
       historyRevision: {
         capturedAt: requiredNumber(row.revision_captured_at),
         recordedAt: requiredNumber(row.revision_recorded_at),
@@ -181,10 +239,31 @@ function materializeComment(row: StoredCommentRow): CommentBundle {
   };
 }
 
-function materializeChange(row: PullRow): MaterializedChange {
+function materializeChange(
+  row: PullRow,
+  protocolVersion: 1 | 2
+): MaterializedChange {
   const serverSeq = requiredNumber(row.server_seq);
   const entityId = requiredString(row.entity_id);
 
+  if ([
+    'profile',
+    'promotion_site',
+    'assignment_pair',
+    'assignment_policy'
+  ].includes(requiredString(row.entity_type))) {
+    const payload = parseStoredJson(row.domain_payload_json);
+    if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+      fail('INTERNAL_ERROR', 500, true);
+    }
+    return {
+      serverSeq,
+      entityType: row.entity_type as MaterializedChange['entityType'],
+      entityId,
+      operation: row.operation as 'upsert' | 'delete',
+      payload: payload as Record<string, unknown>
+    };
+  }
   if (row.operation === 'delete') {
     return tombstoneChange(row, serverSeq, entityId);
   }
@@ -215,7 +294,7 @@ function materializeChange(row: PullRow): MaterializedChange {
     entityType: 'comment',
     entityId,
     operation: 'upsert',
-    record: materializeComment(row)
+    record: materializeComment(row, protocolVersion >= 2)
   };
 }
 
@@ -269,8 +348,23 @@ async function bootstrapSigningKey(env: Env): Promise<CryptoKey> {
 
 function bootstrapCursorPayload(
   vaultId: string,
-  cursor: BootstrapCursor
+  cursor: BootstrapCursor,
+  protocolVersion: 1 | 2
 ): Uint8Array {
+  if (protocolVersion === 2) {
+    return new TextEncoder().encode(JSON.stringify({
+      v: 3,
+      q: 2,
+      u: vaultId,
+      s: cursor.serverCursor,
+      n: cursor.serverNow,
+      p: cursor.phase,
+      t: cursor.submittedAt,
+      i: cursor.id,
+      r: cursor.tombstoneId,
+      d: cursor.phase === 'domains' ? cursor.domainKey : null
+    }));
+  }
   return new TextEncoder().encode(JSON.stringify({
     v: 2,
     u: vaultId,
@@ -286,9 +380,10 @@ function bootstrapCursorPayload(
 async function encodeBootstrapCursor(
   key: CryptoKey,
   vaultId: string,
-  cursor: BootstrapCursor
+  cursor: BootstrapCursor,
+  protocolVersion: 1 | 2
 ): Promise<string> {
-  const payload = bootstrapCursorPayload(vaultId, cursor);
+  const payload = bootstrapCursorPayload(vaultId, cursor, protocolVersion);
   const signature = await crypto.subtle.sign('HMAC', key, payload);
   return `${encodeBase64Url(payload)}.${encodeBase64Url(
     new Uint8Array(signature)
@@ -298,7 +393,8 @@ async function encodeBootstrapCursor(
 async function parseBootstrapCursor(
   value: string,
   key: CryptoKey,
-  vaultId: string
+  vaultId: string,
+  protocolVersion: 1 | 2
 ): Promise<BootstrapCursor> {
   const parts = value.split('.');
   if (parts.length !== 2) fail('INVALID_REQUEST', 400);
@@ -335,6 +431,88 @@ async function parseBootstrapCursor(
   }
   const cursor = parsed as Record<string, unknown>;
   const keys = Object.keys(cursor);
+  if (protocolVersion === 2) {
+    if (
+      keys.length !== 10
+      || keys.some((keyName) => ![
+        'v', 'q', 'u', 's', 'n', 'p', 't', 'i', 'r', 'd'
+      ].includes(keyName))
+      || cursor.v !== 3
+      || cursor.q !== 2
+      || cursor.u !== vaultId
+      || !Number.isSafeInteger(cursor.s)
+      || (cursor.s as number) < 0
+      || !Number.isSafeInteger(cursor.n)
+      || (cursor.n as number) < 0
+      || !['domains', 'comments', 'tombstones'].includes(
+        String(cursor.p)
+      )
+    ) {
+      fail('INVALID_REQUEST', 400);
+    }
+    const common = {
+      serverCursor: cursor.s as number,
+      serverNow: cursor.n as number
+    };
+    if (cursor.p === 'domains') {
+      if (
+        cursor.t !== null
+        || cursor.i !== null
+        || cursor.r !== null
+        || typeof cursor.d !== 'string'
+        || cursor.d.length < 1
+        || cursor.d.length > 1_024
+      ) {
+        fail('INVALID_REQUEST', 400);
+      }
+      return {
+        ...common,
+        phase: 'domains',
+        domainKey: cursor.d,
+        submittedAt: null,
+        id: null,
+        tombstoneId: null
+      };
+    }
+    if (cursor.d !== null) fail('INVALID_REQUEST', 400);
+    if (cursor.p === 'comments') {
+      if (
+        !Number.isSafeInteger(cursor.t)
+        || (cursor.t as number) < 0
+        || typeof cursor.i !== 'string'
+        || cursor.i.length < 1
+        || cursor.i.length > 512
+        || cursor.i.trim() !== cursor.i
+        || cursor.r !== null
+      ) {
+        fail('INVALID_REQUEST', 400);
+      }
+      return {
+        ...common,
+        phase: 'comments',
+        submittedAt: cursor.t as number,
+        id: cursor.i,
+        tombstoneId: null
+      };
+    }
+    if (
+      cursor.t !== null
+      || cursor.i !== null
+      || typeof cursor.r !== 'string'
+      || cursor.r.length < 1
+      || cursor.r.length > 512
+      || cursor.r.trim() !== cursor.r
+    ) {
+      fail('INVALID_REQUEST', 400);
+    }
+    return {
+      ...common,
+      phase: 'tombstones',
+      submittedAt: null,
+      id: null,
+      tombstoneId: cursor.r
+    };
+  }
   if (
     keys.length !== 8 ||
     keys.some((key) => ![
@@ -440,6 +618,46 @@ async function readPullPage(
        page.server_seq, page.entity_type, page.entity_id, page.operation,
        setting.value_json AS setting_value_json,
        tombstone.deleted_at AS tombstone_deleted_at,
+       CASE
+         WHEN page.entity_type = 'profile' AND page.operation = 'upsert'
+           THEN json_object('profile', json_object(
+             'id', profile.entity_id,
+             'displayName', profile.display_name,
+             'name', profile.profile_name,
+             'email', profile.email,
+             'createdAt', profile.created_at,
+             'updatedAt', profile.updated_at
+           ))
+         WHEN page.entity_type = 'promotion_site' AND page.operation = 'upsert'
+           THEN json_object('promotionSite', json_object(
+             'id', site.entity_id,
+             'name', site.site_name,
+             'url', site.site_url,
+             'content', site.content,
+             'enabled', json(CASE WHEN site.enabled = 1 THEN 'true' ELSE 'false' END),
+             'createdAt', site.created_at,
+             'updatedAt', site.updated_at
+           ))
+         WHEN page.entity_type = 'assignment_pair' AND page.operation = 'upsert'
+           THEN json_object('assignmentPair', json_object(
+             'id', pair.entity_id,
+             'profileId', pair.profile_id,
+             'promotionSiteId', pair.promotion_site_id,
+             'weight', pair.weight,
+             'enabled', json(CASE WHEN pair.enabled = 1 THEN 'true' ELSE 'false' END)
+           ))
+         WHEN page.entity_type = 'assignment_policy'
+           THEN json_object('assignmentPolicy', json_object(
+             'id', policy.entity_id,
+             'defaultPairId', policy.default_pair_id,
+             'quotas', json(policy.quotas_json)
+           ))
+         WHEN page.entity_type IN (
+           'profile', 'promotion_site', 'assignment_pair'
+         ) AND page.operation = 'delete'
+           THEN json_object('deletedAt', domain_tombstone.deleted_at)
+         ELSE NULL
+       END AS domain_payload_json,
        comment.record_id, comment.batch_id, comment.url_index,
        comment.submitted_at, comment.archive_month,
        comment.target_page_url, comment.target_domain,
@@ -448,6 +666,11 @@ async function readPullPage(
        comment.source, comment.created_at, comment.updated_at,
        comment.revision_captured_at, comment.revision_recorded_at,
        comment.revision_sequence, comment.revision_id,
+       comment.profile_id, comment.profile_display_name,
+       comment.promotion_site_id, comment.promotion_site_name,
+       comment.promotion_site_url, comment.assignment_pair_id,
+       comment.assignment_source, comment.config_revision,
+       comment.attempt_count, comment.error_code, comment.skip_reason,
        CASE WHEN page.entity_type = 'comment' THEN (
          SELECT json_group_array(json(anchor_row.anchor_json))
          FROM (
@@ -481,6 +704,26 @@ async function readPullPage(
      LEFT JOIN comment_tombstones AS tombstone
        ON tombstone.vault_id = ?
       AND tombstone.record_id = page.entity_id
+     LEFT JOIN sync_profiles AS profile
+       ON profile.vault_id = ?
+      AND profile.entity_id = page.entity_id
+      AND page.entity_type = 'profile'
+     LEFT JOIN sync_promotion_sites AS site
+       ON site.vault_id = ?
+      AND site.entity_id = page.entity_id
+      AND page.entity_type = 'promotion_site'
+     LEFT JOIN sync_assignment_pairs AS pair
+       ON pair.vault_id = ?
+      AND pair.entity_id = page.entity_id
+      AND page.entity_type = 'assignment_pair'
+     LEFT JOIN sync_assignment_policy AS policy
+       ON policy.vault_id = ?
+      AND policy.entity_id = page.entity_id
+      AND page.entity_type = 'assignment_policy'
+     LEFT JOIN domain_entity_tombstones AS domain_tombstone
+       ON domain_tombstone.vault_id = ?
+      AND domain_tombstone.entity_type = page.entity_type
+      AND domain_tombstone.entity_id = page.entity_id
      ORDER BY page.server_seq ASC`
   )
     .bind(
@@ -491,6 +734,11 @@ async function readPullPage(
       vaultId,
       vaultId,
       ...CLOUD_SYNC_SETTING_KEYS,
+      vaultId,
+      vaultId,
+      vaultId,
+      vaultId,
+      vaultId,
       vaultId,
       vaultId
     )
@@ -537,6 +785,11 @@ async function readBootstrapComments(
        comment.source, comment.created_at, comment.updated_at,
        comment.revision_captured_at, comment.revision_recorded_at,
        comment.revision_sequence, comment.revision_id,
+       comment.profile_id, comment.profile_display_name,
+       comment.promotion_site_id, comment.promotion_site_name,
+       comment.promotion_site_url, comment.assignment_pair_id,
+       comment.assignment_source, comment.config_revision,
+       comment.attempt_count, comment.error_code, comment.skip_reason,
        (
          SELECT json_group_array(json(anchor_row.anchor_json))
          FROM (
@@ -571,6 +824,100 @@ async function readBootstrapComments(
     .bind(...bindings)
     .all<StoredCommentRow>();
   return result.results;
+}
+
+async function readBootstrapDomainEntities(
+  database: D1Database,
+  vaultId: string,
+  serverCursor: number,
+  afterKey: string | null,
+  limit: number
+): Promise<DomainBootstrapRow[]> {
+  const result = await database.prepare(
+    `WITH domain_entities AS (
+       SELECT '1:' || profile.entity_id AS sort_key,
+         'profile' AS entity_type, profile.entity_id, 'upsert' AS operation,
+         json_object('profile', json_object(
+           'id', profile.entity_id,
+           'displayName', profile.display_name,
+           'name', profile.profile_name,
+           'email', profile.email,
+           'createdAt', profile.created_at,
+           'updatedAt', profile.updated_at
+         )) AS payload_json
+       FROM sync_profiles AS profile
+       WHERE profile.vault_id = ? AND profile.server_seq <= ?
+       UNION ALL
+       SELECT '2:' || site.entity_id,
+         'promotion_site', site.entity_id, 'upsert',
+         json_object('promotionSite', json_object(
+           'id', site.entity_id,
+           'name', site.site_name,
+           'url', site.site_url,
+           'content', site.content,
+           'enabled', json(CASE WHEN site.enabled = 1 THEN 'true' ELSE 'false' END),
+           'createdAt', site.created_at,
+           'updatedAt', site.updated_at
+         ))
+       FROM sync_promotion_sites AS site
+       WHERE site.vault_id = ? AND site.server_seq <= ?
+       UNION ALL
+       SELECT '3:' || pair.entity_id,
+         'assignment_pair', pair.entity_id, 'upsert',
+         json_object('assignmentPair', json_object(
+           'id', pair.entity_id,
+           'profileId', pair.profile_id,
+           'promotionSiteId', pair.promotion_site_id,
+           'weight', pair.weight,
+           'enabled', json(CASE WHEN pair.enabled = 1 THEN 'true' ELSE 'false' END)
+         ))
+       FROM sync_assignment_pairs AS pair
+       WHERE pair.vault_id = ? AND pair.server_seq <= ?
+       UNION ALL
+       SELECT '4:' || policy.entity_id,
+         'assignment_policy', policy.entity_id, 'upsert',
+         json_object('assignmentPolicy', json_object(
+           'id', policy.entity_id,
+           'defaultPairId', policy.default_pair_id,
+           'quotas', json(policy.quotas_json)
+         ))
+       FROM sync_assignment_policy AS policy
+       WHERE policy.vault_id = ? AND policy.server_seq <= ?
+       UNION ALL
+       SELECT '5:' || tombstone.entity_type || ':' || tombstone.entity_id,
+         tombstone.entity_type, tombstone.entity_id, 'delete',
+         json_object('deletedAt', tombstone.deleted_at)
+       FROM domain_entity_tombstones AS tombstone
+       WHERE tombstone.vault_id = ? AND tombstone.server_seq <= ?
+     )
+     SELECT sort_key, entity_type, entity_id, operation, payload_json
+     FROM domain_entities
+     WHERE (? IS NULL OR sort_key > ?)
+     ORDER BY sort_key ASC
+     LIMIT ?`
+  ).bind(
+    vaultId, serverCursor,
+    vaultId, serverCursor,
+    vaultId, serverCursor,
+    vaultId, serverCursor,
+    vaultId, serverCursor,
+    afterKey, afterKey,
+    limit + 1
+  ).all<DomainBootstrapRow>();
+  return result.results;
+}
+
+function materializeBootstrapDomain(row: DomainBootstrapRow) {
+  const payload = parseStoredJson(row.payload_json);
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+    fail('INTERNAL_ERROR', 500, true);
+  }
+  return {
+    entityType: row.entity_type,
+    entityId: row.entity_id,
+    operation: row.operation,
+    payload
+  };
 }
 
 async function readBootstrapSettings(
@@ -659,7 +1006,13 @@ export async function pullChanges(
   requestId = crypto.randomUUID()
 ): Promise<Response> {
   const url = new URL(request.url);
-  rejectUnknownQuery(url, ['cursor', 'limit', 'deviceId']);
+  rejectUnknownQuery(url, [
+    'cursor',
+    'limit',
+    'deviceId',
+    'protocolVersion'
+  ]);
+  const protocolVersion = protocolVersionFromQuery(url);
   const cursor = boundedQueryInteger(
     url,
     'cursor',
@@ -683,7 +1036,17 @@ export async function pullChanges(
   );
   if (cursor > page.highWatermark) fail('INVALID_REQUEST', 400);
   const pageRows = page.rows.slice(0, limit);
-  const changes = pageRows.map(materializeChange);
+  const changes = pageRows
+    .filter((row) => (
+      protocolVersion >= 2
+      || ![
+        'profile',
+        'promotion_site',
+        'assignment_pair',
+        'assignment_policy'
+      ].includes(requiredString(row.entity_type))
+    ))
+    .map((row) => materializeChange(row, protocolVersion));
   const nextCursor =
     pageRows.at(-1)?.server_seq ?? cursor;
   await updateDeviceCursor(
@@ -711,7 +1074,13 @@ export async function bootstrapSnapshot(
   requestId = crypto.randomUUID()
 ): Promise<Response> {
   const url = new URL(request.url);
-  rejectUnknownQuery(url, ['cursor', 'limit', 'deviceId']);
+  rejectUnknownQuery(url, [
+    'cursor',
+    'limit',
+    'deviceId',
+    'protocolVersion'
+  ]);
+  const protocolVersion = protocolVersionFromQuery(url);
   const limit = boundedQueryInteger(url, 'limit', 1, MAX_PULL_LIMIT);
   const deviceId = boundedQueryString(
     url,
@@ -732,7 +1101,8 @@ export async function bootstrapSnapshot(
           MAX_BOOTSTRAP_CURSOR_LENGTH
         ),
         signingKey,
-        vault.vaultId
+        vault.vaultId,
+        protocolVersion
       )
     : null;
   const requestNow = Date.now();
@@ -751,15 +1121,64 @@ export async function bootstrapSnapshot(
   }
   const serverNow = cursor?.serverNow ?? requestNow;
   const serverCursor = cursor?.serverCursor ?? highWatermark;
+  if (
+    protocolVersion === 2
+    && (cursor === null || cursor.phase === 'domains')
+  ) {
+    const domainRows = await readBootstrapDomainEntities(
+      env.DB,
+      vault.vaultId,
+      serverCursor,
+      cursor?.phase === 'domains' ? cursor.domainKey : null,
+      limit
+    );
+    const pageDomainRows = domainRows.slice(0, limit);
+    const lastDomain = pageDomainRows.at(-1);
+    if (lastDomain) {
+      const nextCursor = await encodeBootstrapCursor(
+        signingKey,
+        vault.vaultId,
+        {
+          serverCursor,
+          serverNow,
+          phase: 'domains',
+          domainKey: lastDomain.sort_key,
+          submittedAt: null,
+          id: null,
+          tombstoneId: null
+        },
+        protocolVersion
+      );
+      return json({
+        ok: true,
+        comments: [],
+        settings: cursor
+          ? []
+          : await readBootstrapSettings(
+              env.DB,
+              vault.vaultId,
+              serverCursor
+            ),
+        tombstones: [],
+        domainEntities: pageDomainRows.map(materializeBootstrapDomain),
+        nextCursor,
+        hasMore: true,
+        serverCursor,
+        serverNow,
+        requestId
+      });
+    }
+  }
+  const historyCursor = cursor?.phase === 'domains' ? null : cursor;
   const cutoff = serverNow - BOOTSTRAP_RETENTION_MS;
-  const commentRows = cursor?.phase === 'tombstones'
+  const commentRows = historyCursor?.phase === 'tombstones'
     ? []
     : await readBootstrapComments(
         env.DB,
         vault.vaultId,
         cutoff,
         serverCursor,
-        cursor,
+        historyCursor,
         limit
       );
   const pageRows = commentRows.slice(0, limit);
@@ -770,8 +1189,8 @@ export async function bootstrapSnapshot(
         env.DB,
         vault.vaultId,
         serverCursor,
-        cursor?.phase === 'tombstones'
-          ? cursor.tombstoneId
+        historyCursor?.phase === 'tombstones'
+          ? historyCursor.tombstoneId
           : null,
         limit
       );
@@ -792,7 +1211,8 @@ export async function bootstrapSnapshot(
         submittedAt: requiredNumber(lastComment.submitted_at),
         id: requiredString(lastComment.record_id),
         tombstoneId: null
-      }
+      },
+      protocolVersion
     );
   } else if (tombstonesHaveMore && lastTombstone) {
     nextCursor = await encodeBootstrapCursor(
@@ -805,7 +1225,8 @@ export async function bootstrapSnapshot(
         submittedAt: null,
         id: null,
         tombstoneId: lastTombstone.record_id
-      }
+      },
+      protocolVersion
     );
   }
   const settings = cursor
@@ -832,9 +1253,12 @@ export async function bootstrapSnapshot(
 
   return json({
     ok: true,
-    comments: pageRows.map(materializeComment),
+    comments: pageRows.map((row) => (
+      materializeComment(row, protocolVersion >= 2)
+    )),
     settings,
     tombstones,
+    ...(protocolVersion === 2 ? { domainEntities: [] } : {}),
     nextCursor,
     hasMore,
     serverCursor,

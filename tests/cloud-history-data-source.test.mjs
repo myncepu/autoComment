@@ -136,13 +136,15 @@ test('enabled recent unfiltered pages finish local cache before cloud history ol
   assert.equal(third.nextCursor, null);
 });
 
-test('cross-cutoff ranges and every domain or anchor filter go directly to cloud when online', async () => {
+test('cross-cutoff ranges and every searchable field go directly to cloud when online', async () => {
   const filters = [
     { from: CUTOFF - 1, to: CUTOFF + 1 },
     { targetDomain: 'target.test' },
     { promotedDomain: 'promo.test' },
     { anchorTextPrefix: 'product' },
-    { hrefDomain: 'docs.test' }
+    { hrefDomain: 'docs.test' },
+    { profileId: 'profile-a' },
+    { promotionSiteId: 'site-b' }
   ];
 
   for (const distinguishingFilter of filters) {

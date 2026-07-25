@@ -1,4 +1,9 @@
 import {
+  CLOUD_SYNC_COMMENT_ASSIGNMENT_CAPABILITY,
+  CLOUD_SYNC_DOMAIN_CAPABILITY,
+  CLOUD_SYNC_PROTOCOL_VERSION
+} from '../../lib/cloud-sync-protocol.mjs';
+import {
   ACTIVE_VAULT_WRITE_SOURCE,
   executeActiveVaultWrite,
   hashSyncSecret,
@@ -10,6 +15,7 @@ import { fail, json } from './http';
 import {
   boundedQueryString,
   boundedString,
+  protocolVersionFromQuery,
   readBoundedJson,
   rejectUnknownQuery,
   requireJsonObject
@@ -111,7 +117,8 @@ export async function getStatus(
 ): Promise<Response> {
   const vault = await requireVault(request, env);
   const url = new URL(request.url);
-  rejectUnknownQuery(url, ['deviceId']);
+  rejectUnknownQuery(url, ['deviceId', 'protocolVersion']);
+  protocolVersionFromQuery(url);
   const deviceId = boundedQueryString(
     url,
     'deviceId',
@@ -127,6 +134,11 @@ export async function getStatus(
     vaultId: vault.vaultId,
     serverTime: now,
     highWatermark: await highWatermark(env, vault.vaultId),
+    protocolVersion: CLOUD_SYNC_PROTOCOL_VERSION,
+    capabilities: [
+      CLOUD_SYNC_DOMAIN_CAPABILITY,
+      CLOUD_SYNC_COMMENT_ASSIGNMENT_CAPABILITY
+    ],
     requestId
   });
 }
@@ -163,6 +175,21 @@ export async function deleteVault(
     ).bind(vault.vaultId),
     env.DB.prepare(
       'DELETE FROM comment_tombstones WHERE vault_id = ?'
+    ).bind(vault.vaultId),
+    env.DB.prepare(
+      'DELETE FROM sync_assignment_policy WHERE vault_id = ?'
+    ).bind(vault.vaultId),
+    env.DB.prepare(
+      'DELETE FROM sync_assignment_pairs WHERE vault_id = ?'
+    ).bind(vault.vaultId),
+    env.DB.prepare(
+      'DELETE FROM sync_promotion_sites WHERE vault_id = ?'
+    ).bind(vault.vaultId),
+    env.DB.prepare(
+      'DELETE FROM sync_profiles WHERE vault_id = ?'
+    ).bind(vault.vaultId),
+    env.DB.prepare(
+      'DELETE FROM domain_entity_tombstones WHERE vault_id = ?'
     ).bind(vault.vaultId),
     env.DB.prepare(
       'DELETE FROM sync_devices WHERE vault_id = ?'
