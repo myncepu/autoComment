@@ -198,6 +198,22 @@ test('keeps response-body reading inside the request timeout', { timeout: 100 },
   );
 });
 
+test('times out when a response body ignores the abort signal', { timeout: 100 }, async () => {
+  const transport = createTransport(async () => ({
+    ok: true,
+    status: 200,
+    text: () => new Promise(() => {})
+  }), { timeoutMs: 5 });
+
+  await assert.rejects(
+    transport.status('device-a'),
+    (error) => error.code === 'SYNC_TIMEOUT'
+      && error.status === 0
+      && error.retryable === true
+      && !error.cause
+  );
+});
+
 test('normalizes query enumeration and value-access exceptions without exposing input text', async () => {
   let fetchCalled = false;
   const transport = createTransport(async () => {
