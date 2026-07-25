@@ -295,6 +295,8 @@ test('background migrates an old record before its startup retention check and c
   const startupNotifications = [];
   const alarmListeners = [];
   const notificationClickListeners = [];
+  const startupListeners = [];
+  const powerCalls = [];
   const storageData = {
     batchResults: [{
       batchId: 'legacy-batch',
@@ -314,6 +316,11 @@ test('background migrates an old record before its startup retention check and c
       onMessage: {
         addListener(listener) {
           runtimeListeners.push(listener);
+        }
+      },
+      onStartup: {
+        addListener(listener) {
+          startupListeners.push(listener);
         }
       },
       async sendMessage(message) {
@@ -360,10 +367,24 @@ test('background migrates an old record before its startup retention check and c
         }
       }
     },
+    power: {
+      requestKeepAwake(level) {
+        powerCalls.push(['request', level]);
+      },
+      releaseKeepAwake() {
+        powerCalls.push(['release']);
+      }
+    },
     tabs: {
       onRemoved: { addListener() {} },
       async sendMessage() {},
-      async create() {}
+      async create() {},
+      async query() {
+        return [];
+      }
+    },
+    windows: {
+      async remove() {}
     }
   };
   globalThis.chrome = chromeApi;
@@ -420,6 +441,53 @@ test('background migrates an old record before its startup retention check and c
     return responses;
   }
 
+  const sourceItems = Array.from({ length: 10 }, (_, originalIndex) => {
+    const url = originalIndex === 9
+      ? message.url
+      : `https://target.test/${originalIndex}`;
+    return {
+      originalIndex,
+      url,
+      sourceDomain: 'target.test',
+      originalRow: [String(originalIndex), url]
+    };
+  });
+  const startResponses = await dispatchConfirm({
+    type: 'BATCH_SESSION_START',
+    batchId: message.batchId,
+    source: {
+      fileName: 'integration.csv',
+      headers: ['id', 'URL'],
+      rows: sourceItems.map((item) => item.originalRow),
+      parsedUrls: sourceItems
+    },
+    settings: {
+      autoOpenPanel: true,
+      autoGenerate: true,
+      autoSubmit: true,
+      timeoutSeconds: 60,
+      concurrency: 1
+    }
+  });
+  assert.equal(startResponses[0]?.ok, true);
+  assert.deepEqual(powerCalls, [['request', 'system']]);
+  assert.equal(startupListeners.length, 1);
+
+  const activeResponses = await dispatchConfirm({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: message.batchId,
+    urlIndex: message.urlIndex,
+    tabId: 42,
+    windowId: 52
+  });
+  assert.equal(activeResponses[0]?.ok, true);
+  const submittingResponses = await dispatchConfirm({
+    type: 'BATCH_TASK_SUBMITTING',
+    batchId: message.batchId,
+    urlIndex: message.urlIndex
+  });
+  assert.equal(submittingResponses[0]?.ok, true);
+
   assert.deepEqual(await dispatchConfirm({
     type: 'BATCH_SAVE_SUBMIT_CONTEXT',
     context: {
@@ -443,6 +511,14 @@ test('background migrates an old record before its startup retention check and c
   assert.equal(runtimeMessages[0].historySaveStatus, 'saved');
   assert.equal(runtimeMessages[0].historyPendingCount, 0);
   assert.equal(storageData.batchSubmitContextsByTab['42'], undefined);
+  assert.equal(
+    storageData.batchRuntimeCheckpoint.tasks['9'].state,
+    'terminal'
+  );
+  assert.equal(
+    storageData.batchRuntimeCheckpoint.results[0].result,
+    'success'
+  );
 
   const oldRevision = {
     capturedAt: fixedNow,
