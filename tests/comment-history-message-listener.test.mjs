@@ -585,6 +585,7 @@ test('background migrates an old record before its startup retention check and c
     type: 'BATCH_HISTORY_FALLBACK_DURABLE',
     batchId: 'batch-fallback',
     urlIndex: 8,
+    attempt: 1,
     url: 'https://target.test/post',
     result: 'success',
     aiContent: 'Generated fallback',
@@ -633,6 +634,7 @@ test('background migrates an old record before its startup retention check and c
     type: 'BATCH_REPORT_RESULT',
     batchId: 'batch-ambiguous',
     urlIndex: 12,
+    attempt: 1,
     result: 'fail',
     url: 'https://target.test/post',
     errorMessage: '提交结果不明确'
@@ -656,6 +658,7 @@ test('background migrates an old record before its startup retention check and c
     type: 'BATCH_REPORT_RESULT',
     batchId: 'batch-ambiguous',
     urlIndex: 12,
+    attempt: 1,
     result: 'fail',
     url: 'https://target.test/post',
     errorMessage: '确定失败'

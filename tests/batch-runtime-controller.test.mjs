@@ -278,6 +278,39 @@ test('returns the checkpoint updated by a task manual status command', async () 
   );
 });
 
+test('rejects a missing attempt before every untracked terminal return', async () => {
+  const message = {
+    batchId: 'batch-1',
+    urlIndex: 0,
+    result: 'success'
+  };
+  const noCheckpointHarness = createHarness();
+  const noCheckpoint = await noCheckpointHarness.controller.markTerminal(
+    message
+  );
+
+  const staleBatchHarness = createHarness();
+  await staleBatchHarness.controller.handleMessage(startMessage(1));
+  const staleBatch = await staleBatchHarness.controller.markTerminal({
+    ...message,
+    batchId: 'old-batch'
+  });
+
+  const missingTaskHarness = createHarness();
+  await missingTaskHarness.controller.handleMessage(startMessage(1));
+  const missingTask = await missingTaskHarness.controller.markTerminal({
+    ...message,
+    urlIndex: 9
+  });
+
+  for (const response of [noCheckpoint, staleBatch, missingTask]) {
+    assert.deepEqual(
+      { ok: response.ok, error: response.error },
+      { ok: false, error: 'stale_attempt' }
+    );
+  }
+});
+
 test('serializes simultaneous task updates without losing either activity', async () => {
   const { controller, data } = createHarness();
   const started = await controller.handleMessage(startMessage());

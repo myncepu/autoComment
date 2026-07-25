@@ -113,3 +113,47 @@ suite 中完整运行。
 - [x] 未改变人工处理窗口的独立窗口、非自动化语义。
 - [x] 未引入远程资源、inline handler 或 MV3/CSP 不兼容代码。
 - [x] 未发现 Task 4 范围外的新回归。
+
+## Important 审查修复：untracked confirmation attempt 校验
+
+独立审查发现 `markTerminal()` 先执行 no-checkpoint、stale-batch 和
+missing-task 三个 `untracked: true` 早退，导致缺失 attempt 的当前
+confirmation 被接受，background 随后可能广播
+`BATCH_CONFIRMED.attempt: undefined`。
+
+修复内容：
+
+- `markTerminal()` 在 storage 读取及所有 untracked 早退之前，要求
+  `message.attempt` 为大于等于 1 的整数。
+- 缺失或无效 attempt 返回 `{ ok: false, error: 'stale_attempt' }`，
+  与既有 checkpoint 事件层错误保持一致。
+- 有效 attempt 的 untracked 兼容行为保持不变。
+- background listener 集成 fixture 中会成功进入 confirmation 广播的
+  `BATCH_HISTORY_FALLBACK_DURABLE` 和 `BATCH_REPORT_RESULT` 均显式补
+  `attempt: 1`；不会再期待 undefined attempt 广播。
+
+### 审查修复 RED / GREEN
+
+- 聚焦 RED：
+  `node --test --test-name-pattern='rejects a missing attempt before every untracked terminal return' tests/batch-runtime-controller.test.mjs`
+  - 预期失败：no-checkpoint 路径实际返回
+    `{ ok: true, error: undefined }`，而期望为
+    `{ ok: false, error: 'stale_attempt' }`。
+  - 同一测试以三个独立 controller harness 覆盖 no checkpoint、旧
+    batchId、不存在 urlIndex 三种 untracked 早退。
+- 聚焦 GREEN：同命令 1/1 pass。
+- background fixture RED：
+  `node --test --test-name-pattern='background migrates an old record' tests/comment-history-message-listener.test.mjs`
+  - 预期失败：缺 attempt 的 fallback confirmation 返回
+    `checkpoint_write_failed`，不再错误广播。
+- background fixture GREEN：同命令 1/1 pass。
+
+### 审查修复测试结果
+
+- Affected suites：
+  `node --test tests/batch-runtime-controller.test.mjs tests/comment-history-message-listener.test.mjs tests/batch-multi-window-integration.test.js`
+  - 52 tests，52 pass，0 fail。
+- Full suite：
+  `npm test`
+  - 260 tests，260 pass，0 fail。
+- Fix commit：本段与修复纳入一个后续小提交；最终 SHA 记录在任务完成回复中。
