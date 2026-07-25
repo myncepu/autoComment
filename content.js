@@ -4835,13 +4835,19 @@
         const entry = {
           batchId,
           urlIndex,
+          attempt,
           url: pageUrl || '',
           result,
           aiContent,
+          errorCode: errorCode || null,
           errorMessage,
           timestamp: Date.now()
         };
-        const existingIndex = results.findIndex((item) => item.batchId === batchId && item.urlIndex === urlIndex);
+        const existingIndex = results.findIndex((item) =>
+          item.batchId === batchId &&
+          item.urlIndex === urlIndex &&
+          item.attempt === attempt
+        );
         if (existingIndex >= 0) {
           results[existingIndex] = { ...results[existingIndex], ...entry };
         } else {
@@ -4849,7 +4855,7 @@
         }
         if (results.length > 100) results.shift();
         const reported = Array.isArray(data.batchReportedUrls) ? data.batchReportedUrls : [];
-        const urlKey = `${batchId}:${urlIndex}`;
+        const urlKey = `${batchId}:${urlIndex}:${attempt}`;
         if (!reported.includes(urlKey)) {
           reported.push(urlKey);
           if (reported.length > 500) reported.shift();

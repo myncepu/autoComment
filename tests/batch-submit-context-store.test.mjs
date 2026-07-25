@@ -148,6 +148,63 @@ test('a delayed attempt 1 clear cannot remove attempt 2 for the same tab and tas
   assert.equal(await store.get(11), null);
 });
 
+test('rejects an incomplete context identity without changing the saved context', async () => {
+  const storage = createStorageArea();
+  const store = createBatchSubmitContextStore(storage, {
+    now: () => 1000,
+    maxAgeMs: Number.POSITIVE_INFINITY
+  });
+  await store.save(11, {
+    batchId: 'batch-complete',
+    urlIndex: 3,
+    attempt: 2
+  });
+
+  await assert.rejects(
+    store.save(11, {
+      batchId: 'batch-incomplete',
+      urlIndex: 4
+    }),
+    /invalid_submit_context_identity/
+  );
+  assert.deepEqual(await store.get(11), {
+    batchId: 'batch-complete',
+    urlIndex: 3,
+    attempt: 2,
+    timestamp: 1000
+  });
+});
+
+test('rejects a delayed older attempt without replacing the current tab context', async () => {
+  const storage = createStorageArea();
+  let now = 1000;
+  const store = createBatchSubmitContextStore(storage, {
+    now: () => now,
+    maxAgeMs: Number.POSITIVE_INFINITY
+  });
+  await store.save(11, {
+    batchId: 'batch-retry',
+    urlIndex: 3,
+    attempt: 2
+  });
+
+  now += 1;
+  await assert.rejects(
+    store.save(11, {
+      batchId: 'batch-retry',
+      urlIndex: 3,
+      attempt: 1
+    }),
+    /stale_submit_context_attempt/
+  );
+  assert.deepEqual(await store.get(11), {
+    batchId: 'batch-retry',
+    urlIndex: 3,
+    attempt: 2,
+    timestamp: 1000
+  });
+});
+
 test('sealAndRecover atomically moves an unresolved context into the task recovery queue', async () => {
   const storage = createStorageArea();
   const store = createBatchSubmitContextStore(storage, {
@@ -303,7 +360,11 @@ test('listener preserves unacknowledged context when its tab closes', async () =
 
   const valid = await new Promise((resolve) => {
     listener(
-      { type: 'BATCH_SAVE_SUBMIT_CONTEXT', tabId: 99, context: { batchId: 'a' } },
+      {
+        type: 'BATCH_SAVE_SUBMIT_CONTEXT',
+        tabId: 99,
+        context: { batchId: 'a', urlIndex: 1, attempt: 1 }
+      },
       { tab: { id: 42 } },
       resolve
     );
@@ -342,7 +403,10 @@ test('listener preserves unacknowledged context when its tab closes', async () =
   );
   await new Promise(setImmediate);
 
-  assert.deepEqual(saved, [{ tabId: 42, context: { batchId: 'a' } }]);
+  assert.deepEqual(saved, [{
+    tabId: 42,
+    context: { batchId: 'a', urlIndex: 1, attempt: 1 }
+  }]);
   assert.deepEqual(valid, { ok: true });
   assert.deepEqual(invalid, { ok: false, error: 'missing_sender_tab' });
   assert.equal(queryHandled, true);
@@ -360,6 +424,41 @@ test('listener preserves unacknowledged context when its tab closes', async () =
   }]);
   assert.equal(tabRemovedListener, undefined);
   assert.deepEqual(cleared, []);
+});
+
+test('listener rejects a save without a complete attempt identity', async () => {
+  let listener;
+  let saveCalls = 0;
+  const chromeApi = {
+    runtime: {
+      id: 'extension-id',
+      onMessage: { addListener(fn) { listener = fn; } }
+    }
+  };
+  installBatchSubmitContextListener(chromeApi, {
+    async save() {
+      saveCalls += 1;
+    }
+  });
+
+  const response = await new Promise((resolve) => {
+    listener({
+      type: 'BATCH_SAVE_SUBMIT_CONTEXT',
+      context: {
+        batchId: 'batch-incomplete',
+        urlIndex: 2
+      }
+    }, {
+      id: 'extension-id',
+      tab: { id: 42 }
+    }, resolve);
+  });
+
+  assert.deepEqual(response, {
+    ok: false,
+    error: 'invalid_submit_context_identity'
+  });
+  assert.equal(saveCalls, 0);
 });
 
 test('listener rejects a matched clear without a complete attempt identity', async () => {

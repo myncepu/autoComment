@@ -418,6 +418,7 @@ test('background migrates an old record before its startup retention check and c
     result: 'success',
     url: 'https://target.test/post',
     aiContent: 'Generated fallback',
+    errorCode: 'confirmed_success',
     history: {
       submittedAt: 1721000000000,
       targetPageUrl: 'https://target.test/post',
@@ -515,6 +516,11 @@ test('background migrates an old record before its startup retention check and c
   assert.equal(runtimeMessages[0].sourceTabId, 42);
   assert.equal(runtimeMessages[0].historySaveStatus, 'saved');
   assert.equal(runtimeMessages[0].historyPendingCount, 0);
+  assert.equal(storageData.batchResults.at(-1).attempt, 1);
+  assert.equal(
+    storageData.batchResults.at(-1).errorCode,
+    'confirmed_success'
+  );
   assert.equal(storageData.batchSubmitContextsByTab['42'], undefined);
   assert.equal(
     storageData.batchRuntimeCheckpoint.tasks['9'].state,

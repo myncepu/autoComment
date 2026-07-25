@@ -667,6 +667,45 @@ function recalculateCountsFromResults() {
   pendingCount = Math.max(0, totalCount - getProcessedCount());
 }
 
+function createInvalidTaskAttemptError() {
+  const error = new Error('invalid_batch_task_attempt');
+  error.code = 'invalid_batch_task_attempt';
+  return error;
+}
+
+function getCheckpointTaskAttempts(checkpoint) {
+  if (
+    !checkpoint?.tasks
+    || typeof checkpoint.tasks !== 'object'
+    || Array.isArray(checkpoint.tasks)
+  ) {
+    throw createInvalidTaskAttemptError();
+  }
+
+  const attempts = new Map();
+  for (const [urlIndexValue, task] of Object.entries(checkpoint.tasks)) {
+    const urlIndex = Number(urlIndexValue);
+    if (
+      !Number.isInteger(urlIndex)
+      || urlIndex < 0
+      || !Number.isInteger(task?.attempt)
+      || task.attempt < 1
+    ) {
+      throw createInvalidTaskAttemptError();
+    }
+    attempts.set(urlIndex, task.attempt);
+  }
+  return attempts;
+}
+
+function getRequiredTaskAttempt(urlIndex, activity = null) {
+  const attempt = activity?.attempt ?? taskAttempts.get(urlIndex);
+  if (!Number.isInteger(attempt) || attempt < 1) {
+    throw createInvalidTaskAttemptError();
+  }
+  return attempt;
+}
+
 function hydrateBatchFromCheckpoint(checkpoint) {
   if (
     !checkpoint ||
@@ -674,6 +713,12 @@ function hydrateBatchFromCheckpoint(checkpoint) {
     !Array.isArray(checkpoint.source?.parsedUrls) ||
     !Array.isArray(checkpoint.results)
   ) {
+    return false;
+  }
+  let restoredTaskAttempts;
+  try {
+    restoredTaskAttempts = getCheckpointTaskAttempts(checkpoint);
+  } catch (_) {
     return false;
   }
 
@@ -705,14 +750,7 @@ function hydrateBatchFromCheckpoint(checkpoint) {
   lifecycleToken = {};
   isTerminated = false;
   openingActivities.clear();
-  taskAttempts = new Map(
-    Object.entries(checkpoint.tasks || {}).map(([urlIndex, task]) => [
-      Number(urlIndex),
-      Number.isInteger(task?.attempt) && task.attempt > 0
-        ? task.attempt
-        : 1
-    ])
-  );
+  taskAttempts = restoredTaskAttempts;
 
   timeoutInput.value = String(timeoutSeconds);
   concurrencyInput.value = String(concurrency);
@@ -797,6 +835,7 @@ async function startBatch() {
   };
   const ownsStartingLifecycle = () =>
     lifecycleToken === startingToken && status === 'starting';
+  let runtimeSessionStarted = false;
 
   lifecycleToken = startingToken;
   lifecycleConcurrency = startingConcurrency;
@@ -853,20 +892,22 @@ async function startBatch() {
         }
       }
     );
-    if (!sessionResponse.checkpoint || !ownsStartingLifecycle()) return;
-    taskAttempts = new Map(
-      Object.entries(sessionResponse.checkpoint.tasks || {}).map(
-        ([urlIndex, task]) => [
-          Number(urlIndex),
-          Number.isInteger(task?.attempt) && task.attempt > 0
-            ? task.attempt
-            : 1
-        ]
-      )
-    );
+    if (!sessionResponse.checkpoint) {
+      throw createInvalidTaskAttemptError();
+    }
+    if (!ownsStartingLifecycle()) return;
+    runtimeSessionStarted = true;
+    taskAttempts = getCheckpointTaskAttempts(sessionResponse.checkpoint);
   } catch (error) {
     if (!ownsStartingLifecycle()) return;
     console.warn('[batch] 批处理启动失败:', error);
+    if (runtimeSessionStarted) {
+      try {
+        await sendBatchRuntimeMessage('BATCH_SESSION_PAUSE', {
+          batchId: startingBatchId
+        });
+      } catch (_) {}
+    }
     restoreFailedStart(startingToken);
     alert(error?.code === 'power_request_failed'
       ? '无法阻止系统休眠，批处理尚未开始。请重新加载扩展后重试。'
@@ -1064,24 +1105,23 @@ async function resumeBatch() {
     return;
   }
 
+  let runtimeSessionResumed = false;
   try {
     const response = await sendBatchRuntimeMessage(
       'BATCH_SESSION_RESUME',
       { batchId }
     );
-    if (response.checkpoint) {
-      taskAttempts = new Map(
-        Object.entries(response.checkpoint.tasks || {}).map(
-          ([urlIndex, task]) => [
-            Number(urlIndex),
-            Number.isInteger(task?.attempt) && task.attempt > 0
-              ? task.attempt
-              : 1
-          ]
-        )
-      );
+    runtimeSessionResumed = true;
+    if (!response.checkpoint) {
+      throw createInvalidTaskAttemptError();
     }
+    taskAttempts = getCheckpointTaskAttempts(response.checkpoint);
   } catch (error) {
+    if (runtimeSessionResumed) {
+      try {
+        await sendBatchRuntimeMessage('BATCH_SESSION_PAUSE', { batchId });
+      } catch (_) {}
+    }
     alert(error?.code === 'power_request_failed'
       ? '无法阻止系统休眠，任务仍保持暂停。'
       : `无法继续批处理：${error.message || error}`);
@@ -1124,9 +1164,10 @@ async function pauseForRuntimeFailure(error) {
     const response = await sendBatchRuntimeMessage(
       'BATCH_SESSION_LOAD_FOR_PAGE'
     );
-    if (response.checkpoint) {
-      hydrateBatchFromCheckpoint(response.checkpoint);
-    } else {
+    if (
+      !response.checkpoint
+      || !hydrateBatchFromCheckpoint(response.checkpoint)
+    ) {
       setStatus('paused_recovery');
       updateUI();
     }
@@ -1138,6 +1179,13 @@ async function pauseForRuntimeFailure(error) {
 }
 
 async function openWorkerWindow(urlIndex) {
+  let attempt;
+  try {
+    attempt = getRequiredTaskAttempt(urlIndex);
+  } catch (error) {
+    await pauseForRuntimeFailure(error);
+    return;
+  }
   const item = batchItems?.[urlIndex];
   if (!item) {
     await finalizeTask(
@@ -1149,8 +1197,6 @@ async function openWorkerWindow(urlIndex) {
     );
     return;
   }
-  const attempt = taskAttempts.get(urlIndex) || 1;
-
   const illegalCheck = item.illegalCheck ||
     evaluateIllegalSiteForBatchItem(item.url, item.sourceDomain);
   if (illegalCheck.blocked) {
@@ -1453,13 +1499,19 @@ async function finalizeTask(
   const taskOpening = ownership?.openings?.get(urlIndex) ??
     openingActivities.get(urlIndex);
   const activity = taskWindowManager?.getByIndex(urlIndex);
-  const taskAttempt = activity?.attempt ?? taskAttempts.get(urlIndex) ?? 1;
   if (
     batchId !== taskBatchId ||
     lifecycleToken !== taskLifecycleToken ||
     scheduler !== taskScheduler ||
     windowManager !== taskWindowManager
   ) {
+    return false;
+  }
+  let taskAttempt;
+  try {
+    taskAttempt = getRequiredTaskAttempt(urlIndex, activity);
+  } catch (error) {
+    await pauseForRuntimeFailure(error);
     return false;
   }
   const startTime = activity?.startTime || taskOpening?.startTime;

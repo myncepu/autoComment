@@ -138,7 +138,8 @@ All commands exited `0`.
 ## Self-check
 
 - Attempt is never inferred from URL index; initial and resumed work reads the
-  checkpoint task attempt, with `1` used only as the legacy/default boundary.
+  checkpoint task attempt. Runtime paths no longer synthesize attempt `1`;
+  legacy defaulting remains confined to checkpoint migration.
 - Background remains the only writer of `batchRuntimeCheckpoint`.
 - The code never automatically retries a possibly submitted task.
 - No manual-processing window behavior or worker-slot policy was changed.
@@ -147,3 +148,57 @@ All commands exited `0`.
   construct was introduced.
 - The submission click remains behind durable submit-context and phase gates.
 - No Task 7 worker-manager/tab creation refactor was started.
+
+## Review-fix follow-up
+
+The Important findings and the related Minor finding were fixed with separate
+RED/GREEN cycles:
+
+- Result persistence now stores `attempt` and `errorCode` and keys both
+  `batchResults` replacement and `batchReportedUrls` by
+  `{ batchId, urlIndex, attempt }`. A delayed attempt 1 therefore cannot
+  overwrite or delete attempt 2. `BATCH_HANDLE_CONFIRM` forwards the complete
+  identity and stable error code, and the content-side local fallback uses the
+  same identity.
+- Submit-context saves now reject incomplete task identities. For the same tab,
+  batch, and URL index, an already-saved higher attempt rejects a delayed lower
+  attempt before it can replace the current context. The message listener
+  rejects incomplete save identities before calling the store.
+- Initial start, paused hydration, resume, worker opening, and terminal writes
+  now require a positive checkpoint/activity attempt. Start rolls back and
+  pauses a newly created runtime session when the returned task attempt is
+  invalid; paused hydration refuses the checkpoint without mutating page state.
+  Initial and resumed attempts greater than 1 are preserved.
+
+Review-fix RED evidence:
+
+```text
+result/context focused run: 11 passed, 5 failed
+background/content fallback run: 0 passed, 2 failed
+checkpoint attempt run: 2 passed, 2 failed
+```
+
+Review-fix GREEN verification:
+
+```text
+node --test tests/batch-result-store.test.mjs \
+  tests/batch-submit-context-store.test.mjs \
+  tests/batch-multi-window-integration.test.js \
+  tests/comment-history-submit-flow.test.js \
+  tests/comment-history-message-listener.test.mjs
+
+75 tests, 75 passed, 0 failed
+
+npm test
+280 tests, 280 passed, 0 failed
+```
+
+All ten changed JavaScript/module/test files passed `node --check`;
+`git diff --check` exited `0`.
+
+Password-boundary self-check:
+
+- No password field was added to result records, submit contexts, checkpoints,
+  `BATCH_HANDLE`, or history payloads.
+- The review fix propagates only attempt identity and stable error codes through
+  those paths.

@@ -51,7 +51,13 @@ function createBatchHarness(overrides = {}) {
     message.type === 'BATCH_RECOVER_SUBMIT_CONTEXT'
       ? { ok: true, sealed: true, recovered: false }
       : message.type === 'BATCH_SESSION_START'
-        ? { ok: true, checkpoint: { status: 'running' } }
+        ? {
+            ok: true,
+            checkpoint: {
+              status: 'running',
+              tasks: { 0: { attempt: 1 } }
+            }
+          }
         : { ok: true, checkpoint: null }
   ));
   const chrome = {
@@ -248,7 +254,11 @@ function createBatchHarness(overrides = {}) {
             batchSourceHeaders:
               typeof batchSourceHeaders === 'undefined'
                 ? []
-                : batchSourceHeaders
+                : batchSourceHeaders,
+            taskAttempts:
+              typeof taskAttempts === 'undefined'
+                ? new Map()
+                : taskAttempts
           };
         }
       };
@@ -453,10 +463,63 @@ test('Start durably creates the complete runtime session before scheduling', asy
   assert.equal(runtimeMessages[0].settings.concurrency, 3);
   assert.equal(FakeScheduler.instances.length, 0);
 
-  resolveRuntimeStart({ ok: true, checkpoint: { status: 'running' } });
+  resolveRuntimeStart({
+    ok: true,
+    checkpoint: {
+      status: 'running',
+      tasks: {
+        0: { attempt: 3 },
+        1: { attempt: 2 }
+      }
+    }
+  });
   await starting;
   assert.equal(FakeScheduler.instances.length, 1);
   assert.equal(api.getState().status, 'running');
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(Array.from(
+      api.getState().taskAttempts.entries()
+    ))),
+    [[0, 3], [1, 2]]
+  );
+});
+
+test('Start safely pauses a runtime checkpoint with a missing task attempt', async () => {
+  const runtimeMessages = [];
+  const { api, alerts, FakeScheduler, FakeWindowManager } = createBatchHarness({
+    runtimeSendMessage(message) {
+      runtimeMessages.push(JSON.parse(JSON.stringify(message)));
+      if (message.type === 'BATCH_SESSION_START') {
+        return Promise.resolve({
+          ok: true,
+          checkpoint: {
+            status: 'running',
+            tasks: { 0: { state: 'queued' } }
+          }
+        });
+      }
+      return Promise.resolve({ ok: true });
+    }
+  });
+  api.setState({
+    parsedUrls: [{
+      originalIndex: 0,
+      url: 'https://missing-attempt.test',
+      sourceDomain: 'missing-attempt.test',
+      originalRow: ['https://missing-attempt.test']
+    }],
+    status: 'idle',
+    windowManager: new FakeWindowManager()
+  });
+
+  await api.startBatch();
+
+  assert.equal(api.getState().status, 'idle');
+  assert.equal(FakeScheduler.instances.length, 0);
+  assert.ok(runtimeMessages.some(
+    (message) => message.type === 'BATCH_SESSION_PAUSE'
+  ));
+  assert.match(alerts.at(-1), /invalid_batch_task_attempt/);
 });
 
 test('a keep-awake failure preserves the uploaded dataset and stays idle', async () => {
@@ -613,6 +676,7 @@ test('a paused checkpoint hydrates the complete page and resumes only on click',
     tasks: {
       0: {
         urlIndex: 0,
+        attempt: 1,
         state: 'terminal',
         phase: null,
         tabId: null,
@@ -622,6 +686,7 @@ test('a paused checkpoint hydrates the complete page and resumes only on click',
       },
       1: {
         urlIndex: 1,
+        attempt: 1,
         state: 'queued',
         phase: null,
         tabId: null,
@@ -651,7 +716,15 @@ test('a paused checkpoint hydrates the complete page and resumes only on click',
       if (message.type === 'BATCH_SESSION_RESUME') {
         return Promise.resolve({
           ok: true,
-          checkpoint: { ...checkpoint, status: 'running' }
+          checkpoint: {
+            ...checkpoint,
+            status: 'running',
+            tasks: {
+              ...checkpoint.tasks,
+              0: { ...checkpoint.tasks[0], attempt: 2 },
+              1: { ...checkpoint.tasks[1], attempt: 3 }
+            }
+          }
         });
       }
       return Promise.resolve({ ok: true });
@@ -680,12 +753,46 @@ test('a paused checkpoint hydrates the complete page and resumes only on click',
 
   state = api.getState();
   assert.equal(state.status, 'running');
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(Array.from(state.taskAttempts.entries()))),
+    [[0, 2], [1, 3]]
+  );
   assert.equal(FakeScheduler.instances.at(-1).started, true);
   const resumeIndex = runtimeMessages.findIndex(
     (message) => message.type === 'BATCH_SESSION_RESUME'
   );
   assert.ok(resumeIndex >= 0);
   assert.equal(elements.get('wakeStatus').textContent, '系统保持唤醒中');
+});
+
+test('paused checkpoint hydration rejects a task without an attempt identity', () => {
+  const { api, FakeScheduler } = createBatchHarness();
+  const hydrated = api.hydrateBatchFromCheckpoint({
+    batchId: 'batch-invalid-attempt',
+    status: 'paused_recovery',
+    source: {
+      parsedUrls: [{
+        originalIndex: 0,
+        url: 'https://invalid-attempt.test',
+        sourceDomain: 'invalid-attempt.test'
+      }]
+    },
+    settings: {
+      timeoutSeconds: 60,
+      concurrency: 1
+    },
+    tasks: {
+      0: {
+        urlIndex: 0,
+        state: 'queued'
+      }
+    },
+    results: []
+  });
+
+  assert.equal(hydrated, false);
+  assert.equal(api.getState().batchId, null);
+  assert.equal(FakeScheduler.instances.length, 0);
 });
 
 test('Clear during deferred Start invalidates the old continuation', async () => {
@@ -836,6 +943,7 @@ test('opening reservations time out and release capacity before window creation 
       getByIndex() { return null; },
       async closeByIndex() {}
     },
+    taskAttempts: new Map([[0, 1]]),
     openingActivities: new Map(),
     isTerminated: false,
     localResults: [],
@@ -879,6 +987,7 @@ test('deferred timeout scan cannot continue into a replacement lifecycle', async
       return {
         batchId: 'batch-old',
         urlIndex: index,
+        attempt: 1,
         startTime: 1
       };
     },
@@ -901,6 +1010,7 @@ test('deferred timeout scan cannot continue into a replacement lifecycle', async
     status: 'running',
     scheduler: oldScheduler,
     windowManager: oldManager,
+    taskAttempts: new Map([[0, 1], [1, 1]]),
     openingActivities: new Map(),
     isTerminated: false,
     localResults: [],
@@ -1292,7 +1402,12 @@ test('deferred finalizer cannot mutate a replacement same-index lifecycle', asyn
   };
   const oldManager = {
     getByIndex() {
-      return { batchId: 'batch-old', urlIndex: 0, startTime: 1 };
+      return {
+        batchId: 'batch-old',
+        urlIndex: 0,
+        attempt: 1,
+        startTime: 1
+      };
     },
     closeByIndex() {
       oldCloseCount += 1;
@@ -1307,6 +1422,7 @@ test('deferred finalizer cannot mutate a replacement same-index lifecycle', asyn
     status: 'running',
     scheduler: oldScheduler,
     windowManager: oldManager,
+    taskAttempts: new Map([[0, 1]]),
     openingActivities: oldOpenings,
     isTerminated: false,
     localResults: [],
@@ -1390,6 +1506,7 @@ test('deferred late-create cleanup cannot mutate resumed same-index work', async
   const activity = {
     batchId: 'batch-a',
     urlIndex: 0,
+    attempt: 1,
     url: 'https://old.test',
     tabId: 10,
     windowId: 20,
@@ -1414,6 +1531,7 @@ test('deferred late-create cleanup cannot mutate resumed same-index work', async
     status: 'running',
     scheduler: oldScheduler,
     windowManager: manager,
+    taskAttempts: new Map([[0, 1]]),
     openingActivities: oldOpenings,
     isTerminated: false,
     localResults: [],
@@ -1480,6 +1598,7 @@ test('deferred Stop cleanup cannot close or erase a replacement lifecycle', asyn
   const oldActivity = {
     batchId: 'batch-old',
     urlIndex: 0,
+    attempt: 1,
     url: 'https://old.test',
     tabId: 10,
     windowId: 20,

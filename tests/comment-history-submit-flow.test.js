@@ -20,6 +20,106 @@ function plain(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function createBatchResultFallbackHarness() {
+  const storageData = {
+    batchResults: [],
+    batchReportedUrls: []
+  };
+  const runtime = {
+    lastError: null,
+    sendMessage(_message, callback) {
+      runtime.lastError = { message: 'background unavailable' };
+      callback();
+      runtime.lastError = null;
+    }
+  };
+  const context = vm.createContext({
+    console: { log() {}, warn() {}, error() {} },
+    Date,
+    chrome: {
+      runtime,
+      storage: {
+        local: {
+          get(_keys, callback) {
+            callback(plain(storageData));
+          },
+          set(values, callback) {
+            Object.assign(storageData, plain(values));
+            callback();
+          }
+        }
+      }
+    }
+  });
+  const reporterSource = sourceBetween(
+    'async function reportBatchResult(',
+    '\n})();'
+  );
+  vm.runInContext(
+    `${reporterSource}
+globalThis.reportBatchResult = reportBatchResult;`,
+    context
+  );
+  return { reportBatchResult: context.reportBatchResult, storageData };
+}
+
+test('local result fallback keeps attempts distinct and preserves error codes', async () => {
+  const harness = createBatchResultFallbackHarness();
+
+  await harness.reportBatchResult(
+    'batch-fallback',
+    5,
+    2,
+    'success',
+    'new content',
+    null,
+    'https://target.test/post',
+    null
+  );
+  await harness.reportBatchResult(
+    'batch-fallback',
+    5,
+    1,
+    'fail',
+    'old content',
+    'late failure',
+    'https://target.test/post',
+    'submission_uncertain'
+  );
+
+  assert.deepEqual(
+    harness.storageData.batchResults.map(
+      ({ batchId, urlIndex, attempt, result, errorCode }) => ({
+        batchId,
+        urlIndex,
+        attempt,
+        result,
+        errorCode
+      })
+    ),
+    [
+      {
+        batchId: 'batch-fallback',
+        urlIndex: 5,
+        attempt: 2,
+        result: 'success',
+        errorCode: null
+      },
+      {
+        batchId: 'batch-fallback',
+        urlIndex: 5,
+        attempt: 1,
+        result: 'fail',
+        errorCode: 'submission_uncertain'
+      }
+    ]
+  );
+  assert.deepEqual(harness.storageData.batchReportedUrls, [
+    'batch-fallback:5:2',
+    'batch-fallback:5:1'
+  ]);
+});
+
 function loadFieldValidation({ name = '', email = '', reportStatus } = {}) {
   const context = vm.createContext({
     console: { log() {}, error() {} },

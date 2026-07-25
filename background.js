@@ -147,9 +147,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         await persistBatchReport({
           batchId: message.batchId,
           urlIndex: message.urlIndex,
+          attempt: message.attempt,
           url: message.url || '',
           result: message.result ?? 'success',
           aiContent: message.aiContent || null,
+          errorCode: message.errorCode || null,
           errorMessage: message.errorMessage || null
         });
         console.log('[background] persistBatchReport 完成，准备发送 BATCH_CONFIRMED');
