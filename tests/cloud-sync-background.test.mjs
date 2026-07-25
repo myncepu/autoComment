@@ -94,6 +94,10 @@ test('installs one five-minute alarm and runs guarded startup work', async () =>
     async migratePassword() {
       migrations.push('password');
       return { status: 'migrated' };
+    },
+    async migrateDomainConfig() {
+      migrations.push('domain');
+      return { status: 'migrated' };
     }
   });
 
@@ -101,7 +105,7 @@ test('installs one five-minute alarm and runs guarded startup work', async () =>
     name: CLOUD_SYNC_ALARM_NAME,
     info: { periodInMinutes: 5 }
   }]);
-  assert.deepEqual(migrations, ['password']);
+  assert.deepEqual(migrations, ['password', 'domain']);
   assert.equal(service.initialUploads, 1);
   assert.deepEqual(service.runReasons, ['startup']);
   assert.equal(fixture.alarmListeners.length, 1);

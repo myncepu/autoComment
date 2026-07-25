@@ -18,6 +18,9 @@ import {
   createBatchRuntimeController,
   installBatchRuntimeController
 } from './lib/batch-runtime-controller.mjs';
+import { createDomainConfigRepository } from './lib/domain-config-repository.mjs';
+import { createProfileSecretRepository } from './lib/profile-secret-repository.mjs';
+import { migrateLegacyDomainConfig } from './lib/domain-config-migration.mjs';
 import {
   createBatchSubmitContextStore,
   installBatchSubmitContextListener
@@ -34,7 +37,6 @@ const batchRuntimeController = createBatchRuntimeController({
   windows: chrome.windows,
   runtime: chrome.runtime
 });
-installBatchRuntimeController(chrome, batchRuntimeController);
 const batchSubmitContextStore = createBatchSubmitContextStore(
   chrome.storage.local,
   { maxAgeMs: Number.POSITIVE_INFINITY }
@@ -50,6 +52,16 @@ const cloudSyncService = createCloudSyncRuntime({
   storage: chrome.storage,
   fetchImpl: fetch
 });
+const domainConfigRepository = createDomainConfigRepository(chrome.storage.local);
+const profileSecretRepository = createProfileSecretRepository(chrome.storage.local);
+const domainConfigReady = (async () => {
+  await migratePasswordToLocal(chrome.storage);
+  return migrateLegacyDomainConfig({
+    storage: chrome.storage,
+    configRepository: domainConfigRepository,
+    secretRepository: profileSecretRepository
+  });
+})();
 
 const commentHistoryService = createCommentHistoryService({
   repository: commentHistoryRepository,
@@ -58,12 +70,15 @@ const commentHistoryService = createCommentHistoryService({
 });
 
 installCommentHistoryMessageListener(chrome, commentHistoryService);
-installCloudSyncMessageListener(chrome, cloudSyncService);
-if (typeof chrome.storage?.onChanged?.addListener === 'function') {
-  void installCloudSyncBackground(chrome, cloudSyncService, {
-    migratePassword: () => migratePasswordToLocal(chrome.storage)
-  });
-}
+void domainConfigReady.then(() => {
+  installBatchRuntimeController(chrome, batchRuntimeController);
+  installCloudSyncMessageListener(chrome, cloudSyncService);
+  if (typeof chrome.storage?.onChanged?.addListener === 'function') {
+    void installCloudSyncBackground(chrome, cloudSyncService);
+  }
+}).catch(() => {
+  console.warn('[background] Domain configuration migration deferred');
+});
 const commentHistoryRetention = installCommentHistoryRetention(
   chrome,
   createCloudRetentionService({
