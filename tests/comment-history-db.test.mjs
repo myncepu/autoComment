@@ -326,6 +326,50 @@ test('sync outbox attempt state and sync metadata persist independently', async 
   assert.equal(await repo.getSyncMeta('serverCursor:vault-b'), undefined);
 });
 
+test('initializes bootstrap and auth sentinels atomically without replacing progress', async (t) => {
+  const { repo } = await openRepo(t);
+  const sentinel = {
+    cursor: null,
+    serverCursor: null,
+    serverNow: null,
+    phase: 'comments',
+    done: false
+  };
+  assert.deepEqual(await repo.initializeBootstrapSentinel({
+    vaultId: 'vault-a',
+    state: sentinel
+  }), sentinel);
+  assert.deepEqual(
+    await repo.getSyncMeta('bootstrapState:vault-a'),
+    sentinel
+  );
+  assert.equal(await repo.getSyncMeta('authBlocked:vault-a'), null);
+
+  const progressed = {
+    cursor: 'signed-progress',
+    serverCursor: 42,
+    serverNow: 2_000,
+    phase: 'comments',
+    done: false
+  };
+  await repo.setSyncMeta('bootstrapState:vault-a', progressed);
+  assert.deepEqual(await repo.initializeBootstrapSentinel({
+    vaultId: 'vault-a',
+    state: sentinel
+  }), progressed);
+  assert.deepEqual(
+    await repo.getSyncMeta('bootstrapState:vault-a'),
+    progressed
+  );
+
+  await assert.rejects(repo.initializeBootstrapSentinel({
+    vaultId: '',
+    state: sentinel
+  }));
+  assert.equal(await repo.getSyncMeta('bootstrapState:'), undefined);
+  assert.equal(await repo.getSyncMeta('authBlocked:'), undefined);
+});
+
 test('sync outbox write failure rolls freshness changes back with a stable code', async (t) => {
   const { repo } = await openRepo(t);
   const original = makeBundle({
@@ -986,6 +1030,30 @@ test('bootstrap transaction rejects snapshot and phase regression without advanc
   );
   assert.equal(await repo.getRecord('phase-illegal:1'), null);
   assert.equal(await repo.getSyncMeta('serverCursor:vault-a'), undefined);
+});
+
+test('bootstrap finalization cannot regress an existing incremental cursor', async (t) => {
+  const { repo } = await openRepo(t);
+  await repo.setSyncMeta('serverCursor:vault-a', 50);
+  const record = makeBundle({
+    id: 'bootstrap-cursor-regression:1',
+    submittedAt: 100
+  });
+
+  await assert.rejects(repo.applyBootstrapPageAtomic({
+    vaultId: 'vault-a',
+    comments: [record],
+    tombstones: [],
+    nextCursor: null,
+    serverCursor: 42,
+    serverNow: 2_000,
+    phase: 'comments',
+    hasMore: false
+  }), (error) => error.code === 'SYNC_CURSOR_REGRESSION');
+
+  assert.equal(await repo.getRecord(record.comment.id), null);
+  assert.equal(await repo.getSyncMeta('bootstrapState:vault-a'), undefined);
+  assert.equal(await repo.getSyncMeta('serverCursor:vault-a'), 50);
 });
 
 test('remote changes preserve fresher comments and apply tombstones without an outbox row', async (t) => {

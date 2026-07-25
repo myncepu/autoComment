@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createCloudSyncService } from '../lib/cloud-sync-service.mjs';
+import { hashSyncSecret } from '../lib/cloud-sync-credentials.mjs';
 import { CloudSyncError } from '../lib/cloud-sync-transport.mjs';
 
 const VALID_SYNC_KEY =
@@ -120,6 +121,12 @@ function createSyncRepository({ due = [], applyError } = {}) {
     },
     async setSyncMeta(key, value) {
       meta.set(key, structuredClone(value));
+    },
+    async initializeBootstrapSentinel({ vaultId, state }) {
+      const stateKey = `bootstrapState:${vaultId}`;
+      if (!meta.has(stateKey)) meta.set(stateKey, structuredClone(state));
+      meta.set(`authBlocked:${vaultId}`, null);
+      return structuredClone(meta.get(stateKey));
     },
     async clearSyncMetaIfEqual({ key, expected }) {
       if (JSON.stringify(meta.get(key)) === JSON.stringify(expected)) {
@@ -979,8 +986,12 @@ test('keeps a created vault connected when post-credential local setup fails', a
   for (const failure of ['meta', 'settings']) {
     const repository = createSyncRepository();
     if (failure === 'meta') {
-      repository.setSyncMeta = async () => {
-        throw new Error('sync metadata unavailable');
+      const setSyncMeta = repository.setSyncMeta;
+      repository.setSyncMeta = async (key, value) => {
+        if (key.startsWith('authBlocked:')) {
+          throw new Error('sync metadata unavailable');
+        }
+        return setSyncMeta(key, value);
       };
     } else {
       repository.enqueueSyncMutation = async () => {
@@ -1029,8 +1040,9 @@ test('compensates a remote create once when credential persistence fails', async
   };
   const calls = [];
   let createdVaultId;
+  const repository = createSyncRepository();
   const service = createCloudSyncService({
-    repository: createSyncRepository(),
+    repository,
     storageLocal,
     settings: createSettingsFixture(),
     transportFactory: ({ vaultId }) => {
@@ -1056,6 +1068,160 @@ test('compensates a remote create once when credential persistence fails', async
     'create',
     ['delete', createdVaultId]
   ]);
+  assert.equal(
+    repository.meta.has(`initialSettingsState:${createdVaultId}`),
+    false
+  );
+});
+
+test('compensates pre-credential initial-settings preparation failures', async () => {
+  for (const failure of ['settings', 'state']) {
+    const repository = createSyncRepository();
+    if (failure === 'state') {
+      repository.setSyncMeta = async () => {
+        throw new Error('initial settings state unavailable');
+      };
+    }
+    const storageLocal = createStorage();
+    const calls = [];
+    const service = createCloudSyncService({
+      repository,
+      storageLocal,
+      settings: {
+        async load() {
+          if (failure === 'settings') {
+            throw new Error('settings unavailable');
+          }
+          return { batch_concurrency: 3 };
+        },
+        async saveRemote() {},
+        createMutations() {
+          return [];
+        }
+      },
+      transportFactory: ({ vaultId }) => ({
+        async createVault() {
+          calls.push('create');
+        },
+        async deleteVault(confirmation) {
+          calls.push(['delete', confirmation, vaultId]);
+        }
+      })
+    });
+
+    await assert.rejects(
+      service.createVault(),
+      failure === 'settings'
+        ? /settings unavailable/
+        : /initial settings state unavailable/
+    );
+    assert.deepEqual(calls.map((call) => (
+      Array.isArray(call) ? call[0] : call
+    )), ['create', 'delete']);
+    assert.equal(storageLocal.data.cloud_sync_enabled, undefined);
+  }
+});
+
+test('durably resumes only missing initial settings before the next normal push', async () => {
+  const repository = createSyncRepository();
+  const storageLocal = createStorage();
+  const enqueueCalls = [];
+  const enqueueSyncMutation = repository.enqueueSyncMutation;
+  let failSecondSetting = true;
+  repository.enqueueSyncMutation = async (mutation) => {
+    enqueueCalls.push(mutation.entityId);
+    if (
+      failSecondSetting
+      && mutation.entityId === 'batch_timeout_seconds'
+    ) {
+      failSecondSetting = false;
+      throw new Error('second initial setting unavailable');
+    }
+    return enqueueSyncMutation(mutation);
+  };
+  const pushed = [];
+  const service = createCloudSyncService({
+    repository,
+    storageLocal,
+    settings: {
+      async load() {
+        return {
+          batch_concurrency: 3,
+          batch_timeout_seconds: 90
+        };
+      },
+      async saveRemote() {},
+      createMutations() {
+        return [];
+      }
+    },
+    transportFactory: () => ({
+      async createVault() {
+        return { ok: true, highWatermark: 0 };
+      },
+      async push({ mutations }) {
+        pushed.push(structuredClone(mutations));
+        return {
+          results: mutations.map(({ mutationId }, index) => ({
+            mutationId,
+            status: 'applied',
+            serverSeq: index + 1
+          }))
+        };
+      },
+      async pull({ cursor }) {
+        return {
+          changes: [],
+          nextCursor: cursor,
+          hasMore: false,
+          highWatermark: 2
+        };
+      }
+    }),
+    now: () => 2_000
+  });
+
+  const created = await service.createVault();
+  assert.equal(created.connected, true);
+  assert.equal(created.queuedSettings, 1);
+  assert.equal(created.warning.code, 'SYNC_SETTING_QUEUE_FAILED');
+  const stateKey = `initialSettingsState:${created.vaultId}`;
+  const pendingState = repository.meta.get(stateKey);
+  assert.equal(pendingState.nextIndex, 1);
+  assert.deepEqual(
+    pendingState.entries.map(({ key }) => key),
+    ['batch_concurrency', 'batch_timeout_seconds']
+  );
+  assert.equal(
+    pendingState.entries[0].mutationId,
+    await hashSyncSecret(
+      `initial-setting:${created.vaultId}:batch_concurrency:3`
+    )
+  );
+  assert.doesNotMatch(
+    JSON.stringify(pendingState),
+    /syncKey|secret|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/iu
+  );
+  assert.deepEqual(repository.outbox.map(({ entityId }) => entityId), [
+    'batch_concurrency'
+  ]);
+
+  assert.deepEqual(await service.runOnce('alarm'), {
+    pushed: 2,
+    pulled: 0,
+    cursor: 0
+  });
+  assert.deepEqual(enqueueCalls, [
+    'batch_concurrency',
+    'batch_timeout_seconds',
+    'batch_timeout_seconds'
+  ]);
+  assert.deepEqual(
+    pushed[0].map(({ entityId }) => entityId),
+    ['batch_concurrency', 'batch_timeout_seconds']
+  );
+  assert.equal(repository.meta.has(stateKey), false);
+  assert.deepEqual(repository.outbox, []);
 });
 
 test('imports a validated key through every bootstrap phase before pulling deltas', async () => {
@@ -1383,7 +1549,172 @@ test('does not bootstrap or write remote entities when imported credential stora
   );
   assert.equal(bootstrapCalls, 0);
   assert.deepEqual(repository.bootstrapPages, []);
-  assert.deepEqual(repository.meta, new Map());
+  assert.deepEqual(
+    repository.meta.get('bootstrapState:AAAAAAAAAAAAAAAAAAAAAA'),
+    {
+      cursor: null,
+      serverCursor: null,
+      serverNow: null,
+      phase: 'comments',
+      done: false
+    }
+  );
+  assert.equal(
+    repository.meta.get('authBlocked:AAAAAAAAAAAAAAAAAAAAAA'),
+    null
+  );
+});
+
+test('does not persist imported credentials when the bootstrap sentinel transaction fails', async () => {
+  const repository = createSyncRepository();
+  repository.initializeBootstrapSentinel = async () => {
+    throw new Error('bootstrap sentinel unavailable');
+  };
+  const storageLocal = createStorage();
+  let bootstrapCalls = 0;
+  const service = createCloudSyncService({
+    repository,
+    storageLocal,
+    settings: createSettingsFixture(),
+    transportFactory: () => ({
+      async status() {
+        return { ok: true, highWatermark: 42 };
+      },
+      async bootstrap() {
+        bootstrapCalls += 1;
+      }
+    })
+  });
+
+  await assert.rejects(
+    service.importKey(VALID_SYNC_KEY),
+    /bootstrap sentinel unavailable/
+  );
+  assert.equal(storageLocal.data.cloud_sync_enabled, undefined);
+  assert.equal(bootstrapCalls, 0);
+});
+
+test('keeps persisted imports connected after metadata reads fail and resumes bootstrap before pull', async () => {
+  const repository = createSyncRepository();
+  const storageLocal = createStorage();
+  const originalGetSyncMeta = repository.getSyncMeta;
+  let failFirstPostPersistRead = true;
+  repository.getSyncMeta = async (key) => {
+    if (
+      failFirstPostPersistRead
+      && storageLocal.data.cloud_sync_enabled === true
+      && key.startsWith('bootstrapState:')
+    ) {
+      failFirstPostPersistRead = false;
+      throw new Error('sync metadata read unavailable');
+    }
+    return originalGetSyncMeta(key);
+  };
+  const calls = [];
+  const service = createCloudSyncService({
+    repository,
+    storageLocal,
+    settings: createSettingsFixture(),
+    transportFactory: () => ({
+      async status() {
+        calls.push('status');
+        return { ok: true, highWatermark: 42 };
+      },
+      async bootstrap() {
+        calls.push('bootstrap');
+        return {
+          comments: [],
+          settings: [],
+          tombstones: [],
+          nextCursor: null,
+          hasMore: false,
+          serverCursor: 42,
+          serverNow: 2_000
+        };
+      },
+      async pull({ cursor }) {
+        calls.push(['pull', cursor]);
+        return {
+          changes: [],
+          nextCursor: 42,
+          hasMore: false,
+          highWatermark: 42
+        };
+      }
+    })
+  });
+
+  const imported = await service.importKey(VALID_SYNC_KEY);
+  assert.equal(imported.connected, true);
+  assert.equal(imported.bootstrapPending, true);
+  assert.deepEqual(imported.error, {
+    code: 'SYNC_BOOTSTRAP_FAILED',
+    status: 0,
+    retryable: true
+  });
+  assert.equal(storageLocal.data.cloud_sync_enabled, true);
+  assert.deepEqual(calls, ['status']);
+
+  assert.deepEqual(await service.runOnce('alarm'), {
+    pushed: 0,
+    pulled: 0,
+    cursor: 42
+  });
+  assert.deepEqual(calls, ['status', 'bootstrap', ['pull', 42]]);
+});
+
+test('serializes import and runOnce bootstrap work for the same vault', async () => {
+  const repository = createSyncRepository();
+  const storageLocal = createStorage();
+  const bootstrapStarted = deferred();
+  const releaseBootstrap = deferred();
+  let bootstrapCalls = 0;
+  const service = createCloudSyncService({
+    repository,
+    storageLocal,
+    settings: createSettingsFixture(),
+    transportFactory: () => ({
+      async status() {
+        return { ok: true, highWatermark: 42 };
+      },
+      async bootstrap() {
+        bootstrapCalls += 1;
+        bootstrapStarted.resolve();
+        await releaseBootstrap.promise;
+        return {
+          comments: [],
+          settings: [],
+          tombstones: [],
+          nextCursor: null,
+          hasMore: false,
+          serverCursor: 42,
+          serverNow: 2_000
+        };
+      },
+      async pull({ cursor }) {
+        return {
+          changes: [],
+          nextCursor: cursor,
+          hasMore: false,
+          highWatermark: 42
+        };
+      }
+    })
+  });
+
+  const imported = service.importKey(VALID_SYNC_KEY);
+  await bootstrapStarted.promise;
+  const automatic = service.runOnce('alarm');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(bootstrapCalls, 1);
+  releaseBootstrap.resolve();
+  assert.equal((await imported).connected, true);
+  assert.deepEqual(await automatic, {
+    pushed: 0,
+    pulled: 0,
+    cursor: 42
+  });
+  assert.equal(bootstrapCalls, 1);
 });
 
 test('rejects an invalid imported key before transport or credential storage', async () => {
