@@ -7,6 +7,7 @@ import {
   normalizeBatchConcurrency
 } from './lib/batch-scheduler.mjs';
 import { BatchWindowManager } from './lib/batch-window-manager.mjs';
+import { renderCloudQueueStatus } from './lib/cloud-sync-batch-status.mjs';
 
 // 批量外链评论自动化 - 扩展端核心逻辑（本地批次管理）
 
@@ -28,6 +29,7 @@ let status = 'idle';                // idle | starting | running | completing | 
 let scheduler = null;
 let windowManager = null;
 let openingActivities = new Map();
+const confirmedCloudQueueStatuses = new Map();
 let isTerminated = false;
 
 // 实时计数
@@ -98,6 +100,7 @@ const statsTableBody = document.getElementById('statsTableBody');
 const statsTableWrap = document.getElementById('statsTableWrap');
 const statsCountLabel = document.getElementById('statsCountLabel');
 const historySaveWarning = document.getElementById('historySaveWarning');
+const cloudSyncBatchWarning = document.getElementById('cloudSyncBatchWarning');
 const openHistoryBtn = document.getElementById('openHistoryBtn');
 const historyRetentionBanner = document.getElementById('historyRetentionBanner');
 const historyRetentionText = document.getElementById('historyRetentionText');
@@ -229,6 +232,23 @@ function renderHistorySaveWarning() {
     ? `仍有 ${historyPendingCount} 条评论历史等待后台重试保存。`
     : '部分评论历史尚未保存，请稍后重试或检查扩展存储。';
   historySaveWarning.style.display = hasHistorySaveWarning ? 'block' : 'none';
+}
+
+function renderCloudSyncBatchWarning() {
+  const failedResult = localResults.find(
+    (result) => result.result === 'success'
+      && result.historySaveStatus === 'saved'
+      && result.cloudQueueStatus === 'failed'
+  );
+  if (typeof renderCloudQueueStatus === 'function') {
+    renderCloudQueueStatus(failedResult, { cloudSyncBatchWarning });
+    return;
+  }
+  if (!cloudSyncBatchWarning) return;
+  cloudSyncBatchWarning.textContent = failedResult
+    ? '评论已保存，尚未进入云同步队列。'
+    : '';
+  cloudSyncBatchWarning.hidden = !failedResult;
 }
 
 function retryPendingHistoryWrites() {
@@ -384,6 +404,10 @@ function bindEvents() {
       aiContentLen: message.aiContent ? message.aiContent.length : 0,
       time: new Date().toISOString()
     });
+    confirmedCloudQueueStatuses.set(
+      message.urlIndex,
+      message.cloudQueueStatus || null
+    );
     void handleTaskConfirmed(
       message.urlIndex,
       message.result,
@@ -1288,7 +1312,8 @@ function recordTaskResult(
   errorMessage,
   elapsed,
   items = batchItems,
-  historySaveStatus = null
+  historySaveStatus = null,
+  cloudQueueStatus = null
 ) {
   console.log('[batch] recordTaskResult 被调用:', {
     urlIndex,
@@ -1319,6 +1344,7 @@ function recordTaskResult(
     aiContent: recordedAiContent || null,
     errorMessage: recordedErrorMessage || null,
     historySaveStatus: historySaveStatus || null,
+    cloudQueueStatus: cloudQueueStatus || null,
     timestamp: Date.now(),
     elapsed,
     originalRow: item?.originalRow || null  // 保存原始行数据用于导出
@@ -1379,6 +1405,7 @@ async function finalizeTask(
     suppressCompletion = false,
     ownership = null,
     historySaveStatus = null,
+    cloudQueueStatus = null,
     historyPendingCount: confirmedHistoryPendingCount
   } = {}
 ) {
@@ -1389,6 +1416,7 @@ async function finalizeTask(
   if (existingResult) {
     if (historySaveStatus) {
       existingResult.historySaveStatus = historySaveStatus;
+      existingResult.cloudQueueStatus = cloudQueueStatus || null;
       saveLocalResults();
       renderStats();
     }
@@ -1425,7 +1453,9 @@ async function finalizeTask(
       result: {
         result,
         aiContent: aiContent || null,
-        errorMessage: errorMessage || null
+        errorMessage: errorMessage || null,
+        historySaveStatus,
+        cloudQueueStatus
       }
     });
   } catch (error) {
@@ -1451,7 +1481,8 @@ async function finalizeTask(
       errorMessage,
       elapsed,
       taskItems,
-      historySaveStatus
+      historySaveStatus,
+      cloudQueueStatus
     );
   }
   if (closeWindow && taskWindowManager) {
@@ -1489,6 +1520,8 @@ async function handleTaskConfirmed(
   confirmedHistoryPendingCount,
   sourceTabId
 ) {
+  const cloudQueueStatus = confirmedCloudQueueStatuses.get(urlIndex) || null;
+  confirmedCloudQueueStatuses.delete(urlIndex);
   const confirmationLifecycle = {
     batchId,
     lifecycleToken,
@@ -1514,6 +1547,7 @@ async function handleTaskConfirmed(
   await finalizeTask(urlIndex, result, aiContent, errorMessage, {
     ownership: confirmationLifecycle,
     historySaveStatus,
+    cloudQueueStatus,
     historyPendingCount: confirmedHistoryPendingCount
   });
 }
@@ -2045,10 +2079,12 @@ function renderStats() {
   if (localResults.length === 0) {
     statsPanel.classList.remove('visible');
     renderHistorySaveWarning();
+    renderCloudSyncBatchWarning();
     return;
   }
   statsPanel.classList.add('visible');
   renderHistorySaveWarning();
+  renderCloudSyncBatchWarning();
 
   const total = localResults.length;
   const success = localResults.filter((r) => r.result === 'success').length;

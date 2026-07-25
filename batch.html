@@ -537,6 +537,20 @@
       .history-save-queued { color: #b45309; }
       .history-save-failed { color: #b91c1c; }
 
+      .cloud-sync-batch-warning {
+        margin: 12px 0;
+        padding: 10px 12px;
+        border: 1px solid #f59e0b;
+        border-radius: 8px;
+        background: #fffbeb;
+        color: #92400e;
+        font-size: 13px;
+      }
+
+      .cloud-sync-batch-warning[hidden] {
+        display: none;
+      }
+
       .history-retention-banner {
         display: flex;
         align-items: center;
@@ -869,6 +883,13 @@
       <div class="history-save-warning" id="historySaveWarning">
         部分评论历史尚未保存，请稍后重试或检查扩展存储。
       </div>
+      <div
+        class="cloud-sync-batch-warning"
+        id="cloudSyncBatchWarning"
+        role="status"
+        aria-live="polite"
+        hidden
+      ></div>
 
       <!-- 结果统计面板 -->
       <div class="card stats-panel" id="statsPanel">

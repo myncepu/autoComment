@@ -5,6 +5,9 @@ import {
 } from './lib/llm-config.mjs';
 import { saveOptionsModelConfig, testOptionsModelConfig } from './lib/llm-options-controller.mjs';
 import {
+  createCloudSyncOptionsController
+} from './lib/cloud-sync-options-controller.mjs';
+import {
   buildExportableSettings,
   migratePasswordToLocal,
   splitImportedSettings
@@ -64,6 +67,19 @@ document.addEventListener('DOMContentLoaded', async () => {
   const openBatchBtn = document.getElementById('openBatchBtn');
   const openHistoryBtn = document.getElementById('openHistoryBtn');
   const toggleExportOutlinksFloatingBtn = document.getElementById('toggleExportOutlinksFloatingBtn');
+  const cloudSyncElements = Object.fromEntries([
+    'cloudSyncCreateBtn',
+    'cloudSyncImportInput',
+    'cloudSyncImportBtn',
+    'cloudSyncCopyBtn',
+    'cloudSyncRunBtn',
+    'cloudSyncDisconnectBtn',
+    'cloudSyncDeleteBtn',
+    'cloudSyncStatus',
+    'cloudSyncLastSuccess',
+    'cloudSyncPendingCount',
+    'cloudSyncDeviceId'
+  ].map((id) => [id, document.getElementById(id)]));
 
   if (
     !websiteUrlInput ||
@@ -435,6 +451,17 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
   if (openHistoryBtn) {
     openHistoryBtn.addEventListener('click', () => chrome.tabs.create({ url: 'history.html' }));
+  }
+
+  if (Object.values(cloudSyncElements).every(Boolean)) {
+    const cloudSyncController = createCloudSyncOptionsController({
+      elements: cloudSyncElements,
+      sendMessage: (message) => chrome.runtime.sendMessage(message),
+      clipboard: navigator.clipboard,
+      prompt: window.prompt.bind(window)
+    });
+    cloudSyncController.bind();
+    await cloudSyncController.refresh();
   }
 
   const modelConfig = await loadLlmConfig(chrome.storage);
