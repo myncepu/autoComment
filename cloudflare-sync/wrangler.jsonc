@@ -1,0 +1,20 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "auto-comment-sync",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-25",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "ALLOWED_EXTENSION_ORIGINS": "chrome-extension://allowed-extension"
+  },
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "auto-comment-sync",
+    "database_id": "11111111-1111-1111-1111-111111111111",
+    "migrations_dir": "migrations"
+  }],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 0.1
+  }
+}
