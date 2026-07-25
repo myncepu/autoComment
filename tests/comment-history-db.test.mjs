@@ -514,6 +514,79 @@ test('sync outbox completion rejects entity keys outside the receipt vault', asy
   }]));
 });
 
+test('sync outbox completion rejects same-vault receipts for the wrong entity', async (t) => {
+  const { repo } = await openRepo(t);
+  const mutation = {
+    mutationId: 'entity-bound-mutation',
+    vaultId: 'vault-a',
+    entityType: 'comment',
+    entityId: 'batch-entity-a:1',
+    operation: 'upsert',
+    payload: { comment: { id: 'batch-entity-a:1' }, anchors: [] },
+    createdAt: 100,
+    attemptCount: 0,
+    nextAttemptAt: 100,
+    lastErrorCode: null,
+    state: 'pending'
+  };
+  await repo.enqueueSyncMutation(mutation);
+  const receipt = {
+    mutationId: mutation.mutationId,
+    vaultId: 'vault-a',
+    revisionId: 'revision-1',
+    serverSeq: 10
+  };
+
+  await assert.rejects(repo.completeSyncMutations([{
+    ...receipt,
+    entityKey: 'vault-a:comment:batch-entity-b:1'
+  }]));
+  await assert.rejects(repo.completeSyncMutations([{
+    ...receipt,
+    entityKey: 'vault-a:comment_delete:batch-entity-a:1'
+  }]));
+  assert.deepEqual(await repo.listDueSyncMutations({
+    vaultId: 'vault-a',
+    now: 1000,
+    limit: 100
+  }), [mutation]);
+});
+
+test('sync outbox completion ignores a late old receipt instead of regressing entity state', async (t) => {
+  const { repo } = await openRepo(t);
+  const record = makeBundle({
+    id: 'late-receipt:1',
+    submittedAt: 100
+  });
+  record.comment.historyRevision = {
+    capturedAt: 100,
+    recordedAt: 101,
+    sequence: 0,
+    id: 'revision-new'
+  };
+  await repo.upsertRecord(record);
+  await repo.completeSyncMutations([{
+    mutationId: 'already-completed-new',
+    vaultId: 'vault-a',
+    entityKey: 'vault-a:comment:late-receipt:1',
+    revisionId: 'revision-new',
+    serverSeq: 20
+  }]);
+  await repo.completeSyncMutations([{
+    mutationId: 'already-completed-old',
+    vaultId: 'vault-a',
+    entityKey: 'vault-a:comment:late-receipt:1',
+    revisionId: 'revision-old',
+    serverSeq: 10
+  }]);
+
+  assert.equal(await repo.evictSyncedCacheBefore({
+    vaultId: 'vault-a',
+    cutoff: 200
+  }), 1);
+  assert.equal(await repo.getRecord(record.comment.id), null);
+});
+
 test('remote change page aborts every record and cursor when a later change is invalid', async (t) => {
   const { repo } = await openRepo(t);
   await assert.rejects(repo.applyRemoteChangesAtomic({
