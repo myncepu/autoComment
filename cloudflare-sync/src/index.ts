@@ -1,4 +1,5 @@
 import {
+  allowedOrigin,
   allowedMethods,
   apiError,
   hasForbiddenOrigin,
@@ -6,7 +7,54 @@ import {
   preflight,
   withCors
 } from './http';
+import { requireVault } from './auth';
+import { pushMutations } from './push';
 import { deleteVault, getStatus, putVault } from './vault';
+
+function pushPreflight(
+  request: Request,
+  env: Env,
+  requestId: string
+): Response {
+  if (!allowedOrigin(request, env)) {
+    return apiError('CORS_ORIGIN_FORBIDDEN', 403, false, requestId);
+  }
+  if (
+    request.headers.get('Access-Control-Request-Method') !== 'POST'
+  ) {
+    const response = apiError(
+      'METHOD_NOT_ALLOWED',
+      405,
+      false,
+      requestId
+    );
+    response.headers.set('Allow', 'POST, OPTIONS');
+    return response;
+  }
+
+  const requestedHeaders = request.headers.get(
+    'Access-Control-Request-Headers'
+  );
+  if (requestedHeaders) {
+    const supported = new Set(['authorization', 'content-type']);
+    const valid = requestedHeaders
+      .split(',')
+      .map((header) => header.trim().toLowerCase())
+      .every((header) => supported.has(header));
+    if (!valid) {
+      return apiError('CORS_HEADER_NOT_ALLOWED', 403, false, requestId);
+    }
+  }
+
+  return new Response(null, {
+    status: 204,
+    headers: {
+      'Access-Control-Allow-Methods': 'POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+      'Cache-Control': 'no-store'
+    }
+  });
+}
 
 function methodNotAllowed(pathname: string, requestId: string): Response {
   const response = apiError(
@@ -28,6 +76,9 @@ async function route(
   const pathname = new URL(request.url).pathname;
 
   if (request.method === 'OPTIONS') {
+    if (pathname === '/v1/sync/push') {
+      return pushPreflight(request, env, requestId);
+    }
     return preflight(request, env, requestId);
   }
 
@@ -46,6 +97,21 @@ async function route(
       return getStatus(request, env, requestId);
     }
     return methodNotAllowed(pathname, requestId);
+  }
+
+  if (pathname === '/v1/sync/push') {
+    if (request.method === 'POST') {
+      const vault = await requireVault(request, env);
+      return pushMutations(request, env, vault, requestId);
+    }
+    const response = apiError(
+      'METHOD_NOT_ALLOWED',
+      405,
+      false,
+      requestId
+    );
+    response.headers.set('Allow', 'POST, OPTIONS');
+    return response;
   }
 
   return apiError('NOT_FOUND', 404, false, requestId);
