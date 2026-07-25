@@ -414,6 +414,7 @@ test('background migrates an old record before its startup retention check and c
     type: 'BATCH_HANDLE_CONFIRM',
     batchId: 'batch-integration',
     urlIndex: 9,
+    attempt: 1,
     result: 'success',
     url: 'https://target.test/post',
     aiContent: 'Generated fallback',
@@ -477,6 +478,7 @@ test('background migrates an old record before its startup retention check and c
     type: 'BATCH_TASK_ACTIVE',
     batchId: message.batchId,
     urlIndex: message.urlIndex,
+    attempt: message.attempt,
     tabId: 42,
     windowId: 52
   });
@@ -484,7 +486,8 @@ test('background migrates an old record before its startup retention check and c
   const submittingResponses = await dispatchConfirm({
     type: 'BATCH_TASK_SUBMITTING',
     batchId: message.batchId,
-    urlIndex: message.urlIndex
+    urlIndex: message.urlIndex,
+    attempt: message.attempt
   });
   assert.equal(submittingResponses[0]?.ok, true);
 
@@ -507,6 +510,7 @@ test('background migrates an old record before its startup retention check and c
   }]);
   assert.equal(runtimeMessages.length, 1);
   assert.equal(runtimeMessages[0].type, 'BATCH_CONFIRMED');
+  assert.equal(runtimeMessages[0].attempt, 1);
   assert.equal(runtimeMessages[0].sourceTabId, 42);
   assert.equal(runtimeMessages[0].historySaveStatus, 'saved');
   assert.equal(runtimeMessages[0].historyPendingCount, 0);

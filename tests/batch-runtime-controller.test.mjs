@@ -22,6 +22,7 @@ function createHarness({ failPower = false, existingTabs = [] } = {}) {
   const data = {};
   const setCalls = [];
   const powerCalls = [];
+  const removedTabs = [];
   const removedWindows = [];
   const createdTabs = [];
   const listeners = {
@@ -65,6 +66,9 @@ function createHarness({ failPower = false, existingTabs = [] } = {}) {
     async create(details) {
       createdTabs.push(structuredClone(details));
       return { id: 91, ...details };
+    },
+    async remove(tabIds) {
+      removedTabs.push(...(Array.isArray(tabIds) ? tabIds : [tabIds]));
     }
   };
   const windows = {
@@ -105,6 +109,7 @@ function createHarness({ failPower = false, existingTabs = [] } = {}) {
     data,
     setCalls,
     powerCalls,
+    removedTabs,
     removedWindows,
     createdTabs,
     listeners
@@ -132,6 +137,147 @@ function startMessage(count = 2) {
   };
 }
 
+function createVersion1ControllerFixture() {
+  const items = createItems(1);
+  return {
+    version: 1,
+    batchId: 'batch-1',
+    status: 'paused_recovery',
+    createdAt: 1000,
+    updatedAt: 1000,
+    source: {
+      fileName: 'input.csv',
+      headers: ['id', 'URL'],
+      rows: items.map((item) => item.originalRow),
+      parsedUrls: items
+    },
+    settings: {
+      autoOpenPanel: true,
+      autoGenerate: true,
+      autoSubmit: true,
+      timeoutSeconds: 60,
+      concurrency: 3
+    },
+    cursor: { nextIndex: 0 },
+    tasks: {
+      0: {
+        urlIndex: 0,
+        state: 'queued',
+        phase: null,
+        tabId: null,
+        windowId: null,
+        startedAt: null,
+        updatedAt: 1000
+      }
+    },
+    results: []
+  };
+}
+
+test('migrates version 1 exactly once before returning it to the page', async () => {
+  const harness = createHarness();
+  harness.data.batchRuntimeCheckpoint = createVersion1ControllerFixture();
+
+  const first = await harness.controller.handleMessage({
+    type: 'BATCH_SESSION_GET'
+  });
+  const second = await harness.controller.handleMessage({
+    type: 'BATCH_SESSION_GET'
+  });
+
+  assert.equal(first.checkpoint.version, 2);
+  assert.equal(second.checkpoint.version, 2);
+  assert.equal(
+    harness.setCalls.filter(
+      (call) => call.batchRuntimeCheckpoint?.version === 2
+    ).length,
+    1
+  );
+});
+
+test('returns the checkpoint updated by a task phase command', async () => {
+  const { controller } = createHarness();
+  await controller.handleMessage(startMessage(1));
+  await controller.handleMessage({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 11,
+    windowId: 21
+  });
+
+  const response = await controller.handleMessage({
+    type: 'BATCH_TASK_PHASE',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    phase: 'generating'
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.checkpoint.tasks['0'].phase, 'generating');
+});
+
+test('returns the checkpoint advanced by a task retry command', async () => {
+  const { controller } = createHarness();
+  await controller.handleMessage(startMessage(1));
+  const terminal = await controller.handleMessage({
+    type: 'BATCH_TASK_TERMINAL',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    result: {
+      result: 'fail',
+      errorCode: 'task_timeout',
+      errorMessage: 'timed out'
+    }
+  });
+  assert.equal(terminal.ok, true);
+
+  const response = await controller.handleMessage({
+    type: 'BATCH_TASK_RETRY',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.checkpoint.tasks['0'].attempt, 2);
+  assert.equal(response.checkpoint.tasks['0'].state, 'queued');
+});
+
+test('returns the checkpoint updated by a task manual status command', async () => {
+  const { controller } = createHarness();
+  await controller.handleMessage(startMessage(1));
+  const terminal = await controller.handleMessage({
+    type: 'BATCH_TASK_TERMINAL',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    result: {
+      result: 'no_comment_box',
+      errorCode: 'no_comment_box',
+      errorMessage: 'not found'
+    }
+  });
+  assert.equal(terminal.ok, true);
+
+  const response = await controller.handleMessage({
+    type: 'BATCH_TASK_MANUAL_UPDATE',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    status: 'in_progress'
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(
+    response.checkpoint.tasks['0'].manualResolution.status,
+    'in_progress'
+  );
+});
+
 test('serializes simultaneous task updates without losing either activity', async () => {
   const { controller, data } = createHarness();
   const started = await controller.handleMessage(startMessage());
@@ -142,6 +288,7 @@ test('serializes simultaneous task updates without losing either activity', asyn
       type: 'BATCH_TASK_ACTIVE',
       batchId: 'batch-1',
       urlIndex: 0,
+      attempt: 1,
       tabId: 1,
       windowId: 11
     }),
@@ -149,6 +296,7 @@ test('serializes simultaneous task updates without losing either activity', asyn
       type: 'BATCH_TASK_ACTIVE',
       batchId: 'batch-1',
       urlIndex: 1,
+      attempt: 1,
       tabId: 2,
       windowId: 12
     })
@@ -205,6 +353,7 @@ test('a reloaded service worker reasserts wakefulness on the next running task u
     type: 'BATCH_TASK_ACTIVE',
     batchId: 'batch-1',
     urlIndex: 0,
+    attempt: 1,
     tabId: 1,
     windowId: 11,
     startedAt: 4900
@@ -235,11 +384,12 @@ test('a power acquisition failure leaves a new checkpoint safely paused', async 
   ]);
 });
 
-test('loading a stale running batch pauses it and closes orphan windows', async () => {
+test('loading a stale running batch closes only worker tabs in their shared window', async () => {
   const {
     controller,
     data,
     powerCalls,
+    removedTabs,
     removedWindows
   } = createHarness();
   await controller.handleMessage(startMessage());
@@ -248,6 +398,7 @@ test('loading a stale running batch pauses it and closes orphan windows', async 
       type: 'BATCH_TASK_ACTIVE',
       batchId: 'batch-1',
       urlIndex: 0,
+      attempt: 1,
       tabId: 1,
       windowId: 11
     }),
@@ -255,14 +406,16 @@ test('loading a stale running batch pauses it and closes orphan windows', async 
       type: 'BATCH_TASK_ACTIVE',
       batchId: 'batch-1',
       urlIndex: 1,
+      attempt: 1,
       tabId: 2,
-      windowId: 12
+      windowId: 11
     })
   ]);
   await controller.handleMessage({
     type: 'BATCH_TASK_SUBMITTING',
     batchId: 'batch-1',
-    urlIndex: 1
+    urlIndex: 1,
+    attempt: 1
   });
 
   const response = await controller.loadForPage();
@@ -272,7 +425,8 @@ test('loading a stale running batch pauses it and closes orphan windows', async 
   assert.equal(response.checkpoint.tasks['0'].state, 'queued');
   assert.equal(response.checkpoint.tasks['1'].state, 'terminal');
   assert.equal(response.checkpoint.results[0].result, 'manual_required');
-  assert.deepEqual(removedWindows.sort((a, b) => a - b), [11, 12]);
+  assert.deepEqual(removedTabs.sort((a, b) => a - b), [1, 2]);
+  assert.deepEqual(removedWindows, []);
   assert.equal(data.batchRuntimeCheckpoint.status, 'paused_recovery');
   assert.deepEqual(powerCalls, [
     ['request', 'system'],

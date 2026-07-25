@@ -117,6 +117,7 @@ async function broadcastBatchConfirmed(
     type: 'BATCH_CONFIRMED',
     batchId: message.batchId,
     urlIndex: message.urlIndex,
+    attempt: message.attempt,
     result: message.result ?? 'success',
     aiContent: message.aiContent || null,
     errorMessage: message.errorMessage || null,
