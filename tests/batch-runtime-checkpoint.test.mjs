@@ -119,6 +119,37 @@ test('checkpoint creation redacts sensitive query values across source copies an
   assert.match(serialized, /token=REDACTED/);
 });
 
+test('task terminal events redact secrets before checkpoint history persistence', () => {
+  let checkpoint = applyBatchRuntimeEvent(createCheckpoint(1), {
+    type: 'session_started',
+    batchId: 'batch-1'
+  }, 1100).checkpoint;
+  const rawError = [
+    'Authorization: Bearer event-bearer-secret',
+    '{"client_secret":"event-client-secret"}',
+    'https://target.test/final#route?access_token=event-hash-secret'
+  ].join('; ');
+
+  checkpoint = applyBatchRuntimeEvent(checkpoint, {
+    type: 'task_terminal',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    result: {
+      result: 'fail',
+      errorCode: 'task_failed',
+      errorMessage: rawError
+    }
+  }, 1200).checkpoint;
+
+  const serialized = JSON.stringify(checkpoint);
+  assert.doesNotMatch(
+    serialized,
+    /event-bearer-secret|event-client-secret|event-hash-secret/
+  );
+  assert.match(serialized, /REDACTED/);
+});
+
 test('rejects malformed and unsupported checkpoints', () => {
   assert.deepEqual(
     validateBatchRuntimeCheckpoint(null),
@@ -481,6 +512,65 @@ test('migrates a version 1 checkpoint to attempt-aware version 2', () => {
     updatedAt: null
   });
   assert.equal(migrated.checkpoint.results[0].attempt, 1);
+});
+
+test('migration sanitizes legacy and version 2 result diagnostics', () => {
+  const version1 = createVersion1CheckpointFixture();
+  version1.results[0].errorMessage = [
+    'Authorization: Basic legacy-basic-secret',
+    '{"id_token":"legacy-id-secret"}'
+  ].join('; ');
+  const migratedVersion1 = migrateBatchRuntimeCheckpoint(version1, 2000);
+  const version2 = structuredClone(migratedVersion1.checkpoint);
+  version2.results[0].errorMessage =
+    '{"authorization":"Bearer version-two-secret"}';
+  const versionTwoUrl =
+    'https://target.test/0?view=full&id_token=version-two-url-secret';
+  version2.source.rows[0] = [versionTwoUrl];
+  version2.source.parsedUrls[0].url = versionTwoUrl;
+  version2.source.parsedUrls[0].originalRow = [versionTwoUrl];
+  version2.results[0].url = versionTwoUrl;
+  version2.results[0].originalRow = [versionTwoUrl];
+
+  const migratedVersion2 = migrateBatchRuntimeCheckpoint(version2, 2100);
+  const serialized = JSON.stringify({
+    version1: migratedVersion1.checkpoint,
+    version2: migratedVersion2.checkpoint
+  });
+
+  assert.equal(migratedVersion1.ok, true);
+  assert.equal(migratedVersion2.ok, true);
+  assert.equal(migratedVersion2.changed, true);
+  assert.doesNotMatch(
+    serialized,
+    /legacy-basic-secret|legacy-id-secret|version-two-secret|version-two-url-secret/
+  );
+  assert.match(serialized, /REDACTED/);
+  assert.match(serialized, /view=full/);
+});
+
+test('migration rejects result URL credentials without echoing them', () => {
+  const version1 = createVersion1CheckpointFixture();
+  version1.results[0].url =
+    'https://migration-user:migration-password@target.test/0';
+  const version2 = migrateBatchRuntimeCheckpoint(
+    createVersion1CheckpointFixture(),
+    2000
+  ).checkpoint;
+  version2.results[0].url =
+    'https://migration-user:migration-password@target.test/0';
+
+  for (const checkpoint of [version1, version2]) {
+    let migrated;
+    assert.doesNotThrow(() => {
+      migrated = migrateBatchRuntimeCheckpoint(checkpoint, 2100);
+    });
+    assert.equal(migrated.ok, false);
+    assert.doesNotMatch(
+      JSON.stringify(migrated),
+      /migration-user|migration-password/
+    );
+  }
 });
 
 test('retries a safe terminal attempt without deleting attempt history', () => {

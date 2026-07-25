@@ -40,3 +40,32 @@ test('redacts embedded URLs and raw sensitive assignments in Chrome errors', () 
   assert.match(sanitized, /token=REDACTED/);
   assert.doesNotMatch(sanitized, /user|pass|secret-auth|raw-token/);
 });
+
+test('redacts auth schemes, JSON secrets, and hash-router tokens', () => {
+  const sentinels = [
+    'bearer-secret',
+    'basic-secret',
+    'json-secret',
+    'client-secret',
+    'id-secret',
+    'hash-secret'
+  ];
+  const sanitized = sanitizeDiagnosticText([
+    'Authorization: Bearer bearer-secret',
+    'authorization=Basic basic-secret',
+    '{"authorization":"Bearer json-secret",',
+    '"client_secret":"client-secret",',
+    '"id_token":"id-secret"}',
+    'https://example.test/post?view=full#route?access_token=hash-secret&panel=comments'
+  ].join('; '));
+
+  for (const sentinel of sentinels) {
+    assert.doesNotMatch(sanitized, new RegExp(sentinel));
+  }
+  assert.match(sanitized, /Authorization:\s*REDACTED/);
+  assert.match(sanitized, /client_secret":"REDACTED"/);
+  assert.match(sanitized, /id_token":"REDACTED"/);
+  assert.match(sanitized, /view=full/);
+  assert.match(sanitized, /route\?access_token=REDACTED/);
+  assert.match(sanitized, /panel=comments/);
+});

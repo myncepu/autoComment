@@ -52,7 +52,7 @@ last navigation change, and elapsed milliseconds.
 | `permission_denied` | fail immediately with the original permission error |
 | `tab_invalid` / `tab_query_failed` | fail with fresh query evidence |
 | `tab_discarded` | fail before automation |
-| `handle_delivery_failed` / `handle_rejected` | terminalize only the owned attempt |
+| `handle_delivery_failed` / `handle_delivery_timeout` / `handle_rejected` | terminalize only the owned attempt |
 
 ## Lifecycle and race evidence
 
@@ -139,3 +139,36 @@ submission uncertainty, adapter failures, and secret redaction:
 - full repository suite: 332 passed, 0 failed.
 
 The review-fix commit hash is recorded in the Task 7 DONE message.
+
+## Round 2 review corrections
+
+Round 2 tightened the remaining cross-boundary races:
+
+- a cancelled pending create now shares its attempt finalizer promise; a late
+  tab cannot close before terminal persistence resolves;
+- replacement and disposal aggregate finalizer outcomes, so any failed
+  terminal write keeps `paused_recovery`, retains ownership, and blocks the
+  next worker create;
+- the sanitizer now covers Bearer/Basic authorization, quoted JSON auth,
+  `client_secret`, `id_token`, and hash-router query parameters, while
+  preserving ordinary query/hash state;
+- terminal events and both version 1/version 2 checkpoint migrations sanitize
+  error history and URL copies; credential-bearing migration input is rejected
+  without returning the credential value;
+- readiness claims timeout immediately when its deadline fires, then uses the
+  bounded fresh tab read only to enrich diagnostics, so late PING success
+  cannot reverse the outcome;
+- `BATCH_HANDLE` delivery has an independent deadline and stable
+  `handle_delivery_timeout` reason; late adapter completion is ignored;
+- start, pause, resume, stop, and dispose now enter through one lifecycle
+  operation queue. Owner setup releases the entry lock before long-running
+  tab work so a subsequent stop/replacement can still cancel a pending create,
+  while cleanup operations retain the lock until ownership is settled.
+
+Round 2 verification:
+
+- focused worker/checkpoint/security suite: 84 passed, 0 failed;
+- full repository suite: 342 passed, 0 failed;
+- syntax checks, `git diff --check`, automatic-window scan, and production
+  sentinel-secret scan are required again immediately before the Round 2
+  commit.

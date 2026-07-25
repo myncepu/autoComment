@@ -808,6 +808,104 @@ test('readiness deadline terminates even when PING delivery never settles', asyn
   assert.match(outcome.message, /view=full/);
 });
 
+test('deadline claim cannot be flipped by a late successful PING', async () => {
+  let resolvePing;
+  let resolveDeadlineSnapshot;
+  let getCount = 0;
+  const tabsApi = createFakeTabsApi({
+    get() {
+      getCount += 1;
+      if (getCount === 1) {
+        return {
+          id: 100,
+          windowId: 42,
+          url: 'https://target.test/initial',
+          status: 'complete',
+          discarded: false
+        };
+      }
+      return new Promise((resolve) => {
+        resolveDeadlineSnapshot = resolve;
+      });
+    },
+    sendMessage() {
+      return new Promise((resolve) => {
+        resolvePing = resolve;
+      });
+    }
+  });
+
+  const readiness = waitForContentScriptReady(
+    { tabId: 100, startTime: Date.now() },
+    { tabsApi, timeoutMs: 10, pollIntervalMs: 5 }
+  ).then(
+    (value) => ({ kind: 'ready', value }),
+    (error) => ({ kind: 'failed', error })
+  );
+  await waitFor(() => typeof resolvePing === 'function', 'pending PING');
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  await waitFor(
+    () => typeof resolveDeadlineSnapshot === 'function',
+    'deadline snapshot'
+  );
+  resolvePing({ ok: true });
+  await Promise.resolve();
+  resolveDeadlineSnapshot({
+    id: 100,
+    windowId: 42,
+    url: 'https://target.test/final?view=full',
+    status: 'complete',
+    discarded: false
+  });
+  const outcome = await readiness;
+
+  assert.equal(outcome.kind, 'failed');
+  assert.equal(outcome.error.reason, 'timeout');
+  assert.match(outcome.error.message, /final\?view=full/);
+});
+
+test('BATCH_HANDLE has its own deadline and ignores late delivery completion', async () => {
+  let resolveHandle;
+  const harness = createWorkerHarness({
+    concurrency: 1,
+    taskCount: 1,
+    handleDeliveryTimeoutMs: 15
+  });
+  harness.dependencies.sendHandle = (activity) => {
+    harness.sentHandles.push(activity);
+    harness.calls.push(['handle', activity.urlIndex, activity.attempt]);
+    return new Promise((resolve) => {
+      resolveHandle = resolve;
+    });
+  };
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+
+  const starting = runtime.start(harness.checkpoint);
+  await waitFor(() => typeof resolveHandle === 'function', 'pending handle');
+  const outcome = await Promise.race([
+    starting.then(() => 'finished'),
+    new Promise((resolve) => setTimeout(() => resolve('hung'), 200))
+  ]);
+
+  assert.equal(outcome, 'finished');
+  assert.equal(harness.terminalPayloads.length, 1);
+  assert.equal(
+    harness.terminalPayloads[0].result.errorCode,
+    'content_script_unavailable'
+  );
+  assert.match(
+    harness.terminalPayloads[0].result.errorMessage,
+    /reason=handle_delivery_timeout/
+  );
+  assert.deepEqual(harness.tabsApi.removeCalls, [100]);
+
+  const callsAfterTimeout = structuredClone(harness.calls);
+  resolveHandle({ ok: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(harness.calls, callsAfterTimeout);
+  assert.equal(harness.terminalPayloads.length, 1);
+});
+
 test('sanitizes BATCH_HANDLE URLs and diagnostic Chrome errors', async () => {
   const harness = createWorkerHarness({ concurrency: 1, taskCount: 1 });
   const secret = 'super-secret-token';
@@ -1059,11 +1157,227 @@ test('replacement waits for a pending create to terminalize and close', async ()
   assert.equal(createCount, 2);
 });
 
+test('a cancelled late create waits for its own terminal persistence before close', async () => {
+  let resolveOldCreate;
+  let createCount = 0;
+  const harness = createWorkerHarness({
+    concurrency: 1,
+    taskCount: 1,
+    tabsOptions: {
+      create(details) {
+        createCount += 1;
+        if (createCount === 1) {
+          return new Promise((resolve) => {
+            resolveOldCreate = resolve;
+          });
+        }
+        return {
+          id: 101,
+          windowId: details.windowId,
+          url: details.url,
+          status: 'complete',
+          discarded: false
+        };
+      }
+    }
+  });
+  const replacement = structuredClone(harness.checkpoint);
+  replacement.batchId = 'batch-2';
+  const originalRequest = harness.dependencies.runtimeRequest;
+  let releaseTerminal;
+  harness.dependencies.runtimeRequest = async (type, payload) => {
+    if (payload.batchId === 'batch-1' && type === 'BATCH_TASK_TERMINAL') {
+      return new Promise((resolve) => {
+        releaseTerminal = async () => resolve(
+          await originalRequest(type, payload)
+        );
+      });
+    }
+    if (payload.batchId === 'batch-2') {
+      if (type === 'BATCH_TASK_ACTIVE') {
+        Object.assign(replacement.tasks['0'], {
+          state: 'active',
+          tabId: payload.tabId,
+          windowId: payload.windowId,
+          startedAt: payload.startedAt
+        });
+      }
+      return { ok: true, checkpoint: replacement };
+    }
+    return originalRequest(type, payload);
+  };
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+
+  const oldStart = runtime.start(harness.checkpoint);
+  await waitFor(() => createCount === 1, 'old pending create');
+  const replacing = runtime.start(replacement);
+  await waitFor(() => typeof releaseTerminal === 'function', 'deferred terminal');
+  resolveOldCreate({
+    id: 100,
+    windowId: 42,
+    url: 'https://target.test/0',
+    status: 'complete',
+    discarded: false
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(
+    harness.tabsApi.removeCalls,
+    [],
+    'terminal persistence owns the late-created tab until it settles'
+  );
+  await releaseTerminal();
+  await Promise.all([oldStart, replacing]);
+
+  assert.deepEqual(harness.tabsApi.removeCalls, [100]);
+  assert.equal(createCount, 2);
+});
+
+test('failed pending-create terminal persistence blocks replacement and close', async () => {
+  let resolveOldCreate;
+  let createCount = 0;
+  const harness = createWorkerHarness({
+    concurrency: 1,
+    taskCount: 1,
+    tabsOptions: {
+      create(details) {
+        createCount += 1;
+        if (createCount === 1) {
+          return new Promise((resolve) => {
+            resolveOldCreate = resolve;
+          });
+        }
+        return {
+          id: 101,
+          windowId: details.windowId,
+          url: details.url,
+          status: 'complete',
+          discarded: false
+        };
+      }
+    }
+  });
+  const replacement = structuredClone(harness.checkpoint);
+  replacement.batchId = 'batch-2';
+  const originalRequest = harness.dependencies.runtimeRequest;
+  harness.dependencies.runtimeRequest = async (type, payload) => {
+    if (payload.batchId === 'batch-1' && type === 'BATCH_TASK_TERMINAL') {
+      return { ok: false, error: 'terminal persistence unavailable' };
+    }
+    if (payload.batchId === 'batch-2') {
+      return { ok: true, checkpoint: replacement };
+    }
+    return originalRequest(type, payload);
+  };
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+
+  const oldStart = runtime.start(harness.checkpoint);
+  await waitFor(() => createCount === 1, 'old pending create');
+  const replacing = runtime.start(replacement);
+  resolveOldCreate({
+    id: 100,
+    windowId: 42,
+    url: 'https://target.test/0',
+    status: 'complete',
+    discarded: false
+  });
+  await Promise.all([oldStart, replacing]);
+
+  assert.equal(createCount, 1);
+  assert.deepEqual(harness.tabsApi.removeCalls, []);
+  assert.equal(harness.tabsApi.removedListenerCount(), 1);
+});
+
+test('concurrent starts dispose every intermediate manager before the last owner wins', async () => {
+  const harness = createWorkerHarness({ concurrency: 1, taskCount: 1 });
+  const batch2 = structuredClone(harness.checkpoint);
+  batch2.batchId = 'batch-2';
+  const batch3 = structuredClone(harness.checkpoint);
+  batch3.batchId = 'batch-3';
+  const checkpoints = new Map([
+    ['batch-1', harness.checkpoint],
+    ['batch-2', batch2],
+    ['batch-3', batch3]
+  ]);
+  harness.dependencies.runtimeRequest = async (type, payload) => {
+    const checkpoint = checkpoints.get(payload.batchId);
+    const task = checkpoint?.tasks[String(payload.urlIndex)];
+    harness.calls.push(['runtime', type, payload.urlIndex, payload.attempt]);
+    if (type === 'BATCH_TASK_ACTIVE') {
+      Object.assign(task, {
+        state: 'active',
+        tabId: payload.tabId,
+        windowId: payload.windowId,
+        startedAt: payload.startedAt
+      });
+    }
+    if (type === 'BATCH_TASK_TERMINAL') {
+      Object.assign(task, {
+        state: 'terminal',
+        phase: null,
+        tabId: null,
+        windowId: null,
+        startedAt: null
+      });
+      checkpoint.results.push({
+        originalIndex: payload.urlIndex,
+        attempt: payload.attempt,
+        ...payload.result
+      });
+    }
+    if (type === 'BATCH_SESSION_COMPLETE') checkpoint.status = 'completed';
+    return { ok: true, checkpoint };
+  };
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  await runtime.start(harness.checkpoint);
+
+  await Promise.all([
+    runtime.start(batch2),
+    runtime.start(batch3)
+  ]);
+
+  assert.deepEqual(harness.tabsApi.removeCalls, [100, 101]);
+  assert.equal(harness.tabsApi.removedListenerCount(), 1);
+  assert.deepEqual(
+    harness.sentHandles.map(({ batchId }) => batchId),
+    ['batch-1', 'batch-3']
+  );
+});
+
+test('stop waits for an in-progress pause cleanup before disposing ownership', async () => {
+  const harness = createWorkerHarness({ concurrency: 1, taskCount: 1 });
+  let releaseSeal;
+  harness.dependencies.sealSubmitContext = () => new Promise((resolve) => {
+    releaseSeal = () => resolve({ sealed: true, recovered: false });
+  });
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  await runtime.start(harness.checkpoint);
+
+  const pausing = runtime.pause('user');
+  await waitFor(() => typeof releaseSeal === 'function', 'pause seal');
+  let stopResolved = false;
+  const stopping = runtime.stop().then((checkpoint) => {
+    stopResolved = true;
+    return checkpoint;
+  });
+  await Promise.resolve();
+
+  assert.equal(stopResolved, false);
+  assert.equal(harness.terminalPayloads.length, 0);
+  releaseSeal();
+  await Promise.all([pausing, stopping]);
+
+  assert.equal(harness.terminalPayloads.length, 1);
+  assert.deepEqual(harness.tabsApi.removeCalls, [100]);
+  assert.equal(harness.tabsApi.removedListenerCount(), 0);
+});
+
 function createWorkerHarness({
   concurrency,
   taskCount,
   clock = () => 1000,
   readinessTimeoutMs,
+  handleDeliveryTimeoutMs,
   timeoutSeconds = 60,
   tabsOptions = {}
 }) {
@@ -1156,6 +1470,9 @@ function createWorkerHarness({
     },
     clock,
     ...(readinessTimeoutMs === undefined ? {} : { readinessTimeoutMs }),
+    ...(handleDeliveryTimeoutMs === undefined
+      ? {}
+      : { handleDeliveryTimeoutMs }),
     timers: {
       setTimeout,
       clearTimeout,

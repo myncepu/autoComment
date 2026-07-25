@@ -1274,7 +1274,7 @@ git commit -m "feat: derive batch console snapshots"
 - Produces: `createBatchWorkerRuntime(dependencies)`
 - Methods: `start(checkpoint)`, `pause(reason)`, `resume(checkpoint)`, `refill(checkpoint)`, `stop()`, `focus(urlIndex)`, `handleConfirmation(message)`, `dispose()`
 - Emits: `{ type: "changed" | "confirmed" | "runtime-error", checkpoint }`
-- Consumes adapters: `runtimeRequest`, `sendHandle`, `sealSubmitContext`, `tabsApi`, `windowId`, `clock`, `timers`
+- Consumes adapters: `runtimeRequest`, `sendHandle`, `sealSubmitContext`, `tabsApi`, `windowId`, `clock`, `timers`; readiness and `BATCH_HANDLE` delivery have independent deadline settings
 - Accepts optional `tabManagerFactory` (plus temporary `windowManagerFactory` compatibility) and `schedulerFactory` test seams; production defaults construct the tab-backed `BatchTabManager` and `BatchScheduler`
 
 - [ ] **Step 1: Write failing worker-runtime tests**
@@ -1294,10 +1294,13 @@ test('opens no more than three attempt-aware worker tabs and replenishes one', a
     { urlIndex: 2, attempt: 1 }
   ]);
   await runtime.handleConfirmation({
+    type: 'BATCH_CONFIRMED',
     batchId: 'batch-1',
     urlIndex: 1,
     attempt: 1,
-    result: 'success'
+    sourceTabId: 101,
+    result: 'success',
+    historySaveStatus: 'saved'
   });
   assert.equal(harness.createdTabs.length, 4);
 });
