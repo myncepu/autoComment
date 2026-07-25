@@ -5,7 +5,7 @@
   "compatibility_date": "2026-07-25",
   "compatibility_flags": ["nodejs_compat"],
   "vars": {
-    "ALLOWED_EXTENSION_ORIGINS": "chrome-extension://allowed-extension"
+    "ALLOWED_EXTENSION_ORIGINS": "chrome-extension://lmjgekgcfmdjokodhcmiliofkealmfhf"
   },
   "d1_databases": [{
     "binding": "DB",

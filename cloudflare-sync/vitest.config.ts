@@ -15,6 +15,8 @@ export default defineConfig({
       wrangler: { configPath: './wrangler.jsonc' },
       miniflare: {
         bindings: {
+          ALLOWED_EXTENSION_ORIGINS:
+            'chrome-extension://allowed-extension',
           BOOTSTRAP_CURSOR_SIGNING_KEY:
             'test-only-bootstrap-cursor-signing-key-32-bytes-minimum',
           TEST_MIGRATIONS: await readD1Migrations(path.join(directory, 'migrations'))
