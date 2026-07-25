@@ -86,6 +86,13 @@ test('normalizes a non-ASCII legacy comment id to a stable printable ASCII revis
     first.id,
     'legacy:batch-\u{10000}:1:1721000000000'
   );
+
+  const maximum = normalizeCommentRevision({
+    id: '界'.repeat(512),
+    submittedAt: Number.MAX_SAFE_INTEGER
+  });
+  assert.match(maximum.id, /^[\x20-\x7e]+$/);
+  assert.ok(maximum.id.length <= 3104);
 });
 
 test('rejects revision ids outside the common JS and SQLite printable ASCII order domain', () => {

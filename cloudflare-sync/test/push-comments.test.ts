@@ -31,6 +31,7 @@ interface CommentMutationOptions {
   batchId?: string;
   urlIndex?: number;
   source?: 'legacy' | 'live';
+  includeHistoryRevision?: boolean;
   anchors?: AnchorInput[];
 }
 
@@ -58,6 +59,7 @@ function commentMutation({
   batchId = 'batch-a',
   urlIndex = 1,
   source = 'live',
+  includeHistoryRevision = true,
   anchors = []
 }: CommentMutationOptions) {
   const effectiveRecordId = recordId ?? `${batchId}:${urlIndex}`;
@@ -83,12 +85,16 @@ function commentMutation({
         source,
         createdAt: 1_721_000_000_001,
         updatedAt: 1_721_000_000_002,
-        historyRevision: {
-          capturedAt,
-          recordedAt,
-          sequence,
-          id: revisionId
-        }
+        ...(includeHistoryRevision
+          ? {
+              historyRevision: {
+                capturedAt,
+                recordedAt,
+                sequence,
+                id: revisionId
+              }
+            }
+          : {})
       },
       anchors: anchors.map((anchor) => ({
         id: anchor.id ?? `${effectiveRecordId}:${anchor.position}`,
@@ -103,6 +109,17 @@ function commentMutation({
     },
     createdAt: 1_721_000_000_003
   };
+}
+
+function mutationAnchors(
+  mutationIndex: number,
+  count: number
+): AnchorInput[] {
+  return Array.from({ length: count }, (_, position) => ({
+    position,
+    anchorText: `Anchor ${mutationIndex}-${position}`,
+    hrefDomain: `anchor-${mutationIndex}-${position}.test`
+  }));
 }
 
 function commentDeleteMutation(
@@ -541,6 +558,53 @@ test('rejects revision ids whose JavaScript and SQLite byte orders disagree', as
   });
 });
 
+test('accepts bounded ASCII legacy revisions for long non-ASCII comment ids', async () => {
+  const longBatchId = '界'.repeat(130);
+  const longRecordId = `${longBatchId}:1`;
+  const maximumRecordId = '界'.repeat(512);
+
+  const result = await push([
+    commentMutation({
+      mutationId: 'legacy-long-non-ascii',
+      batchId: longBatchId,
+      urlIndex: 1,
+      includeHistoryRevision: false,
+      commentText: 'long legacy id'
+    }),
+    commentMutation({
+      mutationId: 'legacy-maximum-record-id',
+      recordId: maximumRecordId,
+      batchId: 'maximum-record-batch',
+      urlIndex: 1,
+      includeHistoryRevision: false,
+      commentText: 'maximum legacy id'
+    })
+  ]);
+  expect(result.results).toEqual([
+    {
+      mutationId: 'legacy-long-non-ascii',
+      status: 'applied',
+      serverSeq: 1
+    },
+    {
+      mutationId: 'legacy-maximum-record-id',
+      status: 'applied',
+      serverSeq: 2
+    }
+  ]);
+
+  for (const recordId of [longRecordId, maximumRecordId]) {
+    const stored = await env.DB.prepare(
+      `SELECT revision_id FROM comment_records
+       WHERE vault_id = ? AND record_id = ?`
+    )
+      .bind(VALID_VAULT_ID, recordId)
+      .first<{ revision_id: string }>();
+    expect(stored?.revision_id).toMatch(/^[\x20-\x7e]+$/u);
+    expect(stored?.revision_id.length).toBeLessThanOrEqual(3_104);
+  }
+});
+
 test('keeps the freshest body when different revisions arrive concurrently', async () => {
   await Promise.all([
     push([
@@ -709,10 +773,9 @@ test('rejects forbidden, overlong, and non-finite comment data per item', async 
   const nonFinite = commentMutation({
     mutationId: 'non-finite-revision',
     batchId: 'batch-non-finite',
-    urlIndex: 2
+    urlIndex: 2,
+    capturedAt: Number.POSITIVE_INFINITY
   });
-  nonFinite.payload.comment.historyRevision.capturedAt =
-    Number.POSITIVE_INFINITY;
   const overlong = commentMutation({
     mutationId: 'overlong-comment',
     batchId: 'batch-overlong',
@@ -862,6 +925,96 @@ test('applies exactly 100 valid comment mutations within the Worker D1 request b
   ).toEqual({
     comment_text: 'limit body 99',
     accepted_mutation_id: 'limit-mutation-99'
+  });
+});
+
+test('rejects an over-budget 100-by-5-anchor request before its first write', async () => {
+  const mutations = Array.from({ length: 100 }, (_, index) =>
+    commentMutation({
+      mutationId: `over-budget-${index}`,
+      batchId: `over-budget-batch-${index}`,
+      urlIndex: index,
+      revisionId: `over-budget-revision-${index}`,
+      anchors: mutationAnchors(index, 5)
+    })
+  );
+
+  const response = await pushResponse(mutations);
+  expect(response.status).toBe(400);
+  expect(await response.json()).toMatchObject({
+    ok: false,
+    error: {
+      code: 'MUTATION_QUERY_BUDGET_EXCEEDED',
+      retryable: false
+    }
+  });
+  expect(
+    await env.DB.prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM comment_records
+          WHERE vault_id = ?) AS comments,
+         (SELECT COUNT(*) FROM comment_anchors
+          WHERE vault_id = ?) AS anchors,
+         (SELECT COUNT(*) FROM sync_changes
+          WHERE vault_id = ?) AS changes,
+         (SELECT COUNT(*) FROM sync_mutations
+          WHERE vault_id = ?) AS receipts`
+    )
+      .bind(
+        VALID_VAULT_ID,
+        VALID_VAULT_ID,
+        VALID_VAULT_ID,
+        VALID_VAULT_ID
+      )
+      .first()
+  ).toEqual({
+    comments: 0,
+    anchors: 0,
+    changes: 0,
+    receipts: 0
+  });
+});
+
+test('accepts 100 anchor-bearing comments that remain below the D1 query budget', async () => {
+  const mutations = Array.from({ length: 100 }, (_, index) =>
+    commentMutation({
+      mutationId: `within-budget-${index}`,
+      batchId: `within-budget-batch-${index}`,
+      urlIndex: index,
+      revisionId: `within-budget-revision-${index}`,
+      anchors: mutationAnchors(index, 4)
+    })
+  );
+
+  const result = await push(mutations);
+  expect(result.results).toHaveLength(100);
+  expect(result.results.every(({ status }) => status === 'applied')).toBe(
+    true
+  );
+  expect(
+    await env.DB.prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM comment_records
+          WHERE vault_id = ?) AS comments,
+         (SELECT COUNT(*) FROM comment_anchors
+          WHERE vault_id = ?) AS anchors,
+         (SELECT COUNT(*) FROM sync_changes
+          WHERE vault_id = ?) AS changes,
+         (SELECT COUNT(*) FROM sync_mutations
+          WHERE vault_id = ?) AS receipts`
+    )
+      .bind(
+        VALID_VAULT_ID,
+        VALID_VAULT_ID,
+        VALID_VAULT_ID,
+        VALID_VAULT_ID
+      )
+      .first()
+  ).toEqual({
+    comments: 100,
+    anchors: 400,
+    changes: 100,
+    receipts: 100
   });
 });
 

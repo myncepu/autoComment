@@ -16,6 +16,23 @@ const MAX_MUTATIONS = 100;
 const MAX_DEVICE_ID_LENGTH = 128;
 const MAX_ID_LENGTH = 512;
 const MAX_BATCH_ID_LENGTH = 256;
+// TextEncoder emits at most three UTF-8 bytes per UTF-16 code unit:
+// surrogate pairs use four bytes for two units and lone surrogates become
+// the three-byte replacement character. Hex uses two ASCII characters per
+// byte, so this covers every legacy fallback for a 512-unit record ID.
+const MAX_UTF8_BYTES_PER_UTF16_CODE_UNIT = 3;
+const HEX_CHARACTERS_PER_BYTE = 2;
+const LEGACY_REVISION_PREFIX_LENGTH = 'legacy:utf8hex-'.length;
+const LEGACY_REVISION_SEPARATOR_LENGTH = 1;
+const MAX_TIMESTAMP_TEXT_LENGTH =
+  String(Number.MAX_SAFE_INTEGER).length;
+const MAX_REVISION_ID_LENGTH =
+  LEGACY_REVISION_PREFIX_LENGTH +
+  MAX_ID_LENGTH *
+    MAX_UTF8_BYTES_PER_UTF16_CODE_UNIT *
+    HEX_CHARACTERS_PER_BYTE +
+  LEGACY_REVISION_SEPARATOR_LENGTH +
+  MAX_TIMESTAMP_TEXT_LENGTH;
 const MAX_URL_LENGTH = 8_192;
 const MAX_DOMAIN_LENGTH = 253;
 const MAX_COMMENT_HTML_LENGTH = 200_000;
@@ -23,6 +40,13 @@ const MAX_COMMENT_TEXT_LENGTH = 100_000;
 const MAX_STATUS_LENGTH = 64;
 const MAX_ANCHOR_TEXT_LENGTH = 10_000;
 const MAX_ANCHORS = 1_000;
+
+const MAX_D1_QUERY_BUDGET = 1_000;
+const AUTH_QUERY_COST = 1;
+const MISSING_RECEIPT_DIAGNOSTIC_RESERVE = 1;
+const RECEIPT_READ_QUERY_COST = 1;
+const COMMENT_FIXED_BATCH_STATEMENTS = 4;
+const COMMENT_DELETE_BATCH_STATEMENTS = 6;
 
 const COMMENT_KEYS = [
   'id',
@@ -134,6 +158,8 @@ type IncomingMutation =
   | CommentDeleteMutation
   | UnsupportedMutation;
 
+type ApplicableMutation = CommentMutation | CommentDeleteMutation;
+
 export type MutationReceipt =
   | {
       mutationId: string;
@@ -160,6 +186,20 @@ interface StoredReceipt {
   result_status: string;
   server_seq: number | null;
 }
+
+type PreparedMutation =
+  | {
+      kind: 'apply';
+      mutation: ApplicableMutation;
+    }
+  | {
+      kind: 'rejected';
+      receipt: {
+        mutationId: string;
+        status: 'rejected';
+        errorCode: string;
+      };
+    };
 
 function invalid(code: string): never {
   throw new MutationValidationError(code);
@@ -254,7 +294,7 @@ function normalizeRevision(comment: Record<string, unknown>): CommentRevision {
     );
     printableAsciiValue(
       explicit.id,
-      MAX_ID_LENGTH,
+      MAX_REVISION_ID_LENGTH,
       'INVALID_COMMENT_REVISION'
     );
   }
@@ -285,7 +325,7 @@ function normalizeRevision(comment: Record<string, unknown>): CommentRevision {
     ),
     id: printableAsciiValue(
       revision.id,
-      MAX_ID_LENGTH,
+      MAX_REVISION_ID_LENGTH,
       'INVALID_COMMENT_REVISION'
     )
   };
@@ -316,7 +356,7 @@ function parseComment(
     Number.MAX_SAFE_INTEGER,
     'INVALID_COMMENT'
   );
-  if (id !== entityId || id !== `${batchId}:${urlIndex}`) {
+  if (id !== entityId) {
     invalid('INVALID_COMMENT');
   }
 
@@ -610,6 +650,45 @@ function parseMutation(input: unknown): IncomingMutation {
 
 function sourceRank(source: CommentRecord['source']): number {
   return source === 'legacy' ? 0 : 1;
+}
+
+function mutationBatchStatementCount(
+  mutation: ApplicableMutation
+): number {
+  return mutation.entityType === 'comment'
+    ? COMMENT_FIXED_BATCH_STATEMENTS + mutation.payload.anchors.length
+    : COMMENT_DELETE_BATCH_STATEMENTS;
+}
+
+function mutationQueryCost(
+  mutation: ApplicableMutation
+): number {
+  return (
+    mutationBatchStatementCount(mutation) +
+    RECEIPT_READ_QUERY_COST
+  );
+}
+
+function pushQueryCost(prepared: PreparedMutation[]): number {
+  let cost =
+    AUTH_QUERY_COST + MISSING_RECEIPT_DIAGNOSTIC_RESERVE;
+  for (const item of prepared) {
+    if (item.kind === 'apply') {
+      cost += mutationQueryCost(item.mutation);
+    }
+  }
+  return cost;
+}
+
+function assertBatchStatementCount(
+  mutation: ApplicableMutation,
+  statements: D1PreparedStatement[]
+): void {
+  if (
+    statements.length !== mutationBatchStatementCount(mutation)
+  ) {
+    fail('INTERNAL_ERROR', 500, true);
+  }
 }
 
 function commentUpsertStatement(
@@ -971,6 +1050,7 @@ export async function applyCommentMutation(
   statements.push(
     insertCommentReceiptStatement(env, vaultId, mutation, now)
   );
+  assertBatchStatementCount(mutation, statements);
 
   const batch = await env.DB.batch(statements);
   const inserted =
@@ -1208,6 +1288,7 @@ export async function applyCommentDeleteMutation(
   statements.push(
     insertDeleteReceiptStatement(env, vaultId, mutation, now)
   );
+  assertBatchStatementCount(mutation, statements);
 
   const batch = await env.DB.batch(statements);
   const inserted = batch[receiptIndex]?.meta.changes === 1;
@@ -1230,6 +1311,36 @@ function rejectedMutationId(input: unknown): string {
   return '';
 }
 
+function prepareMutation(input: unknown): PreparedMutation {
+  try {
+    const mutation = parseMutation(input);
+    if (mutation.entityType === 'setting') {
+      return {
+        kind: 'rejected',
+        receipt: {
+          mutationId: mutation.mutationId,
+          status: 'rejected',
+          errorCode: 'UNSUPPORTED_ENTITY_TYPE'
+        }
+      };
+    }
+    return {
+      kind: 'apply',
+      mutation
+    };
+  } catch (error) {
+    if (!(error instanceof MutationValidationError)) throw error;
+    return {
+      kind: 'rejected',
+      receipt: {
+        mutationId: rejectedMutationId(input),
+        status: 'rejected',
+        errorCode: error.code
+      }
+    };
+  }
+}
+
 function batchError(
   code: string,
   requestId: string
@@ -1238,6 +1349,8 @@ function batchError(
     INVALID_MUTATION_BATCH: 'The mutation batch is invalid.',
     DUPLICATE_MUTATION_ID:
       'Mutation identifiers must be unique within one request.',
+    MUTATION_QUERY_BUDGET_EXCEEDED:
+      'The mutation batch exceeds the database query budget.',
     INVALID_DEVICE_ID: 'The device identifier is invalid.',
     INVALID_REQUEST: 'The request is invalid.'
   };
@@ -1301,42 +1414,36 @@ export async function pushMutations(
     return batchError('DUPLICATE_MUTATION_ID', requestId);
   }
 
+  const prepared = rawBody.mutations.map(prepareMutation);
+  if (pushQueryCost(prepared) > MAX_D1_QUERY_BUDGET) {
+    return batchError(
+      'MUTATION_QUERY_BUDGET_EXCEEDED',
+      requestId
+    );
+  }
+
   const results: MutationReceipt[] = [];
-  for (const input of rawBody.mutations) {
-    try {
-      const mutation = parseMutation(input);
-      if (mutation.entityType === 'setting') {
-        results.push({
-          mutationId: mutation.mutationId,
-          status: 'rejected',
-          errorCode: 'UNSUPPORTED_ENTITY_TYPE'
-        });
-      } else if (mutation.entityType === 'comment_delete') {
-        results.push(
-          await applyCommentDeleteMutation(
-            env,
-            vault.vaultId,
-            mutation,
-            Date.now()
-          )
-        );
-      } else {
-        results.push(
-          await applyCommentMutation(
-            env,
-            vault.vaultId,
-            mutation,
-            Date.now()
-          )
-        );
-      }
-    } catch (error) {
-      if (!(error instanceof MutationValidationError)) throw error;
-      results.push({
-        mutationId: rejectedMutationId(input),
-        status: 'rejected',
-        errorCode: error.code
-      });
+  for (const item of prepared) {
+    if (item.kind === 'rejected') {
+      results.push(item.receipt);
+    } else if (item.mutation.entityType === 'comment_delete') {
+      results.push(
+        await applyCommentDeleteMutation(
+          env,
+          vault.vaultId,
+          item.mutation,
+          Date.now()
+        )
+      );
+    } else {
+      results.push(
+        await applyCommentMutation(
+          env,
+          vault.vaultId,
+          item.mutation,
+          Date.now()
+        )
+      );
     }
   }
 
