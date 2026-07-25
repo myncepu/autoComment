@@ -95,7 +95,7 @@ async function persistBatchReport(message) {
 
 function broadcastBatchConfirmed(
   message,
-  { historySaveStatus, historyPendingCount } = {}
+  { historySaveStatus, historyPendingCount, sourceTabId } = {}
 ) {
   chrome.runtime.sendMessage({
     type: 'BATCH_CONFIRMED',
@@ -107,7 +107,8 @@ function broadcastBatchConfirmed(
     ...(historySaveStatus ? { historySaveStatus } : {}),
     ...(Number.isInteger(historyPendingCount) || historyPendingCount === null
       ? { historyPendingCount }
-      : {})
+      : {}),
+    ...(Number.isInteger(sourceTabId) ? { sourceTabId } : {})
   }).then(() => {
     console.log('[background] BATCH_CONFIRMED 发送成功');
   }).catch((e) => {
@@ -150,21 +151,39 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           historyPendingCount
         };
         if (isDurableBatchConfirmation(confirmedMessage)) {
-          if (Number.isInteger(sender?.tab?.id)) {
+          const result = message.result ?? 'success';
+          let submitContextReleased = result !== 'success';
+          if (result === 'success' && Number.isInteger(sender?.tab?.id)) {
             try {
-              await batchSubmitContextStore.clearIfMatches(sender.tab.id, {
-                batchId: message.batchId,
-                urlIndex: message.urlIndex,
-                historyRevision: message.history?.historyRevision
-              });
+              submitContextReleased = await batchSubmitContextStore.clearIfMatches(
+                sender.tab.id,
+                {
+                  batchId: message.batchId,
+                  urlIndex: message.urlIndex,
+                  historyRevision: message.history?.historyRevision
+                }
+              );
             } catch (_) {
               console.warn('[background] Durable history saved but submit context cleanup deferred');
             }
           }
-          broadcastBatchConfirmed(message, {
-            historySaveStatus,
-            historyPendingCount
-          });
+          if (submitContextReleased) {
+            broadcastBatchConfirmed(message, {
+              historySaveStatus,
+              historyPendingCount,
+              sourceTabId: sender?.tab?.id
+            });
+          } else {
+            sendResponse({
+              ok: false,
+              error: 'submit_context_not_released',
+              historySaveStatus,
+              ...(Number.isInteger(historyPendingCount) || historyPendingCount === null
+                ? { historyPendingCount }
+                : {})
+            });
+            return;
+          }
         }
 
         sendResponse({
@@ -192,18 +211,30 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return false;
     }
     (async () => {
+      let submitContextReleased = false;
       try {
-        await batchSubmitContextStore.clearIfMatches(sender.tab.id, {
-          batchId: message.batchId,
-          urlIndex: message.urlIndex,
-          historyRevision: message.historyRevision
-        });
+        submitContextReleased = await batchSubmitContextStore.clearIfMatches(
+          sender.tab.id,
+          {
+            batchId: message.batchId,
+            urlIndex: message.urlIndex,
+            historyRevision: message.historyRevision
+          }
+        );
       } catch (_) {
         console.warn('[background] Fallback history queued but submit context cleanup deferred');
       }
+      if (!submitContextReleased) {
+        sendResponse({
+          ok: false,
+          error: 'submit_context_not_released'
+        });
+        return;
+      }
       broadcastBatchConfirmed(message, {
         historySaveStatus: 'queued',
-        historyPendingCount: null
+        historyPendingCount: null,
+        sourceTabId: sender.tab.id
       });
       sendResponse({ ok: true });
     })();
@@ -248,7 +279,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({ ok: true, deferred: true });
           return;
         }
-        broadcastBatchConfirmed(message);
+        broadcastBatchConfirmed(message, { sourceTabId: tabId });
         console.log('[background] BATCH_REPORT_RESULT <<< sendResponse({ok:true})');
         sendResponse({ ok: true });
       } catch (e) {

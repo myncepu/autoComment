@@ -26,11 +26,11 @@ test('batch confirmation stores and renders the background history save status',
 
   assert.match(
     batch,
-    /handleTaskConfirmed\([\s\S]*message\.historySaveStatus,\s*message\.historyPendingCount\s*\)/
+    /handleTaskConfirmed\([\s\S]*message\.historySaveStatus,\s*message\.historyPendingCount,\s*message\.sourceTabId\s*\)/
   );
   assert.match(
     batch,
-    /async function handleTaskConfirmed\([\s\S]*historySaveStatus,\s*confirmedHistoryPendingCount\s*\)/
+    /async function handleTaskConfirmed\([\s\S]*historySaveStatus,\s*confirmedHistoryPendingCount,\s*sourceTabId\s*\)/
   );
   assert.match(batch, /historySaveStatus:\s*historySaveStatus\s*\|\|\s*null/);
   assert.match(batch, /type:\s*'HISTORY_RETRY_PENDING'/);

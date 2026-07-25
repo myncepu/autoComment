@@ -439,9 +439,58 @@ test('background migrates an old record before its startup retention check and c
   }]);
   assert.equal(runtimeMessages.length, 1);
   assert.equal(runtimeMessages[0].type, 'BATCH_CONFIRMED');
+  assert.equal(runtimeMessages[0].sourceTabId, 42);
   assert.equal(runtimeMessages[0].historySaveStatus, 'saved');
   assert.equal(runtimeMessages[0].historyPendingCount, 0);
   assert.equal(storageData.batchSubmitContextsByTab['42'], undefined);
+
+  const oldRevision = {
+    capturedAt: fixedNow,
+    recordedAt: fixedNow + 1,
+    sequence: 1,
+    id: 'revision-old-ack'
+  };
+  const replacementRevision = {
+    capturedAt: fixedNow + 10,
+    recordedAt: fixedNow + 11,
+    sequence: 2,
+    id: 'revision-replacement'
+  };
+  assert.deepEqual(await dispatchConfirm({
+    type: 'BATCH_SAVE_SUBMIT_CONTEXT',
+    context: {
+      batchId: 'batch-cas',
+      urlIndex: 13,
+      result: 'success',
+      history: {
+        ...message.history,
+        historyRevision: replacementRevision
+      }
+    }
+  }), [{ ok: true }]);
+  const messagesBeforeOldAck = runtimeMessages.length;
+  assert.deepEqual(await dispatchConfirm({
+    ...message,
+    batchId: 'batch-cas',
+    urlIndex: 13,
+    history: {
+      ...message.history,
+      historyRevision: oldRevision
+    }
+  }), [{
+    ok: false,
+    error: 'submit_context_not_released',
+    historySaveStatus: 'saved',
+    historyPendingCount: 0
+  }]);
+  assert.equal(runtimeMessages.length, messagesBeforeOldAck);
+  assert.deepEqual(
+    storageData.batchSubmitContextsByTab['42'].history.historyRevision,
+    replacementRevision
+  );
+  assert.deepEqual(await dispatchConfirm({
+    type: 'BATCH_CLEAR_SUBMIT_CONTEXT'
+  }), [{ ok: true }]);
 
   assert.deepEqual(await dispatchConfirm({
     type: 'BATCH_SAVE_SUBMIT_CONTEXT',

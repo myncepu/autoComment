@@ -10,7 +10,10 @@ function createStorageArea() {
   const data = {};
   return {
     data,
-    async get(key) { return { [key]: data[key] }; },
+    async get(keys) {
+      const requested = Array.isArray(keys) ? keys : [keys];
+      return Object.fromEntries(requested.map((key) => [key, data[key]]));
+    },
     async set(values) { Object.assign(data, values); }
   };
 }
@@ -112,6 +115,80 @@ test('clearIfMatches cannot remove a replacement context from a delayed acknowle
     historyRevision: replacement.history.historyRevision
   }), true);
   assert.equal(await store.get(11), null);
+});
+
+test('sealAndRecover atomically moves an unresolved context into the task recovery queue', async () => {
+  const storage = createStorageArea();
+  const store = createBatchSubmitContextStore(storage, {
+    now: () => 3000,
+    maxAgeMs: Number.POSITIVE_INFINITY
+  });
+  const context = {
+    batchId: 'batch-recovery',
+    urlIndex: 4,
+    history: {
+      commentHtml: 'Exact attempted body',
+      historyRevision: {
+        capturedAt: 2000,
+        recordedAt: 2001,
+        sequence: 1,
+        id: 'revision-recovery'
+      }
+    }
+  };
+  await store.save(88, context);
+
+  assert.deepEqual(await store.sealAndRecover(88, {
+    batchId: 'batch-recovery',
+    urlIndex: 4
+  }, 'timeout'), {
+    sealed: true,
+    recovered: true
+  });
+  assert.equal(await store.get(88), null);
+  assert.deepEqual(Object.values(
+    storage.data.batchSubmitRecoveriesByTask
+  ), [{
+    ...context,
+    sourceTabId: 88,
+    recoveredAt: 3000,
+    recoveryReason: 'timeout'
+  }]);
+});
+
+test('a seal redirects a context saved after timeout into recovery instead of an orphaned tab key', async () => {
+  const storage = createStorageArea();
+  const store = createBatchSubmitContextStore(storage, {
+    now: () => 4000,
+    maxAgeMs: Number.POSITIVE_INFINITY
+  });
+
+  assert.deepEqual(await store.sealAndRecover(99, {
+    batchId: 'batch-late',
+    urlIndex: 2
+  }, 'timeout'), {
+    sealed: true,
+    recovered: false
+  });
+  await store.save(99, {
+    batchId: 'batch-late',
+    urlIndex: 2,
+    history: {
+      historyRevision: {
+        capturedAt: 4000,
+        recordedAt: 4001,
+        sequence: 1,
+        id: 'revision-late'
+      }
+    }
+  });
+
+  assert.equal(await store.get(99), null);
+  assert.equal(
+    Object.values(storage.data.batchSubmitRecoveriesByTask).length,
+    1
+  );
+  assert.deepEqual(storage.data.batchSubmitRecoverySealsByTab, {});
 });
 
 test('listener preserves unacknowledged context when its tab closes', async () => {

@@ -45,7 +45,11 @@ function createBatchHarness(overrides = {}) {
   const chrome = {
     runtime: {
       lastError: null,
-      sendMessage: overrides.runtimeSendMessage || (() => Promise.resolve({ ok: true }))
+      sendMessage: overrides.runtimeSendMessage || ((message) => Promise.resolve(
+        message.type === 'BATCH_RECOVER_SUBMIT_CONTEXT'
+          ? { ok: true, sealed: true, recovered: false }
+          : { ok: true }
+      ))
     },
     storage: {
       local: {
@@ -527,7 +531,7 @@ test('deferred timeout scan cannot continue into a replacement lifecycle', async
     openingActivities: new Map(),
     isTerminated: false,
     localResults: [],
-    totalCount: 1,
+    totalCount: 2,
     successCount: 0,
     failCount: 0,
     skippedCount: 0,
@@ -546,18 +550,14 @@ test('deferred timeout scan cannot continue into a replacement lifecycle', async
   assert.equal(api.getState().localResults.length, 0);
 });
 
-test('timeout does not close a worker with an unresolved submit context', async () => {
+test('timeout seals and recovers a worker context before closing its window', async () => {
   let closeCount = 0;
   let settleCount = 0;
+  let recoveryMessage;
   const { api } = createBatchHarness({
     runtimeSendMessage(message) {
-      assert.deepEqual(message, {
-        type: 'BATCH_HAS_SUBMIT_CONTEXT',
-        tabId: 77,
-        batchId: 'batch-ambiguous',
-        urlIndex: 0
-      });
-      return Promise.resolve({ ok: true, unresolved: true });
+      recoveryMessage = JSON.parse(JSON.stringify(message));
+      return Promise.resolve({ ok: true, sealed: true, recovered: true });
     }
   });
   api.setState({
@@ -584,22 +584,30 @@ test('timeout does not close a worker with an unresolved submit context', async 
     openingActivities: new Map(),
     isTerminated: false,
     localResults: [],
-    totalCount: 1,
+    totalCount: 2,
     successCount: 0,
     failCount: 0,
     skippedCount: 0,
     noCommentBoxCount: 0,
     manualRequiredCount: 0,
     blockedIllegalCount: 0,
-    pendingCount: 1,
+    pendingCount: 2,
     timeoutSeconds: 1
   });
 
   await api.checkTimeouts();
 
-  assert.equal(closeCount, 0);
-  assert.equal(settleCount, 0);
-  assert.deepEqual(api.getState().localResults, []);
+  assert.deepEqual(recoveryMessage, {
+    type: 'BATCH_RECOVER_SUBMIT_CONTEXT',
+    tabId: 77,
+    batchId: 'batch-ambiguous',
+    urlIndex: 0,
+    reason: 'timeout'
+  });
+  assert.equal(closeCount, 1);
+  assert.equal(settleCount, 1);
+  assert.equal(api.getState().localResults[0].result, 'manual_required');
+  assert.match(api.getState().localResults[0].errorMessage, /已保留/);
 });
 
 test('stale BATCH_HANDLE rejection cannot finalize the replacement batch', async () => {
@@ -776,20 +784,10 @@ test('a zero pending count reconciles earlier queued history rows', async () => 
   );
 });
 
-test('a durable confirmation waits while the same worker still has an unresolved submit context', async () => {
+test('a durable confirmation from an old tab cannot close a replacement worker', async () => {
   let closeCount = 0;
   let settleCount = 0;
-  const { api } = createBatchHarness({
-    runtimeSendMessage(message) {
-      assert.deepEqual(message, {
-        type: 'BATCH_HAS_SUBMIT_CONTEXT',
-        tabId: 77,
-        batchId: 'batch-confirm',
-        urlIndex: 0
-      });
-      return Promise.resolve({ ok: true, unresolved: true });
-    }
-  });
+  const { api } = createBatchHarness();
   api.setState({
     batchId: 'batch-confirm',
     parsedUrls: [{ url: 'https://confirm.test', sourceDomain: '' }],
@@ -830,7 +828,8 @@ test('a durable confirmation waits while the same worker still has an unresolved
     'confirmed',
     null,
     'saved',
-    0
+    0,
+    66
   );
 
   assert.equal(closeCount, 0);
@@ -1080,6 +1079,7 @@ test('deferred Stop cleanup cannot close or erase a replacement lifecycle', asyn
 
   const stopping = api.stopBatch();
   assert.equal(oldStopCount, 1);
+  await new Promise(setImmediate);
   assert.equal(oldCloseCount, 1);
 
   let replacementStopCount = 0;
@@ -1123,12 +1123,71 @@ test('deferred Stop cleanup cannot close or erase a replacement lifecycle', asyn
   await stopping;
 
   assert.equal(oldSettleCount, 1);
-  assert.equal(oldCloseAllCount, 1);
+  assert.equal(oldCloseAllCount, 0);
   assert.equal(replacementStopCount, 0);
   assert.equal(replacementSettleCount, 0);
   assert.equal(replacementCloseAllCount, 0);
   assert.equal(replacementOpenings.get(0), replacementOpening);
   assert.equal(api.getState().status, 'running');
+});
+
+test('Stop recovers an unresolved submit context before closing its worker', async () => {
+  let recoveryMessage;
+  let closeCount = 0;
+  let settleCount = 0;
+  const { api } = createBatchHarness({
+    runtimeSendMessage(message) {
+      recoveryMessage = JSON.parse(JSON.stringify(message));
+      return Promise.resolve({ ok: true, sealed: true, recovered: true });
+    }
+  });
+  api.setState({
+    batchId: 'batch-stop-recovery',
+    parsedUrls: [{ url: 'https://stop.test', sourceDomain: '' }],
+    batchItems: [{ url: 'https://stop.test', sourceDomain: '' }],
+    status: 'running',
+    scheduler: {
+      get activeIndices() { return [0]; },
+      stop() {},
+      settle() { settleCount += 1; },
+      takeAvailable() { return []; }
+    },
+    windowManager: {
+      getByIndex() {
+        return {
+          batchId: 'batch-stop-recovery',
+          urlIndex: 0,
+          tabId: 44,
+          startTime: Date.now()
+        };
+      },
+      async closeByIndex() { closeCount += 1; }
+    },
+    openingActivities: new Map(),
+    isTerminated: false,
+    localResults: [],
+    totalCount: 1,
+    successCount: 0,
+    failCount: 0,
+    skippedCount: 0,
+    noCommentBoxCount: 0,
+    manualRequiredCount: 0,
+    blockedIllegalCount: 0,
+    pendingCount: 1
+  });
+
+  await api.stopBatch();
+
+  assert.deepEqual(recoveryMessage, {
+    type: 'BATCH_RECOVER_SUBMIT_CONTEXT',
+    tabId: 44,
+    batchId: 'batch-stop-recovery',
+    urlIndex: 0,
+    reason: 'stop'
+  });
+  assert.equal(closeCount, 1);
+  assert.equal(settleCount, 1);
+  assert.equal(api.getState().localResults[0].result, 'manual_required');
 });
 
 test('deferred completion cannot stop or clear a replacement lifecycle', async () => {

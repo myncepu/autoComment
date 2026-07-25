@@ -358,7 +358,8 @@ function bindEvents() {
       message.aiContent,
       message.errorMessage,
       message.historySaveStatus,
-      message.historyPendingCount
+      message.historyPendingCount,
+      message.sourceTabId
     );
   });
 
@@ -778,19 +779,39 @@ async function stopBatch() {
   if (pollTimer) clearTimeout(pollTimer);
   stopTimeoutChecker();
 
-  await Promise.all(activeIndices.map((urlIndex) =>
-    finalizeTask(
+  await Promise.all(activeIndices.map(async (urlIndex) => {
+    const activity = stoppingLifecycle.windowManager?.getByIndex(urlIndex);
+    const recovery = await recoverSubmitContext(
+      activity,
+      stoppingLifecycle.batchId,
       urlIndex,
-      'fail',
+      'stop'
+    );
+    if (
+      batchId !== stoppingLifecycle.batchId ||
+      lifecycleToken !== stoppingLifecycle.lifecycleToken ||
+      scheduler !== stoppingLifecycle.scheduler ||
+      windowManager !== stoppingLifecycle.windowManager
+    ) {
+      return false;
+    }
+    const canClose = !Number.isInteger(activity?.tabId) || recovery.sealed;
+    return finalizeTask(
+      urlIndex,
+      recovery.recovered || !canClose ? 'manual_required' : 'fail',
       null,
-      '手动终止',
+      recovery.recovered
+        ? '手动终止；未确认提交的上下文已保留待恢复'
+        : canClose
+          ? '手动终止'
+          : '手动终止；上下文交接失败，请检查仍打开的工作窗口',
       {
+        closeWindow: canClose,
         suppressCompletion: true,
         ownership: stoppingLifecycle
       }
-    )
-  ));
-  await stoppingLifecycle.windowManager?.closeAll();
+    );
+  }));
 
   for (const [urlIndex, opening] of stoppingLifecycle.openings) {
     if (openingActivities.get(urlIndex) === opening) {
@@ -1182,7 +1203,8 @@ async function handleTaskConfirmed(
   aiContent,
   errorMessage,
   historySaveStatus,
-  confirmedHistoryPendingCount
+  confirmedHistoryPendingCount,
+  sourceTabId
 ) {
   const confirmationLifecycle = {
     batchId,
@@ -1192,11 +1214,10 @@ async function handleTaskConfirmed(
     batchItems
   };
   const activity = confirmationLifecycle.windowManager?.getByIndex(urlIndex);
-  if (await hasUnresolvedSubmitContext(
-    activity,
-    confirmationLifecycle.batchId,
-    urlIndex
-  )) {
+  if (
+    Number.isInteger(sourceTabId)
+    && activity?.tabId !== sourceTabId
+  ) {
     return;
   }
   if (
@@ -1316,19 +1337,29 @@ function stopTimeoutChecker() {
   }
 }
 
-async function hasUnresolvedSubmitContext(activity, taskBatchId, urlIndex) {
-  if (!Number.isInteger(activity?.tabId)) return false;
+async function recoverSubmitContext(
+  activity,
+  taskBatchId,
+  urlIndex,
+  reason
+) {
+  if (!Number.isInteger(activity?.tabId)) {
+    return { sealed: false, recovered: false };
+  }
   try {
     const response = await chrome.runtime.sendMessage({
-      type: 'BATCH_HAS_SUBMIT_CONTEXT',
+      type: 'BATCH_RECOVER_SUBMIT_CONTEXT',
       tabId: activity.tabId,
       batchId: taskBatchId,
-      urlIndex
+      urlIndex,
+      reason
     });
-    return response?.ok !== true || response.unresolved === true;
+    return {
+      sealed: response?.ok === true && response.sealed === true,
+      recovered: response?.ok === true && response.recovered === true
+    };
   } catch (_) {
-    // 查询失败时保留工作窗口，避免在历史记录完成持久化前丢失精确上下文。
-    return true;
+    return { sealed: false, recovered: false };
   }
 }
 
@@ -1353,10 +1384,11 @@ async function checkTimeouts() {
     const startTime = activity?.startTime || opening?.startTime;
     if (startTime && (Date.now() - startTime) / 1000 > timeoutSeconds) {
       if (Number.isInteger(activity?.tabId)) {
-        const unresolvedSubmitContext = await hasUnresolvedSubmitContext(
+        const recovery = await recoverSubmitContext(
           activity,
           timeoutLifecycle.batchId,
-          urlIndex
+          urlIndex,
+          'timeout'
         );
         if (
           batchId !== timeoutLifecycle.batchId ||
@@ -1366,12 +1398,22 @@ async function checkTimeouts() {
         ) {
           return;
         }
-        if (unresolvedSubmitContext) {
-          console.warn('[batch] 提交上下文尚未完成持久化，暂缓超时关闭:', {
+        if (!recovery.sealed) {
+          console.warn('[batch] 提交上下文交接失败，暂缓超时关闭:', {
             batchId: timeoutLifecycle.batchId,
             urlIndex,
             tabId: activity.tabId
           });
+          continue;
+        }
+        if (recovery.recovered) {
+          await finalizeTask(
+            urlIndex,
+            'manual_required',
+            null,
+            '提交结果不明确；上下文已保留待恢复',
+            { ownership: timeoutLifecycle }
+          );
           continue;
         }
       }
