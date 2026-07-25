@@ -130,6 +130,40 @@ test('rejects payload properties outside the supported mutation variant', () => 
   );
 });
 
+test('rejects non-JSON setting values before they can be cloned', () => {
+  for (const value of [
+    new Map([['api_key', 'must-not-leave']]),
+    new Set(['must-not-leave']),
+    new Date(1721000000000)
+  ]) {
+    assert.throws(
+      () => normalizeSyncMutation({
+        mutationId: 'setting-non-json',
+        entityType: 'setting',
+        entityId: 'batch_checkbox_settings',
+        operation: 'upsert',
+        payload: { value },
+        createdAt: 1721000000000
+      }),
+      /INVALID_MUTATION_PAYLOAD/
+    );
+  }
+});
+
+test('rejects sensitive API-key aliases nested in a setting value', () => {
+  assert.throws(
+    () => normalizeSyncMutation({
+      mutationId: 'setting-api-key-suffix',
+      entityType: 'setting',
+      entityId: 'batch_checkbox_settings',
+      operation: 'upsert',
+      payload: { value: { api_key_value: 'must-not-leave' } },
+      createdAt: 1721000000000
+    }),
+    /SENSITIVE_FIELD_NOT_SYNCABLE/
+  );
+});
+
 test('normalizes only complete supported mutation variants', () => {
   const normalized = normalizeSyncMutation({
     mutationId: 'delete-a',
