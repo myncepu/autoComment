@@ -192,6 +192,69 @@ test('create and import await one bounded initial-history page before one respon
   }
 });
 
+test('create and import remain successful when initial-history enqueue is deferred', async () => {
+  const createResult = {
+    connected: true,
+    syncKey: 'acsync_unique-created-key',
+    vaultId: 'vault-created',
+    deviceId: 'device-created'
+  };
+  const importResult = {
+    connected: true,
+    vaultId: 'vault-imported',
+    deviceId: 'device-imported',
+    bootstrapPending: false
+  };
+
+  for (const [message, expectedResult] of [
+    [{ type: 'CLOUD_SYNC_CREATE' }, createResult],
+    [{ type: 'CLOUD_SYNC_IMPORT', syncKey: 'acsync_imported' }, importResult]
+  ]) {
+    const fixture = createChromeMessageFixture();
+    installCloudSyncMessageListener(fixture.chromeApi, createService({
+      async createVault() {
+        return structuredClone(createResult);
+      },
+      async importKey() {
+        return structuredClone(importResult);
+      },
+      async enqueueInitialHistory() {
+        const error = new Error(
+          'IndexedDB failed with acsync_raw-secret-diagnostic'
+        );
+        error.stack = 'raw stack acsync_raw-secret-diagnostic';
+        throw error;
+      }
+    }));
+
+    const dispatched = fixture.dispatch(message);
+    const response = await dispatched.response;
+
+    assert.equal(dispatched.asyncResult, true);
+    assert.equal(dispatched.responseCount, 1);
+    assert.deepEqual(response, {
+      ok: true,
+      data: {
+        ...expectedResult,
+        initialHistoryWarning: {
+          code: 'INITIAL_HISTORY_ENQUEUE_DEFERRED',
+          message: '初始评论历史将在后台继续同步。',
+          retryable: true
+        }
+      }
+    });
+    assert.equal(
+      JSON.stringify(response).includes('raw-secret-diagnostic'),
+      false
+    );
+    if (message.type === 'CLOUD_SYNC_CREATE') {
+      assert.equal(response.data.syncKey, createResult.syncKey);
+    } else {
+      assert.equal(Object.hasOwn(response.data, 'syncKey'), false);
+    }
+  }
+});
+
 test('ignores unknown messages without responding', () => {
   const fixture = createChromeMessageFixture();
   installCloudSyncMessageListener(fixture.chromeApi, createService());
