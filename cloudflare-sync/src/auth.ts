@@ -4,6 +4,11 @@ const VAULT_ID_BYTES = 16;
 const SECRET_BYTES = 32;
 const SHA_256_BYTES = 32;
 
+export const ACTIVE_VAULT_WRITE_SOURCE =
+  `FROM sync_vaults AS active_vault
+   WHERE active_vault.vault_id = ?
+     AND active_vault.deleted_at IS NULL`;
+
 export interface SyncCredentials {
   vaultId: string;
   secret: string;
@@ -116,6 +121,14 @@ export function secretHashesEqual(
     candidate.bytes
   );
   return stored.valid && candidate.valid && equal;
+}
+
+export async function executeActiveVaultWrite(
+  statement: D1PreparedStatement
+): Promise<D1Result> {
+  const result = await statement.run();
+  if (result.meta.changes === 0) fail('VAULT_DELETED', 403);
+  return result;
 }
 
 export async function requireVault(

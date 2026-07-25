@@ -1,4 +1,6 @@
 import {
+  ACTIVE_VAULT_WRITE_SOURCE,
+  executeActiveVaultWrite,
   hashSyncSecret,
   parseBearerSyncKey,
   requireVault,
@@ -17,22 +19,23 @@ const MAX_VAULT_BODY_BYTES = 4_096;
 const MAX_DEVICE_ID_LENGTH = 128;
 const MAX_VAULT_ID_LENGTH = 128;
 
-async function upsertDevice(
+export async function touchActiveVaultDevice(
   env: Env,
   vaultId: string,
   deviceId: string,
   now: number
 ): Promise<void> {
-  await env.DB.prepare(
-    `INSERT INTO sync_devices
+  await executeActiveVaultWrite(
+    env.DB.prepare(
+      `INSERT INTO sync_devices
        (vault_id, device_id, display_name, created_at, last_seen_at,
-        last_successful_sync_at, last_cursor)
-     VALUES (?, ?, NULL, ?, ?, NULL, 0)
-     ON CONFLICT(vault_id, device_id) DO UPDATE SET
-       last_seen_at = excluded.last_seen_at`
-  )
-    .bind(vaultId, deviceId, now, now)
-    .run();
+          last_successful_sync_at, last_cursor)
+       SELECT active_vault.vault_id, ?, NULL, ?, ?, NULL, 0
+       ${ACTIVE_VAULT_WRITE_SOURCE}
+       ON CONFLICT(vault_id, device_id) DO UPDATE SET
+         last_seen_at = excluded.last_seen_at`
+    ).bind(deviceId, now, now, vaultId)
+  );
 }
 
 async function highWatermark(env: Env, vaultId: string): Promise<number> {
@@ -90,7 +93,7 @@ export async function putVault(
   }
   if (vault.deleted_at !== null) fail('VAULT_DELETED', 403);
 
-  await upsertDevice(env, credentials.vaultId, deviceId, now);
+  await touchActiveVaultDevice(env, credentials.vaultId, deviceId, now);
   return json(
     {
       ok: true,
@@ -117,7 +120,7 @@ export async function getStatus(
     'INVALID_DEVICE_ID'
   );
   const now = Date.now();
-  await upsertDevice(env, vault.vaultId, deviceId, now);
+  await touchActiveVaultDevice(env, vault.vaultId, deviceId, now);
 
   return json({
     ok: true,

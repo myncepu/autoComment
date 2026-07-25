@@ -8,6 +8,8 @@ import {
   VALID_SYNC_KEY,
   VALID_VAULT_ID
 } from './fixtures';
+import { requireVault } from '../src/auth';
+import { touchActiveVaultDevice } from '../src/vault';
 
 const ALLOWED_ORIGIN = 'chrome-extension://allowed-extension';
 const VALID_SECRET =
@@ -152,16 +154,23 @@ test('creates a vault through the real Worker and stores only the secret hash', 
   expect(device?.device_id).toBe('device-a');
 });
 
-test('makes same-key creation idempotent and rejects a different secret', async () => {
+test('makes same-key creation idempotent', async () => {
   expect((await vaultRequest('PUT', { deviceId: 'device-a' })).status).toBe(201);
   expect((await vaultRequest('PUT', { deviceId: 'device-b' })).status).toBe(200);
 
   expect(await tableCount('sync_vaults')).toBe(1);
   expect(await tableCount('sync_devices')).toBe(2);
+});
 
-  const wrong = await SELF.fetch(
-    'https://worker.test/v1/status?deviceId=device-c',
-    { headers: authHeaders(WRONG_SECRET_KEY) }
+test('rejects a conflicting PUT without changing the hash or creating its device', async () => {
+  expect((await vaultRequest('PUT', { deviceId: 'device-owner' })).status).toBe(
+    201
+  );
+
+  const wrong = await vaultRequest(
+    'PUT',
+    { deviceId: 'device-wrong-secret' },
+    WRONG_SECRET_KEY
   );
   expect(wrong.status).toBe(403);
   expect(await wrong.json()).toMatchObject({
@@ -171,6 +180,22 @@ test('makes same-key creation idempotent and rejects a different secret', async 
       retryable: false
     }
   });
+
+  const vault = await env.DB.prepare(
+    'SELECT secret_hash FROM sync_vaults WHERE vault_id = ?'
+  )
+    .bind(VALID_VAULT_ID)
+    .first<{ secret_hash: string }>();
+  expect(vault?.secret_hash).toBe(VALID_SECRET_HASH);
+
+  const wrongDevice = await env.DB.prepare(
+    `SELECT device_id
+     FROM sync_devices
+     WHERE vault_id = ? AND device_id = ?`
+  )
+    .bind(VALID_VAULT_ID, 'device-wrong-secret')
+    .first<{ device_id: string }>();
+  expect(wrongDevice).toBeNull();
 });
 
 test('rejects missing, malformed, and non-canonical bearer credentials', async () => {
@@ -242,6 +267,171 @@ test('answers a valid preflight without credentials or cookies', async () => {
   expect(await response.text()).toBe('');
 });
 
+const invalidBodyCases: Array<{
+  name: string;
+  headers: Record<string, string>;
+  body: () => BodyInit;
+  status: number;
+  code: string;
+}> = [
+  {
+    name: 'streamed body larger than 4096 bytes',
+    headers: authHeaders(),
+    body: () => {
+      const encoder = new TextEncoder();
+      return new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            encoder.encode(`{"deviceId":"${'d'.repeat(3_000)}`)
+          );
+          controller.enqueue(
+            encoder.encode(`${'d'.repeat(2_000)}"}`)
+          );
+          controller.close();
+        }
+      });
+    },
+    status: 413,
+    code: 'PAYLOAD_TOO_LARGE'
+  },
+  {
+    name: 'non-JSON media type',
+    headers: {
+      ...authHeaders(),
+      'Content-Type': 'text/plain'
+    },
+    body: () => '{"deviceId":"device-media"}',
+    status: 415,
+    code: 'UNSUPPORTED_MEDIA_TYPE'
+  },
+  {
+    name: 'invalid UTF-8',
+    headers: authHeaders(),
+    body: () => new Uint8Array([0xc3, 0x28]),
+    status: 400,
+    code: 'INVALID_JSON'
+  },
+  {
+    name: 'unknown JSON key',
+    headers: authHeaders(),
+    body: () => '{"deviceId":"device-unknown","unexpected":true}',
+    status: 400,
+    code: 'INVALID_REQUEST'
+  },
+  {
+    name: '__proto__ JSON key',
+    headers: authHeaders(),
+    body: () =>
+      '{"deviceId":"device-proto","__proto__":{"polluted":true}}',
+    status: 400,
+    code: 'INVALID_REQUEST'
+  },
+  {
+    name: 'constructor JSON key',
+    headers: authHeaders(),
+    body: () =>
+      '{"deviceId":"device-constructor","constructor":{"prototype":{}}}',
+    status: 400,
+    code: 'INVALID_REQUEST'
+  },
+  {
+    name: 'prototype JSON key',
+    headers: authHeaders(),
+    body: () =>
+      '{"deviceId":"device-prototype","prototype":{"polluted":true}}',
+    status: 400,
+    code: 'INVALID_REQUEST'
+  }
+];
+
+test.each(invalidBodyCases)(
+  'rejects $name at the real Worker boundary',
+  async ({ headers, body, status, code }) => {
+    const response = await SELF.fetch('https://worker.test/v1/vault', {
+      method: 'PUT',
+      headers,
+      body: body()
+    });
+
+    expect(response.status).toBe(status);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      error: { code, retryable: false }
+    });
+    expect(await tableCount('sync_vaults')).toBe(0);
+    expect(await tableCount('sync_devices')).toBe(0);
+  }
+);
+
+const invalidStatusQueries = [
+  {
+    name: 'duplicate deviceId',
+    query: 'deviceId=device-a&deviceId=device-b',
+    code: 'INVALID_DEVICE_ID'
+  },
+  {
+    name: 'unknown query key',
+    query: 'deviceId=device-a&unexpected=true',
+    code: 'INVALID_REQUEST'
+  }
+];
+
+test.each(invalidStatusQueries)(
+  'rejects $name without touching a device',
+  async ({ query, code }) => {
+    await seedVault();
+    const response = await SELF.fetch(
+      `https://worker.test/v1/status?${query}`,
+      { headers: authHeaders() }
+    );
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      error: { code, retryable: false }
+    });
+    expect(await tableCount('sync_devices')).toBe(0);
+  }
+);
+
+const invalidPreflights = [
+  {
+    name: 'unregistered method',
+    method: 'POST',
+    headers: 'authorization, content-type',
+    status: 405,
+    code: 'METHOD_NOT_ALLOWED'
+  },
+  {
+    name: 'unregistered header',
+    method: 'PUT',
+    headers: 'authorization, x-sync-secret',
+    status: 403,
+    code: 'CORS_HEADER_NOT_ALLOWED'
+  }
+];
+
+test.each(invalidPreflights)(
+  'rejects a preflight with an $name',
+  async ({ method, headers, status, code }) => {
+    const response = await SELF.fetch('https://worker.test/v1/vault', {
+      method: 'OPTIONS',
+      headers: {
+        Origin: ALLOWED_ORIGIN,
+        'Access-Control-Request-Method': method,
+        'Access-Control-Request-Headers': headers
+      }
+    });
+
+    expect(response.status).toBe(status);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      error: { code, retryable: false }
+    });
+    expect(await tableCount('sync_vaults')).toBe(0);
+  }
+);
+
 test('returns safe JSON for method and input failures', async () => {
   const method = await SELF.fetch('https://worker.test/v1/vault', {
     method: 'POST',
@@ -311,6 +501,44 @@ test('status upserts a device last-seen timestamp and returns the vault watermar
   expect(device?.count).toBe(1);
   expect(device?.created_at).toBeGreaterThan(0);
   expect(device?.last_seen_at).toBeGreaterThanOrEqual(device?.created_at ?? 0);
+});
+
+test('a completed delete prevents a previously authenticated touch from recreating devices', async () => {
+  await seedVault();
+  await env.DB.prepare(
+    `INSERT INTO sync_devices
+       (vault_id, device_id, display_name, created_at, last_seen_at,
+        last_successful_sync_at, last_cursor)
+     VALUES (?, 'device-existing', NULL, 1, 1, NULL, 0)`
+  )
+    .bind(VALID_VAULT_ID)
+    .run();
+
+  const authenticated = await requireVault(
+    new Request('https://worker.test/v1/status', {
+      headers: authHeaders()
+    }),
+    env
+  );
+  const deleted = await vaultRequest('DELETE', {
+    confirmation: VALID_VAULT_ID
+  });
+  expect(deleted.status).toBe(200);
+
+  await expect(
+    touchActiveVaultDevice(
+      env,
+      authenticated.vaultId,
+      'device-racing-request',
+      Date.now()
+    )
+  ).rejects.toMatchObject({
+    code: 'VAULT_DELETED',
+    status: 403,
+    retryable: false
+  });
+
+  expect(await tableCount('sync_devices')).toBe(0);
 });
 
 test('requires exact vault confirmation and permanently clears every vault table', async () => {
