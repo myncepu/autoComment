@@ -59,6 +59,66 @@ test('creates a versioned checkpoint with the complete dataset', () => {
   assert.equal(checkpoint.source.parsedUrls[0].originalRow[0], '0');
 });
 
+test('checkpoint creation rejects URL credentials before persistence', () => {
+  const item = {
+    originalIndex: 0,
+    url: 'https://alice:hunter2@example.test/post',
+    sourceDomain: 'example.test',
+    originalRow: ['https://alice:hunter2@example.test/post']
+  };
+
+  assert.throws(
+    () => createBatchRuntimeCheckpoint({
+      batchId: 'batch-secret',
+      source: {
+        fileName: 'secret.csv',
+        headers: ['URL'],
+        rows: [item.originalRow],
+        parsedUrls: [item]
+      },
+      settings: { timeoutSeconds: 60, concurrency: 1 }
+    }, 1000),
+    /batch_url_credentials_forbidden/
+  );
+});
+
+test('checkpoint creation redacts sensitive query values across source copies and results', () => {
+  const item = {
+    originalIndex: 0,
+    url: 'https://example.test/post?view=full&token=secret-token',
+    sourceDomain: 'example.test',
+    originalRow: [
+      'https://example.test/post?view=full&token=secret-token'
+    ]
+  };
+  let checkpoint = createBatchRuntimeCheckpoint({
+    batchId: 'batch-safe',
+    source: {
+      fileName: 'safe.csv',
+      headers: ['URL'],
+      rows: [item.originalRow],
+      parsedUrls: [item]
+    },
+    settings: { timeoutSeconds: 60, concurrency: 1 }
+  }, 1000);
+  checkpoint = applyBatchRuntimeEvent(checkpoint, {
+    type: 'session_started',
+    batchId: 'batch-safe'
+  }, 1100).checkpoint;
+  checkpoint = applyBatchRuntimeEvent(checkpoint, {
+    type: 'task_terminal',
+    batchId: 'batch-safe',
+    urlIndex: 0,
+    attempt: 1,
+    result: { result: 'fail', errorMessage: 'safe failure' }
+  }, 1200).checkpoint;
+
+  const serialized = JSON.stringify(checkpoint);
+  assert.doesNotMatch(serialized, /secret-token/);
+  assert.match(serialized, /view=full/);
+  assert.match(serialized, /token=REDACTED/);
+});
+
 test('rejects malformed and unsupported checkpoints', () => {
   assert.deepEqual(
     validateBatchRuntimeCheckpoint(null),

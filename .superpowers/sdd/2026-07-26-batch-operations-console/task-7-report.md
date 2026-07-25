@@ -8,8 +8,9 @@
   `tabs.create({ windowId: consoleWindowId, url, active: false })`.
 - `BatchTabManager` keys resources by `tabId`, listens to `tabs.onRemoved`, and
   closes only through `tabs.remove(tabId)`. `BatchWindowManager` remains a
-  temporary import alias for Task 11 composition compatibility; it is tab
-  backed and never owns the shared window.
+  distinct, real legacy `windowsApi` implementation so the current
+  `batch.js` composition continues to boot until Task 12; automatic runtime
+  code never instantiates it.
 - Manual-processing windows remain outside this runtime and receive no
   `BATCH_HANDLE`.
 - Added scheduler reconciliation so a retried task can return to the queue
@@ -59,8 +60,8 @@ last navigation change, and elapsed milliseconds.
 - Confirmation, timeout, pause, and stop seal the submit context before
   terminal persistence and tab close.
 - Terminal persistence succeeds before close; close succeeds before refill.
-- Opening timeout releases capacity; a late created tab is cleaned up without
-  becoming active.
+- A timed-out opening retains its concurrency slot until Chrome resolves the
+  pending create; the late tab is then closed before capacity is replenished.
 - Deferred timeout, stop, finalizer, and stale-handle continuations clean only
   their old `tabId` after lifecycle replacement.
 - A newer same-index attempt supersedes a pending create; the late old tab
@@ -71,7 +72,7 @@ last navigation change, and elapsed milliseconds.
 
 ## Verification
 
-- Focused:
+- Initial focused verification:
   `node --test tests/batch-worker-runtime.test.mjs tests/batch-scheduler.test.mjs tests/batch-window-manager.test.mjs`
   — 37 passed, 0 failed.
 - Full:
@@ -82,12 +83,12 @@ last navigation change, and elapsed milliseconds.
   `node --check lib/batch-window-manager.mjs`,
   `node --check lib/batch-scheduler.mjs`.
 - Diff hygiene: `git diff --check`.
-- Static automatic-worker check: no `chrome.windows.create`,
-  `chrome.windows.remove`, `windowsApi.create/remove`, `focused: false`, or
-  normal-window creation in the runtime/manager and their focused tests.
-- Safety scan: no password, API key, or token fields were introduced in the
-  runtime, manager, or tests. Diagnostics contain only worker/navigation
-  state and Chrome error text.
+- Static automatic-worker check: the new runtime and `BatchTabManager` have no
+  `chrome.windows.create/remove`; the only `windowsApi` implementation is the
+  explicitly tested legacy `BatchWindowManager` used by current `batch.js`.
+- Safety scan: credential-bearing URLs are rejected, and sensitive query
+  values plus credentials in handles and diagnostics are redacted. Tests use
+  sentinel secret values and assert they never reach serialized outputs.
 
 ## Documentation and commit
 
@@ -98,3 +99,43 @@ tabs, while preserving the separate manual-window decision.
 Commit subject: `refactor: extract batch worker tab runtime`. The final commit
 hash is reported in the Task 7 DONE message (a commit cannot contain its own
 final object hash).
+
+## Round 1 review corrections
+
+The review exposed five related ownership gaps: the compatibility export had
+changed its constructor contract, finalization was keyed only by URL index,
+replacement detached ownership before cleanup, readiness had no independent
+deadline, and URL/error payloads crossed trust boundaries without one
+sanitizer.
+
+Corrections:
+
+- restored a distinct legacy `BatchWindowManager({ windowsApi })` and kept
+  `BatchTabManager({ tabsApi, windowId })` as the automatic resource manager;
+- added `{ batchId, urlIndex, attempt }` finalizer claims and an owner mutation
+  queue, with opening, managed, and finalizing resources all occupying slots;
+- ordered terminal persistence, exact-tab close, external retry reconciliation,
+  and refill so attempt 1 cannot settle or overwrite attempt 2;
+- made start replacement and disposal await seal/classification, persistence,
+  exact-tab close, pending-create cleanup, and listener detachment;
+- classified unexpected closes during submitting/confirming as
+  `manual_required/submission_uncertain`;
+- added a deadline timer independent of `tabs.get`/`sendMessage`, followed by a
+  bounded fresh tab snapshot for final diagnostics;
+- validated confirmation type, batch/index/attempt/source tab and durable
+  history state inside the runtime;
+- centralized adapter failure handling into `runtime-error` plus
+  `paused_recovery`, including ACTIVE, terminal, seal, close, unexpected-close,
+  and completion paths;
+- rejected URL userinfo during preflight/checkpoint ingestion and sanitized
+  sensitive URL parameters and raw Chrome diagnostics with one shared module.
+
+Round 1 focused verification covers legacy bootstrap, attempt interleavings,
+durable confirmations, pending creates, replacement, strict deadlines,
+submission uncertainty, adapter failures, and secret redaction:
+
+- worker runtime + scheduler + managers: 50 passed, 0 failed;
+- checkpoint + preflight + URL sanitizer: 23 passed, 0 failed;
+- full repository suite: 332 passed, 0 failed.
+
+The review-fix commit hash is recorded in the Task 7 DONE message.

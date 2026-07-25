@@ -58,3 +58,38 @@ test('allows only duplicate rows to be explicitly included', () => {
     /preflight_row_not_overridable/
   );
 });
+
+test('rejects URL userinfo credentials during preflight', () => {
+  const result = preflightBatchRows({
+    headers: ['原URL'],
+    rows: [['https://alice:hunter2@example.test/post']]
+  }, {
+    evaluateUrl() {
+      return { blocked: false };
+    }
+  });
+
+  assert.equal(result.rows[0].status, 'invalid');
+  assert.equal(result.rows[0].included, false);
+  assert.match(result.rows[0].reason, /凭证/);
+  assert.doesNotMatch(JSON.stringify(result), /alice|hunter2/);
+});
+
+test('redacts sensitive query values while preserving ordinary preflight query params', () => {
+  const result = preflightBatchRows({
+    headers: ['原URL'],
+    rows: [[
+      'https://example.test/post?view=thread&token=secret-token&page=2'
+    ]]
+  }, {
+    evaluateUrl() {
+      return { blocked: false };
+    }
+  });
+
+  assert.equal(
+    result.rows[0].url,
+    'https://example.test/post?view=thread&token=REDACTED&page=2'
+  );
+  assert.doesNotMatch(JSON.stringify(result), /secret-token/);
+});

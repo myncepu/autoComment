@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createBatchWorkerRuntime } from '../lib/batch-worker-runtime.mjs';
+import {
+  createBatchWorkerRuntime,
+  waitForContentScriptReady
+} from '../lib/batch-worker-runtime.mjs';
 
 test('opens no more than three attempt-aware background worker tabs in the console window', async () => {
   const harness = createWorkerHarness({ concurrency: 3, taskCount: 5 });
@@ -200,11 +203,13 @@ test('refill reclaims a safely retried attempt after current terminal tasks', as
   const runtime = createBatchWorkerRuntime(harness.dependencies);
   await runtime.start(harness.checkpoint);
   await runtime.handleConfirmation({
+    type: 'BATCH_CONFIRMED',
     batchId: 'batch-1',
     urlIndex: 0,
     attempt: 1,
     sourceTabId: 100,
-    result: 'success'
+    result: 'success',
+    historySaveStatus: 'saved'
   });
   Object.assign(harness.checkpoint.tasks['0'], {
     attempt: 2,
@@ -213,11 +218,13 @@ test('refill reclaims a safely retried attempt after current terminal tasks', as
 
   await runtime.refill(harness.checkpoint);
   await runtime.handleConfirmation({
+    type: 'BATCH_CONFIRMED',
     batchId: 'batch-1',
     urlIndex: 1,
     attempt: 1,
     sourceTabId: 101,
-    result: 'success'
+    result: 'success',
+    historySaveStatus: 'saved'
   });
 
   assert.deepEqual(
@@ -296,7 +303,7 @@ test('focus activates the worker tab and dispose detaches owned resources', asyn
   await runtime.start(harness.checkpoint);
 
   await runtime.focus(0);
-  runtime.dispose();
+  await runtime.dispose();
 
   assert.deepEqual(harness.tabsApi.updateCalls, [[100, { active: true }]]);
   assert.equal(harness.clearedIntervals.length, 1);
@@ -336,7 +343,8 @@ test('an opening timeout replenishes capacity and a late tab is only cleaned up'
   await waitFor(() => createCount === 1, 'first tab create');
   now = 1100;
   await harness.intervalCallbacks[0]();
-  await waitFor(() => harness.sentHandles.length === 1, 'replacement handle');
+  assert.equal(harness.sentHandles.length, 0);
+  assert.equal(createCount, 1, 'the timed-out pending create still owns the slot');
   resolveFirstCreate({
     id: 100,
     windowId: 42,
@@ -345,6 +353,7 @@ test('an opening timeout replenishes capacity and a late tab is only cleaned up'
     discarded: false
   });
   await starting;
+  await waitFor(() => harness.sentHandles.length === 1, 'replacement handle');
 
   assert.deepEqual(
     harness.sentHandles.map(({ urlIndex }) => urlIndex),
@@ -388,16 +397,19 @@ test('a deferred finalizer cleans only its old tab after a replacement lifecycle
   await runtime.start(harness.checkpoint);
 
   const confirming = runtime.handleConfirmation({
+    type: 'BATCH_CONFIRMED',
     batchId: 'batch-1',
     urlIndex: 0,
     attempt: 1,
     sourceTabId: 100,
-    result: 'success'
+    result: 'success',
+    historySaveStatus: 'saved'
   });
   await waitFor(() => typeof releaseTerminal === 'function', 'terminal write');
-  await runtime.start(replacementCheckpoint);
+  const replacing = runtime.start(replacementCheckpoint);
+  await Promise.resolve();
   await releaseTerminal();
-  await confirming;
+  await Promise.all([confirming, replacing]);
 
   assert.deepEqual(harness.tabsApi.removeCalls, [100]);
   assert.deepEqual(
@@ -439,12 +451,16 @@ test('a stale BATCH_HANDLE rejection cannot finalize or close the replacement ta
 
   const oldStart = runtime.start(harness.checkpoint);
   await waitFor(() => typeof rejectOldHandle === 'function', 'old handle');
-  await runtime.start(replacementCheckpoint);
+  const replacing = runtime.start(replacementCheckpoint);
+  await waitFor(
+    () => harness.sentHandles.some(({ batchId }) => batchId === 'batch-2'),
+    'replacement handle'
+  );
   rejectOldHandle(new Error('old handle rejected'));
-  await oldStart;
+  await Promise.all([oldStart, replacing]);
 
   assert.deepEqual(harness.tabsApi.removeCalls, [100]);
-  assert.equal(harness.terminalPayloads.length, 0);
+  assert.equal(harness.terminalPayloads.length, 1);
   assert.deepEqual(
     harness.sentHandles.map(({ batchId }) => batchId),
     ['batch-1', 'batch-2']
@@ -483,11 +499,13 @@ test('last confirmation closes its tab before completion and emits final state',
   harness.calls.length = 0;
 
   await runtime.handleConfirmation({
+    type: 'BATCH_CONFIRMED',
     batchId: 'batch-1',
     urlIndex: 0,
     attempt: 1,
     sourceTabId: 100,
-    result: 'success'
+    result: 'success',
+    historySaveStatus: 'saved'
   });
 
   assert.deepEqual(harness.calls, [
@@ -528,12 +546,13 @@ test('a deferred stop cleans only its old tab after a replacement lifecycle star
 
   const stopping = runtime.stop();
   await waitFor(() => typeof releaseSeal === 'function', 'stop seal');
-  await runtime.start(replacementCheckpoint);
+  const replacing = runtime.start(replacementCheckpoint);
+  await Promise.resolve();
   releaseSeal();
-  await stopping;
+  await Promise.all([stopping, replacing]);
 
   assert.deepEqual(harness.tabsApi.removeCalls, [100]);
-  assert.equal(harness.terminalPayloads.length, 0);
+  assert.equal(harness.terminalPayloads.length, 1);
 });
 
 test('a deferred timeout scan cleans only its old tab after lifecycle replacement', async () => {
@@ -571,12 +590,473 @@ test('a deferred timeout scan cleans only its old tab after lifecycle replacemen
 
   const scanning = harness.intervalCallbacks[0]();
   await waitFor(() => typeof releaseSeal === 'function', 'timeout seal');
-  await runtime.start(replacementCheckpoint);
+  const replacing = runtime.start(replacementCheckpoint);
+  await Promise.resolve();
   releaseSeal();
-  await scanning;
+  await Promise.all([scanning, replacing]);
 
   assert.deepEqual(harness.tabsApi.removeCalls, [100]);
+  assert.equal(harness.terminalPayloads.length, 1);
+});
+
+test('rejects a success confirmation that is not durably recorded', async () => {
+  const harness = createWorkerHarness({ concurrency: 1, taskCount: 1 });
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  await runtime.start(harness.checkpoint);
+  harness.calls.length = 0;
+
+  const accepted = await runtime.handleConfirmation({
+    type: 'BATCH_CONFIRMED',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    sourceTabId: 100,
+    result: 'success',
+    historySaveStatus: 'failed'
+  });
+
+  assert.equal(accepted, false);
+  assert.deepEqual(harness.calls, []);
   assert.equal(harness.terminalPayloads.length, 0);
+});
+
+test('confirmation and pause share one attempt-aware finalizer claim', async () => {
+  const harness = createWorkerHarness({ concurrency: 1, taskCount: 1 });
+  let releaseFirstSeal;
+  let sealCount = 0;
+  harness.dependencies.sealSubmitContext = async () => {
+    sealCount += 1;
+    if (sealCount === 1) {
+      await new Promise((resolve) => {
+        releaseFirstSeal = resolve;
+      });
+    }
+    return { sealed: true, recovered: false };
+  };
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  await runtime.start(harness.checkpoint);
+
+  const confirming = runtime.handleConfirmation({
+    type: 'BATCH_CONFIRMED',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    sourceTabId: 100,
+    result: 'success',
+    historySaveStatus: 'saved'
+  });
+  await waitFor(() => typeof releaseFirstSeal === 'function', 'claimed finalizer');
+  const pausing = runtime.pause('user');
+  releaseFirstSeal();
+  await Promise.all([confirming, pausing]);
+
+  assert.equal(sealCount, 1);
+  assert.equal(harness.terminalPayloads.length, 1);
+  assert.deepEqual(harness.tabsApi.removeCalls, [100]);
+});
+
+test('a queued retry cannot be completed or settled by its old attempt finalizer', async () => {
+  const harness = createWorkerHarness({ concurrency: 1, taskCount: 1 });
+  let requestImpl = harness.dependencies.runtimeRequest;
+  harness.dependencies.runtimeRequest = (...args) => requestImpl(...args);
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  await runtime.start(harness.checkpoint);
+
+  const retryCheckpoint = structuredClone(harness.checkpoint);
+  Object.assign(retryCheckpoint.tasks['0'], {
+    attempt: 2,
+    state: 'queued',
+    phase: null,
+    tabId: null,
+    windowId: null,
+    startedAt: null
+  });
+  retryCheckpoint.results = [];
+  let releaseAttemptOne;
+  requestImpl = async (type, payload) => {
+    harness.calls.push(['runtime', type, payload.urlIndex, payload.attempt]);
+    if (type === 'BATCH_TASK_TERMINAL' && payload.attempt === 1) {
+      return new Promise((resolve) => {
+        releaseAttemptOne = () => {
+          const oldCheckpoint = structuredClone(harness.checkpoint);
+          Object.assign(oldCheckpoint.tasks['0'], {
+            state: 'terminal',
+            phase: null,
+            tabId: null,
+            windowId: null,
+            startedAt: null
+          });
+          oldCheckpoint.results = [{
+            originalIndex: 0,
+            attempt: 1,
+            ...payload.result
+          }];
+          resolve({ ok: true, checkpoint: oldCheckpoint });
+        };
+      });
+    }
+    if (type === 'BATCH_TASK_ACTIVE' && payload.attempt === 2) {
+      Object.assign(retryCheckpoint.tasks['0'], {
+        state: 'active',
+        tabId: payload.tabId,
+        windowId: payload.windowId,
+        startedAt: payload.startedAt
+      });
+      return { ok: true, checkpoint: retryCheckpoint };
+    }
+    if (type === 'BATCH_SESSION_COMPLETE') {
+      throw new Error('old attempt incorrectly completed the retried batch');
+    }
+    return { ok: true, checkpoint: retryCheckpoint };
+  };
+
+  const confirming = runtime.handleConfirmation({
+    type: 'BATCH_CONFIRMED',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    sourceTabId: 100,
+    result: 'success',
+    historySaveStatus: 'saved'
+  });
+  await waitFor(() => typeof releaseAttemptOne === 'function', 'attempt one terminal');
+  const refilling = runtime.refill(retryCheckpoint);
+  releaseAttemptOne();
+  await Promise.all([confirming, refilling]);
+
+  assert.deepEqual(
+    harness.sentHandles.map(({ attempt }) => attempt),
+    [1, 2]
+  );
+  assert.deepEqual(harness.tabsApi.removeCalls, [100]);
+  assert.equal(retryCheckpoint.tasks['0'].state, 'active');
+});
+
+test('unexpected close during submission becomes manual-required', async () => {
+  const harness = createWorkerHarness({ concurrency: 1, taskCount: 1 });
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  await runtime.start(harness.checkpoint);
+  Object.assign(harness.checkpoint.tasks['0'], {
+    state: 'submitting',
+    phase: 'confirming'
+  });
+
+  harness.tabsApi.emitRemoved(100);
+  await waitFor(() => harness.terminalPayloads.length === 1, 'unexpected close result');
+
+  assert.equal(harness.terminalPayloads[0].result.result, 'manual_required');
+  assert.equal(
+    harness.terminalPayloads[0].result.errorCode,
+    'submission_uncertain'
+  );
+});
+
+test('readiness deadline terminates even when tabs.get never settles', async () => {
+  const tabsApi = createFakeTabsApi({
+    get() {
+      return new Promise(() => {});
+    }
+  });
+  const activity = {
+    tabId: 100,
+    startTime: Date.now()
+  };
+
+  const outcome = await Promise.race([
+    waitForContentScriptReady(activity, {
+      tabsApi,
+      timeoutMs: 15,
+      pollIntervalMs: 5
+    }).then(
+      () => 'resolved',
+      (error) => error
+    ),
+    new Promise((resolve) => setTimeout(() => resolve('hung'), 200))
+  ]);
+
+  assert.notEqual(outcome, 'hung');
+  assert.equal(outcome.code, 'content_script_unavailable');
+  assert.equal(outcome.reason, 'timeout');
+});
+
+test('readiness deadline terminates even when PING delivery never settles', async () => {
+  const tabsApi = createFakeTabsApi({
+    sendMessage() {
+      return new Promise(() => {});
+    }
+  });
+  const tab = await tabsApi.create({
+    windowId: 42,
+    url: 'https://target.test/final?view=full',
+    active: false
+  });
+
+  const outcome = await Promise.race([
+    waitForContentScriptReady(
+      { tabId: tab.id, startTime: Date.now() },
+      { tabsApi, timeoutMs: 15, pollIntervalMs: 5 }
+    ).then(
+      () => 'resolved',
+      (error) => error
+    ),
+    new Promise((resolve) => setTimeout(() => resolve('hung'), 200))
+  ]);
+
+  assert.notEqual(outcome, 'hung');
+  assert.equal(outcome.code, 'content_script_unavailable');
+  assert.equal(outcome.reason, 'timeout');
+  assert.match(outcome.message, /view=full/);
+});
+
+test('sanitizes BATCH_HANDLE URLs and diagnostic Chrome errors', async () => {
+  const harness = createWorkerHarness({ concurrency: 1, taskCount: 1 });
+  const secret = 'super-secret-token';
+  const safeUrl = `https://target.test/0?view=full&token=${secret}`;
+  harness.checkpoint.source.parsedUrls[0].url = safeUrl;
+  harness.checkpoint.source.parsedUrls[0].originalRow = [safeUrl];
+  harness.checkpoint.source.rows[0] = [safeUrl];
+  delete harness.dependencies.sendHandle;
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+
+  await runtime.start(harness.checkpoint);
+
+  const serializedHandle = JSON.stringify(
+    harness.tabsApi.sendMessageCalls.find(([, message]) => (
+      message.type === 'BATCH_HANDLE'
+    ))
+  );
+  assert.doesNotMatch(serializedHandle, new RegExp(secret));
+  assert.match(serializedHandle, /view=full/);
+  assert.match(serializedHandle, /token=REDACTED/);
+
+  const diagnosticTabs = createFakeTabsApi({
+    createdTab: {
+      url: `https://user:password@target.test/final?view=full&api_key=${secret}`,
+      status: 'complete'
+    },
+    async sendMessage() {
+      throw new Error(
+        `navigation failed at https://user:password@target.test/final?view=full&token=${secret}`
+      );
+    }
+  });
+  const tab = await diagnosticTabs.create({
+    windowId: 42,
+    url: 'https://target.test',
+    active: false
+  });
+  const error = await waitForContentScriptReady(
+    { tabId: tab.id, startTime: Date.now() },
+    { tabsApi: diagnosticTabs, timeoutMs: 20, pollIntervalMs: 5 }
+  ).catch((caught) => caught);
+  const serializedError = JSON.stringify(error.diagnostic) + error.message;
+  assert.doesNotMatch(serializedError, new RegExp(secret));
+  assert.doesNotMatch(serializedError, /user:password/);
+  assert.match(serializedError, /view=full/);
+});
+
+test('ACTIVE persistence failure emits runtime-error, closes the tab, and pauses recovery', async () => {
+  const harness = createWorkerHarness({ concurrency: 1, taskCount: 1 });
+  const events = [];
+  harness.dependencies.runtimeRequest = async (type) => (
+    type === 'BATCH_TASK_ACTIVE'
+      ? { ok: false, error: 'active write failed token=secret' }
+      : { ok: true, checkpoint: harness.checkpoint }
+  );
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  runtime.subscribe((event) => events.push(event));
+
+  await assert.doesNotReject(runtime.start(harness.checkpoint));
+
+  assert.deepEqual(harness.tabsApi.removeCalls, [100]);
+  assert.equal(harness.sentHandles.length, 0);
+  assert.equal(events.some(({ type }) => type === 'runtime-error'), true);
+  assert.doesNotMatch(
+    JSON.stringify(events.map(({ error }) => error?.message)),
+    /token=secret/
+  );
+});
+
+test('terminal persistence failure retains the exact tab in paused recovery', async () => {
+  const harness = createWorkerHarness({ concurrency: 1, taskCount: 1 });
+  const originalRequest = harness.dependencies.runtimeRequest;
+  harness.dependencies.runtimeRequest = async (type, payload) => (
+    type === 'BATCH_TASK_TERMINAL'
+      ? { ok: false, error: 'terminal write failed authorization=private' }
+      : originalRequest(type, payload)
+  );
+  const events = [];
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  runtime.subscribe((event) => events.push(event));
+  await runtime.start(harness.checkpoint);
+
+  const accepted = await runtime.handleConfirmation({
+    type: 'BATCH_CONFIRMED',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    sourceTabId: 100,
+    result: 'success',
+    historySaveStatus: 'saved'
+  });
+
+  assert.equal(accepted, false);
+  assert.deepEqual(harness.tabsApi.removeCalls, []);
+  assert.equal(events.some(({ type }) => type === 'runtime-error'), true);
+  assert.doesNotMatch(
+    JSON.stringify(events.map(({ error }) => error?.message)),
+    /private/
+  );
+});
+
+test('seal failure pauses without persisting or closing uncertain work', async () => {
+  const harness = createWorkerHarness({ concurrency: 1, taskCount: 1 });
+  harness.dependencies.sealSubmitContext = async () => {
+    throw new Error('seal adapter failed');
+  };
+  const events = [];
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  runtime.subscribe((event) => events.push(event));
+  await runtime.start(harness.checkpoint);
+
+  const accepted = await runtime.handleConfirmation({
+    type: 'BATCH_CONFIRMED',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    sourceTabId: 100,
+    result: 'success',
+    historySaveStatus: 'saved'
+  });
+
+  assert.equal(accepted, false);
+  assert.equal(harness.terminalPayloads.length, 0);
+  assert.deepEqual(harness.tabsApi.removeCalls, []);
+  assert.equal(events.some(({ type }) => type === 'runtime-error'), true);
+});
+
+test('close failure retains ownership and dispose can retry cleanup', async () => {
+  let removeAttempt = 0;
+  const harness = createWorkerHarness({
+    concurrency: 1,
+    taskCount: 1,
+    tabsOptions: {
+      async remove() {
+        removeAttempt += 1;
+        if (removeAttempt === 1) throw new Error('temporary close failure');
+      }
+    }
+  });
+  const events = [];
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  runtime.subscribe((event) => events.push(event));
+  await runtime.start(harness.checkpoint);
+
+  const accepted = await runtime.handleConfirmation({
+    type: 'BATCH_CONFIRMED',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    sourceTabId: 100,
+    result: 'success',
+    historySaveStatus: 'saved'
+  });
+
+  assert.equal(accepted, false);
+  assert.equal(harness.tabsApi.createCalls.length, 1);
+  assert.equal(events.some(({ type }) => type === 'runtime-error'), true);
+  await runtime.dispose();
+  assert.deepEqual(harness.tabsApi.removeCalls, [100, 100]);
+  assert.equal(harness.tabsApi.removedListenerCount(), 0);
+});
+
+test('completion adapter failure is recoverable and does not reopen work', async () => {
+  const harness = createWorkerHarness({ concurrency: 1, taskCount: 1 });
+  const originalRequest = harness.dependencies.runtimeRequest;
+  harness.dependencies.runtimeRequest = async (type, payload) => (
+    type === 'BATCH_SESSION_COMPLETE'
+      ? { ok: false, error: 'completion persistence failed' }
+      : originalRequest(type, payload)
+  );
+  const events = [];
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  runtime.subscribe((event) => events.push(event));
+  await runtime.start(harness.checkpoint);
+
+  await assert.doesNotReject(runtime.handleConfirmation({
+    type: 'BATCH_CONFIRMED',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    sourceTabId: 100,
+    result: 'success',
+    historySaveStatus: 'saved'
+  }));
+
+  assert.deepEqual(harness.tabsApi.removeCalls, [100]);
+  assert.equal(harness.tabsApi.createCalls.length, 1);
+  assert.equal(events.some(({ type }) => type === 'runtime-error'), true);
+});
+
+test('replacement waits for a pending create to terminalize and close', async () => {
+  let resolveOldCreate;
+  let createCount = 0;
+  const harness = createWorkerHarness({
+    concurrency: 1,
+    taskCount: 1,
+    tabsOptions: {
+      create(details) {
+        createCount += 1;
+        if (createCount === 1) {
+          return new Promise((resolve) => {
+            resolveOldCreate = resolve;
+          });
+        }
+        return {
+          id: 101,
+          windowId: details.windowId,
+          url: details.url,
+          status: 'complete',
+          discarded: false
+        };
+      }
+    }
+  });
+  const replacement = structuredClone(harness.checkpoint);
+  replacement.batchId = 'batch-2';
+  const originalRequest = harness.dependencies.runtimeRequest;
+  harness.dependencies.runtimeRequest = async (type, payload) => {
+    if (payload.batchId === 'batch-2') {
+      if (type === 'BATCH_TASK_ACTIVE') {
+        Object.assign(replacement.tasks['0'], {
+          state: 'active',
+          tabId: payload.tabId,
+          windowId: payload.windowId,
+          startedAt: payload.startedAt
+        });
+      }
+      return { ok: true, checkpoint: replacement };
+    }
+    return originalRequest(type, payload);
+  };
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+
+  const oldStart = runtime.start(harness.checkpoint);
+  await waitFor(() => createCount === 1, 'old pending create');
+  const replacing = runtime.start(replacement);
+  await Promise.resolve();
+  assert.equal(createCount, 1);
+  resolveOldCreate({
+    id: 100,
+    windowId: 42,
+    url: 'https://target.test/0',
+    status: 'complete',
+    discarded: false
+  });
+  await Promise.all([oldStart, replacing]);
+
+  assert.deepEqual(harness.tabsApi.removeCalls, [100]);
+  assert.equal(createCount, 2);
 });
 
 function createWorkerHarness({
@@ -742,6 +1222,7 @@ function createFakeTabsApi(options = {}) {
       return { ...tab };
     },
     async get(tabId) {
+      if (options.get) return options.get(tabId);
       const tab = tabs.get(tabId);
       if (!tab) throw new Error(`No tab with id: ${tabId}.`);
       return { ...tab };
@@ -756,6 +1237,7 @@ function createFakeTabsApi(options = {}) {
     async remove(tabId) {
       removeCalls.push(tabId);
       this.calls?.push(['close', tabId]);
+      if (options.remove) await options.remove(tabId);
       tabs.delete(tabId);
       for (const listener of [...removedListeners]) {
         listener(tabId, { windowId: 42, isWindowClosing: false });

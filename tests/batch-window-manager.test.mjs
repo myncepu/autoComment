@@ -93,8 +93,45 @@ test('creates background tabs in one configured window and indexes each by tab i
   assert.equal(manager.getByIndex(3), second);
 });
 
-test('the compatibility export uses tab resources rather than Chrome windows', () => {
-  assert.equal(BatchWindowManager, BatchTabManager);
+test('legacy and automatic worker managers expose distinct resource contracts', () => {
+  assert.notEqual(BatchWindowManager, BatchTabManager);
+});
+
+test('legacy BatchWindowManager still accepts the current batch.js windowsApi bootstrap', async () => {
+  const tabs = new Map();
+  const windowsApi = {
+    createCalls: [],
+    removeCalls: [],
+    onRemoved: {
+      addListener() {},
+      removeListener() {}
+    },
+    async create(details) {
+      this.createCalls.push(details);
+      const created = { id: 21, tabs: [{ id: 121 }] };
+      tabs.set(121, created.tabs[0]);
+      return created;
+    },
+    async remove(windowId) {
+      this.removeCalls.push(windowId);
+    }
+  };
+
+  const manager = new BatchWindowManager({ windowsApi, now: () => 500 });
+  const activity = await manager.create({
+    batchId: 'legacy-batch',
+    urlIndex: 0,
+    attempt: 1,
+    url: 'https://legacy.test'
+  });
+
+  assert.deepEqual(windowsApi.createCalls, [{
+    url: 'https://legacy.test',
+    focused: false,
+    type: 'normal'
+  }]);
+  assert.equal(activity.windowId, 21);
+  assert.equal(activity.tabId, 121);
 });
 
 test('expected close removes one tab without disturbing another worker in the shared window', async () => {

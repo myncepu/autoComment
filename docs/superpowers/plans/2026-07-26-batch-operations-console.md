@@ -220,11 +220,11 @@ Expected: FAIL with `ERR_MODULE_NOT_FOUND` for `lib/batch-error-policy.mjs`.
 ```js
 const ERROR_DEFINITIONS = {
   task_timeout: {
-    message: '处理超时，窗口已安全关闭',
+    message: '处理超时，worker 标签页已安全关闭',
     retryPolicy: 'safe'
   },
-  window_create_failed: {
-    message: '无法创建工作窗口',
+  tab_create_failed: {
+    message: '无法创建 worker 标签页',
     retryPolicy: 'safe'
   },
   content_script_unavailable: {
@@ -1267,7 +1267,7 @@ git commit -m "feat: derive batch console snapshots"
 **Files:**
 - Create: `lib/batch-worker-runtime.mjs`
 - Create: `tests/batch-worker-runtime.test.mjs`
-- Modify later in Task 11: `batch.js:282-1646`
+- Modify later in Task 12: `batch.js:282-1646`
 - Reuse: `lib/batch-scheduler.mjs`, `lib/batch-window-manager.mjs`
 
 **Interfaces:**
@@ -1280,11 +1280,11 @@ git commit -m "feat: derive batch console snapshots"
 - [ ] **Step 1: Write failing worker-runtime tests**
 
 ```js
-test('opens no more than three attempt-aware worker windows and replenishes one', async () => {
+test('opens no more than three attempt-aware worker tabs and replenishes one', async () => {
   const harness = createWorkerHarness({ concurrency: 3, taskCount: 5 });
   const runtime = createBatchWorkerRuntime(harness.dependencies);
   await runtime.start(harness.checkpoint);
-  assert.equal(harness.createdWindows.length, 3);
+  assert.equal(harness.createdTabs.length, 3);
   assert.deepEqual(harness.sentHandles.map((message) => ({
     urlIndex: message.urlIndex,
     attempt: message.attempt
@@ -1299,7 +1299,7 @@ test('opens no more than three attempt-aware worker windows and replenishes one'
     attempt: 1,
     result: 'success'
   });
-  assert.equal(harness.createdWindows.length, 4);
+  assert.equal(harness.createdTabs.length, 4);
 });
 
 test('pauses by stopping replenishment and sealing every activity before close', async () => {
@@ -1315,15 +1315,15 @@ test('pauses by stopping replenishment and sealing every activity before close',
     ['seal', 2, 1],
     ['close', 2, 1]
   ]);
-  assert.equal(harness.createdWindows.length, 3);
+  assert.equal(harness.createdTabs.length, 3);
 });
 
 function createWorkerHarness({ concurrency, taskCount }) {
-  const createdWindows = [];
+  const createdTabs = [];
   const sentHandles = [];
   const calls = [];
   const activities = new Map();
-  let nextWindowId = 100;
+  let nextTabId = 100;
   const parsedUrls = Array.from({ length: taskCount }, (_, urlIndex) => ({
     originalIndex: urlIndex,
     url: `https://target.test/${urlIndex}`,
@@ -1361,17 +1361,17 @@ function createWorkerHarness({ concurrency, taskCount }) {
     tasks,
     results: []
   };
-  const windowManager = {
+  const tabManager = {
     async create(task) {
       const activity = {
         ...task,
-        windowId: nextWindowId,
-        tabId: nextWindowId + 1000,
+        windowId: 42,
+        tabId: nextTabId,
         startTime: 1000
       };
-      nextWindowId += 1;
+      nextTabId += 1;
       activities.set(task.urlIndex, activity);
-      createdWindows.push(activity);
+      createdTabs.push(activity);
       return activity;
     },
     getByIndex(urlIndex) {
@@ -1410,7 +1410,7 @@ function createWorkerHarness({ concurrency, taskCount }) {
       calls.push(['seal', activity.urlIndex, activity.attempt]);
       return { sealed: true, recovered: false };
     },
-    windowManagerFactory: () => windowManager,
+    tabManagerFactory: () => tabManager,
     clock: () => 1000,
     timers: {
       setInterval() {
@@ -1422,7 +1422,7 @@ function createWorkerHarness({ concurrency, taskCount }) {
   return {
     checkpoint,
     dependencies,
-    createdWindows,
+    createdTabs,
     sentHandles,
     calls
   };
@@ -1437,7 +1437,7 @@ Expected: FAIL with missing module.
 
 - [ ] **Step 3: Extract lifecycle ownership from `batch.js`**
 
-Move scheduler, window manager, opening reservations, content-script readiness, timeout checking, submit-context sealing, confirmation routing and close-before-replenish ordering into the new module.
+Move scheduler, worker tab manager, opening reservations, content-script readiness, timeout checking, submit-context sealing, confirmation routing and close-before-replenish ordering into the new module.
 
 Keep these invariants from existing tests:
 
@@ -1454,7 +1454,7 @@ Keep these invariants from existing tests:
 
 Move the reusable harness cases from `tests/batch-multi-window-integration.test.js` for:
 
-- late window creation;
+- late worker-tab creation;
 - deferred timeout;
 - stale handle rejection;
 - deferred finalizer;
@@ -1462,7 +1462,7 @@ Move the reusable harness cases from `tests/batch-multi-window-integration.test.
 - deferred completion;
 - same-index replacement attempts.
 
-Keep the old integration tests until Task 11 proves the composed page uses the extracted module.
+Keep the old integration tests until Task 12 proves the composed page uses the extracted module.
 
 - [ ] **Step 5: Run worker and scheduler tests**
 
@@ -2219,11 +2219,11 @@ test('boots the console from a paused checkpoint and performs no automatic resum
   });
   await harness.boot();
   assert.match(harness.document.querySelector('[data-batch-status]').textContent, /已暂停/);
-  assert.equal(harness.windowsCreated.length, 0);
+  assert.equal(harness.tabsCreated.length, 0);
   harness.document.querySelector('[data-action="resume"]').click();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(harness.runtimeMessages[0].type, 'BATCH_SESSION_RESUME');
-  assert.equal(harness.windowsCreated.length, 3);
+  assert.equal(harness.tabsCreated.length, 3);
 });
 
 function pausedVersion2CheckpointFixture() {
@@ -2276,7 +2276,7 @@ function pausedVersion2CheckpointFixture() {
 }
 ```
 
-Extend the existing `createBatchHarness` rather than adding a second harness. It must expose `boot`, `document`, `runtimeMessages`, and `windowsCreated` while retaining the existing `api`, `elements`, `alerts`, `runtimeListeners`, `intervalCalls`, `FakeScheduler`, and `FakeWindowManager` fields used by older tests.
+Extend the existing `createBatchHarness` rather than adding a second harness. It must expose `boot`, `document`, `runtimeMessages`, and `tabsCreated` while retaining the existing `api`, `elements`, `alerts`, `runtimeListeners`, `intervalCalls`, `FakeScheduler`, and temporary legacy `FakeWindowManager` fields used by older tests.
 
 - [ ] **Step 2: Run the composition test**
 
@@ -2525,7 +2525,7 @@ Import `tests/fixtures/batch-targets.csv`, set concurrency `3`, timeout `60`, en
 Verify and record:
 
 - preflight includes exactly five rows;
-- three worker windows and three slots appear first;
+- three worker tabs and three slots appear first;
 - two tasks remain queued;
 - no fourth worker exists before one slot settles;
 - completion immediately replenishes one slot;
@@ -2537,7 +2537,7 @@ Verify and record:
 Run another local batch and:
 
 1. pause while three workers are active;
-2. confirm no new windows open;
+2. confirm no new worker tabs open;
 3. reload `batch.html`;
 4. confirm the recovery banner and user-gated resume;
 5. resume and confirm only safe queued work runs;
