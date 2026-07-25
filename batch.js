@@ -3,6 +3,7 @@ import { getBatchStartError } from './lib/batch-readiness.mjs';
 import {
   BatchScheduler,
   isBatchConfirmationFor,
+  isDurableBatchConfirmation,
   normalizeBatchConcurrency
 } from './lib/batch-scheduler.mjs';
 import { BatchWindowManager } from './lib/batch-window-manager.mjs';
@@ -36,6 +37,8 @@ let noCommentBoxCount = 0;
 let manualRequiredCount = 0;
 let blockedIllegalCount = 0;
 let pendingCount = 0;
+let historyPendingCount = null;
+let historyPendingCountUnavailable = false;
 
 // 本地结果存储
 let localResults = [];              // [{originalIndex, url, result, aiContent, errorMessage, timestamp}]
@@ -92,6 +95,11 @@ const filterKeyword = document.getElementById('filterKeyword');
 const statsTableBody = document.getElementById('statsTableBody');
 const statsTableWrap = document.getElementById('statsTableWrap');
 const statsCountLabel = document.getElementById('statsCountLabel');
+const historySaveWarning = document.getElementById('historySaveWarning');
+const openHistoryBtn = document.getElementById('openHistoryBtn');
+const historyRetentionBanner = document.getElementById('historyRetentionBanner');
+const historyRetentionText = document.getElementById('historyRetentionText');
+const historyRetentionLink = document.getElementById('historyRetentionLink');
 
 // 批量任务设置勾选框
 const batchAutoOpenPanel = document.getElementById('batchAutoOpenPanel');
@@ -102,6 +110,11 @@ const batchAutoSubmit = document.getElementById('batchAutoSubmit');
 const BATCH_SETTINGS_KEY = 'batch_task_settings';
 const BATCH_URLS_KEY = 'batch_task_urls';
 const BATCH_DOMAIN_BLACKLIST = ['nsfw-ai.net'];
+const HISTORY_SAVE_STATUS_TEXT = {
+  saved: '历史已保存',
+  queued: '历史待重试',
+  failed: '历史保存失败'
+};
 
 // 全局勾选框设置的 storage.sync 键
 const BATCH_CHECKBOX_SETTINGS_KEY = 'batch_checkbox_settings';
@@ -146,8 +159,92 @@ async function init() {
   await loadTimeoutSetting();
   await loadBatchCheckboxSettings(); // 全局记忆的勾选框设置
   bindEvents();
+  loadHistoryRetentionStatus();
+  retryPendingHistoryWrites();
 
   updateUI();
+}
+
+function loadHistoryRetentionStatus() {
+  chrome.runtime.sendMessage({ type: 'HISTORY_RETENTION_STATUS' }, (response) => {
+    if (chrome.runtime.lastError || !response?.ok) return;
+    const dueSoonCount = Number(response.data?.dueSoonCount) || 0;
+    const expiredCount = Number(response.data?.expiredCount) || 0;
+    if (dueSoonCount === 0 && expiredCount === 0) return;
+
+    historyRetentionBanner.hidden = false;
+    historyRetentionText.textContent = expiredCount > 0
+      ? `有 ${expiredCount} 条评论历史已满 90 天，等待导出和确认清理。`
+      : `有 ${dueSoonCount} 条评论历史即将达到 90 天，请提前归档。`;
+  });
+}
+
+function renderHistorySaveWarning() {
+  const hasFailedWrite = localResults.some(
+    (result) => result.result === 'success'
+      && result.historySaveStatus === 'failed'
+  );
+  const hasUnrefreshedQueuedWrite = historyPendingCount == null
+    && localResults.some(
+      (result) => result.result === 'success'
+        && result.historySaveStatus === 'queued'
+    );
+  const hasHistorySaveWarning = historyPendingCount > 0
+    || hasFailedWrite
+    || hasUnrefreshedQueuedWrite
+    || historyPendingCountUnavailable;
+  historySaveWarning.textContent = historyPendingCount > 0
+    ? `仍有 ${historyPendingCount} 条评论历史等待后台重试保存。`
+    : '部分评论历史尚未保存，请稍后重试或检查扩展存储。';
+  historySaveWarning.style.display = hasHistorySaveWarning ? 'block' : 'none';
+}
+
+function retryPendingHistoryWrites() {
+  chrome.runtime.sendMessage({ type: 'HISTORY_RETRY_PENDING' }, (response) => {
+    if (chrome.runtime.lastError || !response?.ok) return;
+    if (response.data?.pending === null) {
+      historyPendingCount = null;
+      historyPendingCountUnavailable = true;
+      renderHistorySaveWarning();
+      if (localResults.length > 0) renderStats();
+      return;
+    }
+    if (!Number.isInteger(response.data?.pending)) return;
+    historyPendingCount = response.data.pending;
+    historyPendingCountUnavailable = false;
+    if (historyPendingCount === 0) {
+      let changed = false;
+      for (const result of localResults) {
+        if (result.result === 'success' && result.historySaveStatus === 'queued') {
+          result.historySaveStatus = 'saved';
+          changed = true;
+        }
+      }
+      if (changed) saveLocalResults();
+    }
+    renderHistorySaveWarning();
+    if (localResults.length > 0) renderStats();
+  });
+}
+
+function updateHistoryPendingCount(value, saveStatus) {
+  if (Number.isInteger(value)) {
+    historyPendingCount = value;
+    historyPendingCountUnavailable = false;
+    if (value === 0) {
+      let changed = false;
+      for (const result of localResults) {
+        if (result.result === 'success' && result.historySaveStatus === 'queued') {
+          result.historySaveStatus = 'saved';
+          changed = true;
+        }
+      }
+      if (changed) saveLocalResults();
+    }
+  } else if (value === null || saveStatus === 'queued') {
+    historyPendingCount = null;
+    historyPendingCountUnavailable = true;
+  }
 }
 
 function createWindowManager() {
@@ -199,6 +296,10 @@ function saveTimeoutSetting() {
 
 // ==================== 事件绑定 ====================
 function bindEvents() {
+  const openHistory = () => chrome.tabs.create({ url: 'history.html' });
+  openHistoryBtn.addEventListener('click', openHistory);
+  historyRetentionLink.addEventListener('click', openHistory);
+
   // 上传区域
   uploadZone.addEventListener('click', () => {
     if (canChangeBatchDataset()) fileInput.click();
@@ -239,6 +340,11 @@ function bindEvents() {
   chrome.runtime.onMessage.addListener((message) => {
     // background 通知：结果已落盘，标签页可以安全关闭了
     if (!isBatchConfirmationFor(message, { batchId, totalCount })) return;
+    if (!isDurableBatchConfirmation(message)) {
+      historyPendingCountUnavailable = true;
+      renderHistorySaveWarning();
+      return;
+    }
 
     console.log('[batch] 收到 BATCH_CONFIRMED >>>', {
       urlIndex: message.urlIndex,
@@ -250,7 +356,10 @@ function bindEvents() {
       message.urlIndex,
       message.result,
       message.aiContent,
-      message.errorMessage
+      message.errorMessage,
+      message.historySaveStatus,
+      message.historyPendingCount,
+      message.sourceTabId
     );
   });
 
@@ -670,19 +779,39 @@ async function stopBatch() {
   if (pollTimer) clearTimeout(pollTimer);
   stopTimeoutChecker();
 
-  await Promise.all(activeIndices.map((urlIndex) =>
-    finalizeTask(
+  await Promise.all(activeIndices.map(async (urlIndex) => {
+    const activity = stoppingLifecycle.windowManager?.getByIndex(urlIndex);
+    const recovery = await recoverSubmitContext(
+      activity,
+      stoppingLifecycle.batchId,
       urlIndex,
-      'fail',
+      'stop'
+    );
+    if (
+      batchId !== stoppingLifecycle.batchId ||
+      lifecycleToken !== stoppingLifecycle.lifecycleToken ||
+      scheduler !== stoppingLifecycle.scheduler ||
+      windowManager !== stoppingLifecycle.windowManager
+    ) {
+      return false;
+    }
+    const canClose = !Number.isInteger(activity?.tabId) || recovery.sealed;
+    return finalizeTask(
+      urlIndex,
+      recovery.recovered || !canClose ? 'manual_required' : 'fail',
       null,
-      '手动终止',
+      recovery.recovered
+        ? '手动终止；未确认提交的上下文已保留待恢复'
+        : canClose
+          ? '手动终止'
+          : '手动终止；上下文交接失败，请检查仍打开的工作窗口',
       {
+        closeWindow: canClose,
         suppressCompletion: true,
         ownership: stoppingLifecycle
       }
-    )
-  ));
-  await stoppingLifecycle.windowManager?.closeAll();
+    );
+  }));
 
   for (const [urlIndex, opening] of stoppingLifecycle.openings) {
     if (openingActivities.get(urlIndex) === opening) {
@@ -910,7 +1039,8 @@ function recordTaskResult(
   aiContent,
   errorMessage,
   elapsed,
-  items = batchItems
+  items = batchItems,
+  historySaveStatus = null
 ) {
   console.log('[batch] recordTaskResult 被调用:', {
     urlIndex,
@@ -940,6 +1070,7 @@ function recordTaskResult(
     result: recordedResult,
     aiContent: recordedAiContent || null,
     errorMessage: recordedErrorMessage || null,
+    historySaveStatus: historySaveStatus || null,
     timestamp: Date.now(),
     elapsed,
     originalRow: item?.originalRow || null  // 保存原始行数据用于导出
@@ -998,10 +1129,23 @@ async function finalizeTask(
     closeWindow = true,
     forcedElapsed,
     suppressCompletion = false,
-    ownership = null
+    ownership = null,
+    historySaveStatus = null,
+    historyPendingCount: confirmedHistoryPendingCount
   } = {}
 ) {
-  if (localResults.some((entry) => entry.originalIndex === urlIndex)) return false;
+  updateHistoryPendingCount(confirmedHistoryPendingCount, historySaveStatus);
+  const existingResult = localResults.find(
+    (entry) => entry.originalIndex === urlIndex
+  );
+  if (existingResult) {
+    if (historySaveStatus) {
+      existingResult.historySaveStatus = historySaveStatus;
+      saveLocalResults();
+      renderStats();
+    }
+    return false;
+  }
 
   const taskBatchId = ownership?.batchId ?? batchId;
   const taskLifecycleToken = ownership?.lifecycleToken ?? lifecycleToken;
@@ -1018,7 +1162,15 @@ async function finalizeTask(
       ? Math.round((Date.now() - startTime) / 1000)
       : null;
 
-  recordTaskResult(urlIndex, result, aiContent, errorMessage, elapsed, taskItems);
+  recordTaskResult(
+    urlIndex,
+    result,
+    aiContent,
+    errorMessage,
+    elapsed,
+    taskItems,
+    historySaveStatus
+  );
   if (closeWindow && taskWindowManager) {
     await taskWindowManager.closeByIndex(urlIndex);
   }
@@ -1045,8 +1197,42 @@ async function finalizeTask(
   return true;
 }
 
-async function handleTaskConfirmed(urlIndex, result, aiContent, errorMessage) {
-  await finalizeTask(urlIndex, result, aiContent, errorMessage);
+async function handleTaskConfirmed(
+  urlIndex,
+  result,
+  aiContent,
+  errorMessage,
+  historySaveStatus,
+  confirmedHistoryPendingCount,
+  sourceTabId
+) {
+  const confirmationLifecycle = {
+    batchId,
+    lifecycleToken,
+    scheduler,
+    windowManager,
+    batchItems
+  };
+  const activity = confirmationLifecycle.windowManager?.getByIndex(urlIndex);
+  if (
+    Number.isInteger(sourceTabId)
+    && activity?.tabId !== sourceTabId
+  ) {
+    return;
+  }
+  if (
+    batchId !== confirmationLifecycle.batchId ||
+    lifecycleToken !== confirmationLifecycle.lifecycleToken ||
+    scheduler !== confirmationLifecycle.scheduler ||
+    windowManager !== confirmationLifecycle.windowManager
+  ) {
+    return;
+  }
+  await finalizeTask(urlIndex, result, aiContent, errorMessage, {
+    ownership: confirmationLifecycle,
+    historySaveStatus,
+    historyPendingCount: confirmedHistoryPendingCount
+  });
 }
 
 async function handleUnexpectedWindowClose(activity) {
@@ -1151,6 +1337,32 @@ function stopTimeoutChecker() {
   }
 }
 
+async function recoverSubmitContext(
+  activity,
+  taskBatchId,
+  urlIndex,
+  reason
+) {
+  if (!Number.isInteger(activity?.tabId)) {
+    return { sealed: false, recovered: false };
+  }
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'BATCH_RECOVER_SUBMIT_CONTEXT',
+      tabId: activity.tabId,
+      batchId: taskBatchId,
+      urlIndex,
+      reason
+    });
+    return {
+      sealed: response?.ok === true && response.sealed === true,
+      recovered: response?.ok === true && response.recovered === true
+    };
+  } catch (_) {
+    return { sealed: false, recovered: false };
+  }
+}
+
 async function checkTimeouts() {
   const timeoutLifecycle = {
     batchId,
@@ -1171,6 +1383,40 @@ async function checkTimeouts() {
     const opening = timeoutLifecycle.openings.get(urlIndex);
     const startTime = activity?.startTime || opening?.startTime;
     if (startTime && (Date.now() - startTime) / 1000 > timeoutSeconds) {
+      if (Number.isInteger(activity?.tabId)) {
+        const recovery = await recoverSubmitContext(
+          activity,
+          timeoutLifecycle.batchId,
+          urlIndex,
+          'timeout'
+        );
+        if (
+          batchId !== timeoutLifecycle.batchId ||
+          lifecycleToken !== timeoutLifecycle.lifecycleToken ||
+          scheduler !== timeoutLifecycle.scheduler ||
+          windowManager !== timeoutLifecycle.windowManager
+        ) {
+          return;
+        }
+        if (!recovery.sealed) {
+          console.warn('[batch] 提交上下文交接失败，暂缓超时关闭:', {
+            batchId: timeoutLifecycle.batchId,
+            urlIndex,
+            tabId: activity.tabId
+          });
+          continue;
+        }
+        if (recovery.recovered) {
+          await finalizeTask(
+            urlIndex,
+            'manual_required',
+            null,
+            '提交结果不明确；上下文已保留待恢复',
+            { ownership: timeoutLifecycle }
+          );
+          continue;
+        }
+      }
       await finalizeTask(
         urlIndex,
         'fail',
@@ -1468,9 +1714,11 @@ function filterTimeBucket(elapsedSecs) {
 function renderStats() {
   if (localResults.length === 0) {
     statsPanel.classList.remove('visible');
+    renderHistorySaveWarning();
     return;
   }
   statsPanel.classList.add('visible');
+  renderHistorySaveWarning();
 
   const total = localResults.length;
   const success = localResults.filter((r) => r.result === 'success').length;
@@ -1560,6 +1808,15 @@ function renderStats() {
       aiCell.style.color = '#d1d5db';
     }
     tr.appendChild(aiCell);
+
+    const historyCell = document.createElement('td');
+    historyCell.textContent = r.result === 'success'
+      ? (HISTORY_SAVE_STATUS_TEXT[r.historySaveStatus] || '—')
+      : '—';
+    historyCell.className = r.historySaveStatus
+      ? `history-save-${r.historySaveStatus}`
+      : '';
+    tr.appendChild(historyCell);
 
     const elapsedCell = document.createElement('td');
     elapsedCell.textContent = elapsedStr;

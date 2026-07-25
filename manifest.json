@@ -5,7 +5,10 @@
   "description": "自动填充注册表单，并为当前网站生成推广文案。",
   "permissions": [
     "activeTab",
-    "storage"
+    "storage",
+    "unlimitedStorage",
+    "alarms",
+    "notifications"
   ],
   "host_permissions": [
     "https://openrouter.ai/*"
@@ -25,7 +28,7 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["illegal-site-filter.js", "lib/llm-content-bridge.js", "lib/batch-submit-context-client.js", "content.js"],
+      "js": ["illegal-site-filter.js", "lib/llm-content-bridge.js", "lib/batch-submit-context-client.js", "lib/comment-history-capture.js", "content.js"],
       "run_at": "document_idle"
     }
   ]

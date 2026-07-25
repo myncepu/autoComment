@@ -523,6 +523,45 @@
       .stats-table tr.url-manual_required td { background: #fffbeb; }
       .stats-table tr.url-blocked_illegal td { background: #fff1f2; }
 
+      .history-save-warning {
+        display: none;
+        margin: 12px 0;
+        padding: 10px 12px;
+        border: 1px solid #f59e0b;
+        border-radius: 8px;
+        background: #fffbeb;
+        color: #92400e;
+        font-size: 13px;
+      }
+      .history-save-saved { color: #15803d; }
+      .history-save-queued { color: #b45309; }
+      .history-save-failed { color: #b91c1c; }
+
+      .history-retention-banner {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 16px;
+        padding: 11px 14px;
+        border: 1px solid #f59e0b;
+        border-radius: 9px;
+        background: #fffbeb;
+        color: #92400e;
+        font-size: 13px;
+        font-weight: 600;
+      }
+
+      .history-retention-banner[hidden] {
+        display: none;
+      }
+
+      .page-entry-actions {
+        display: flex;
+        gap: 8px;
+        margin: -8px 0 16px;
+      }
+
       .result-badge {
         display: inline-block;
         padding: 2px 8px;
@@ -638,6 +677,13 @@
       <!-- 标题区 -->
       <h1>批量外链评论</h1>
       <div class="subtitle">上传 CSV 文件，批量打开目标页面，自动发送评论并记录结果</div>
+      <div class="page-entry-actions">
+        <button class="btn btn-secondary" id="openHistoryBtn" type="button">评论历史</button>
+      </div>
+      <div class="history-retention-banner" id="historyRetentionBanner" role="status" hidden>
+        <span id="historyRetentionText"></span>
+        <button class="btn btn-warning" id="historyRetentionLink" type="button">查看评论历史</button>
+      </div>
 
 
       <!-- 文件上传区 -->
@@ -787,6 +833,10 @@
         </div>
       </div>
 
+      <div class="history-save-warning" id="historySaveWarning">
+        部分评论历史尚未保存，请稍后重试或检查扩展存储。
+      </div>
+
       <!-- 结果统计面板 -->
       <div class="card stats-panel" id="statsPanel">
         <div class="card-title">执行结果统计</div>
@@ -853,6 +903,7 @@
               <col style="width: 92px" />
               <col style="width: 210px" />
               <col style="width: 260px" />
+              <col style="width: 94px" />
               <col style="width: 72px" />
               <col style="width: 72px" />
             </colgroup>
@@ -863,6 +914,7 @@
                 <th>结果</th>
                 <th>错误信息</th>
                 <th>AI 生成内容</th>
+                <th>历史保存</th>
                 <th>耗时</th>
                 <th>时间</th>
               </tr>

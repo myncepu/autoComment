@@ -806,6 +806,7 @@
   // 批处理模式上下文（由 BATCH_HANDLE 消息注入）
   let _batchCtx = null; // { batchId, urlIndex, url }
   let runningBatchTaskKey = null;
+  let historyRevisionSequence = 0;
 
   function setBatchContext(batchId, urlIndex, url) {
     _batchCtx = { batchId, urlIndex, url };
@@ -815,43 +816,212 @@
     return `${batchId}:${urlIndex}`;
   }
 
-  async function persistBatchSubmitContext(batchId, urlIndex, url, result, aiContent, errorMessage) {
+  function createHistoryUniqueId() {
+    if (typeof globalThis.crypto?.randomUUID === 'function') {
+      return globalThis.crypto.randomUUID();
+    }
+    historyRevisionSequence += 1;
+    return [
+      Date.now().toString(36),
+      historyRevisionSequence.toString(36),
+      Math.random().toString(36).slice(2)
+    ].join('-');
+  }
+
+  function hasHistoryRevision(history) {
+    const revision = history?.historyRevision;
+    return Boolean(
+      revision
+      && Number.isFinite(revision.capturedAt)
+      && Number.isFinite(revision.recordedAt)
+      && Number.isInteger(revision.sequence)
+      && revision.sequence >= 0
+      && typeof revision.id === 'string'
+      && revision.id
+    );
+  }
+
+  function ensureHistoryRevision(history) {
+    if (!history || hasHistoryRevision(history)) return history;
+    const capturedAt = Number.isFinite(history.submittedAt)
+      ? history.submittedAt
+      : Date.now();
+    historyRevisionSequence += 1;
+    return {
+      ...history,
+      historyRevision: {
+        capturedAt,
+        recordedAt: Date.now(),
+        sequence: historyRevisionSequence,
+        id: createHistoryUniqueId()
+      }
+    };
+  }
+
+  async function captureCurrentCommentHistory(editor, pageUrl) {
+    const promotedWebsiteUrl = await getWebsiteUrl();
+    const history = globalThis.AutoCommentHistoryCapture.captureSubmission({
+      editor,
+      pageUrl: pageUrl || location.href,
+      promotedWebsiteUrl,
+      now: Date.now()
+    });
+    return ensureHistoryRevision(history);
+  }
+
+  async function persistBatchSubmitContext(batchId, urlIndex, url, result, aiContent, errorMessage, history) {
+    if (!window.AutoCommentBatchSubmitContext?.save) {
+      throw new Error('无法在提交前保存评论历史上下文');
+    }
     await window.AutoCommentBatchSubmitContext.save({
       batchId,
       urlIndex,
       url,
       result,
       aiContent: aiContent || null,
-      errorMessage: errorMessage || null
+      errorMessage: errorMessage || null,
+      history
     });
   }
 
-  async function clearBatchSubmitContext() {
+  function clearBatchSubmitContext(match) {
+    return Promise.resolve(window.AutoCommentBatchSubmitContext?.clear?.(match))
+      .catch(() => {});
+  }
+
+  function isAcknowledgedBatchHistoryConfirmation(message, response) {
+    if (!response?.ok) return false;
+    if (
+      response.historySaveStatus === 'saved'
+      || response.historySaveStatus === 'queued'
+    ) {
+      return true;
+    }
+    if (response.historySaveStatus !== 'not_applicable') return false;
+    const result = message?.result ?? 'success';
+    return result !== 'success' || (
+      !message?.history
+      && message?.historyUnavailableReason === 'legacy_context'
+    );
+  }
+
+  function persistHistoryPendingFallback(message) {
+    return new Promise((resolve) => {
+      if (
+        typeof chrome === 'undefined'
+        || !chrome.storage?.local?.set
+        || !message?.batchId
+        || message.urlIndex === undefined
+      ) {
+        resolve(false);
+        return;
+      }
+      const entryId = createHistoryUniqueId();
+      const pendingKey = `historyPending:v2:${entryId}`;
+      const pendingEntry = {
+        queueVersion: 2,
+        entryId,
+        commentId: `${message.batchId}:${message.urlIndex}`,
+        revision: message.history?.historyRevision || null,
+        message
+      };
+      let settled = false;
+      const finish = (saved) => {
+        if (settled) return;
+        settled = true;
+        resolve(saved);
+      };
+      try {
+        const pendingWrite = chrome.storage.local.set({
+          [pendingKey]: pendingEntry
+        }, () => {
+          finish(!chrome.runtime?.lastError);
+        });
+        if (pendingWrite && typeof pendingWrite.then === 'function') {
+          pendingWrite.then(() => finish(true), () => finish(false));
+        }
+      } catch (_) {
+        finish(false);
+      }
+    });
+  }
+
+  async function notifyHistoryFallbackDurable(message) {
+    if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return false;
     try {
-      await window.AutoCommentBatchSubmitContext.clear();
-    } catch (_) {}
+      const response = await chrome.runtime.sendMessage({
+        type: 'BATCH_HISTORY_FALLBACK_DURABLE',
+        batchId: message.batchId,
+        urlIndex: message.urlIndex,
+        url: message.url || '',
+        result: message.result ?? 'success',
+        aiContent: message.aiContent || null,
+        errorMessage: message.errorMessage || null,
+        historyRevision: message.history?.historyRevision || null
+      });
+      return response?.ok === true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async function confirmBatchHistoryDurably(message) {
+    const versionedMessage = message?.history
+      ? {
+          ...message,
+          history: ensureHistoryRevision(message.history)
+        }
+      : message;
+    let acknowledgement = null;
+    if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+      try {
+        acknowledgement = await chrome.runtime.sendMessage(versionedMessage);
+      } catch (_) {
+        acknowledgement = null;
+      }
+    }
+    const backgroundAcknowledged = isAcknowledgedBatchHistoryConfirmation(
+      versionedMessage,
+      acknowledgement
+    );
+    let fallbackDurable = false;
+    let fallbackHandoffAcknowledged = false;
+    if (!backgroundAcknowledged) {
+      fallbackDurable = await persistHistoryPendingFallback(versionedMessage);
+      if (fallbackDurable) {
+        fallbackHandoffAcknowledged = await notifyHistoryFallbackDurable(
+          versionedMessage
+        );
+      }
+    }
+    const durable = backgroundAcknowledged || fallbackDurable;
+    if (backgroundAcknowledged || fallbackHandoffAcknowledged) {
+      await clearBatchSubmitContext({
+        batchId: versionedMessage.batchId,
+        urlIndex: versionedMessage.urlIndex,
+        ...(versionedMessage.history?.historyRevision
+          ? { historyRevision: versionedMessage.history.historyRevision }
+          : {})
+      });
+    }
+    return { durable, acknowledgement };
   }
 
   async function confirmRestoredBatchSubmit(ctx) {
     if (!ctx || !ctx.batchId || ctx.urlIndex === undefined) return;
-    if (Date.now() - (ctx.timestamp || 0) > 10 * 60 * 1000) {
-      await clearBatchSubmitContext();
-      return;
-    }
-
     console.log('[AutoComment] 恢复提交后上下文，仅补发确认，不重新生成AI:', ctx);
-    try {
-      await window.AutoCommentBatchSubmitContext.confirm({
-        batchId: ctx.batchId,
-        urlIndex: ctx.urlIndex,
-        url: ctx.url || '',
-        aiContent: ctx.aiContent || '',
-        result: ctx.result || 'success',
-        errorMessage: ctx.errorMessage || null
-      });
-    } catch (error) {
-      console.warn('[AutoComment] 恢复提交确认失败，保留上下文等待重试:', error);
-    }
+    const message = {
+      type: 'BATCH_HANDLE_CONFIRM',
+      batchId: ctx.batchId,
+      urlIndex: ctx.urlIndex,
+      url: ctx.url || '',
+      aiContent: ctx.aiContent || '',
+      result: ctx.result || 'success',
+      errorMessage: ctx.errorMessage || null,
+      history: ctx.history,
+      historyUnavailableReason: ctx.history ? undefined : 'legacy_context'
+    };
+    await confirmBatchHistoryDurably(message);
   }
 
   // 从 storage 恢复提交后上下文（仅补确认，不再恢复成可执行批处理任务）
@@ -866,23 +1036,20 @@
   }
 
   // 批处理模式专用：直接上报成功到 background
-  async function reportSuccessToBatch(aiContent) {
+  async function reportSuccessToBatch(aiContent, history) {
     if (!_batchCtx) return;
     const { batchId, urlIndex, url } = _batchCtx;
     try {
       await writePendingResult(batchId, urlIndex, url, 'success', aiContent, null);
     } catch (_) {}
-    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
-      await new Promise((resolve) => {
-        chrome.runtime.sendMessage({
-          type: 'BATCH_HANDLE_CONFIRM',
-          batchId,
-          urlIndex,
-          url: url || '',
-          aiContent
-        }).then(resolve).catch(resolve);
-      });
-    }
+    await confirmBatchHistoryDurably({
+      type: 'BATCH_HANDLE_CONFIRM',
+      batchId,
+      urlIndex,
+      url: url || '',
+      aiContent,
+      history
+    });
   }
 
   /**
@@ -947,9 +1114,12 @@
         return;
       }
 
+      const editor = findLikelyCommentTextarea({ allowGenericFallback: true });
+      const history = await captureCurrentCommentHistory(editor, url);
+      await persistBatchSubmitContext(batchId, urlIndex, url, 'success', promotionText, null, history);
       const navResult = await waitForNavigate(12000);
 
-      await reportSuccessToBatch(promotionText);
+      await reportSuccessToBatch(promotionText, history);
     } catch (err) {
       console.error('[AutoComment] handleBatchTaskForAutoMode 异常:', err);
     }
@@ -3271,14 +3441,23 @@
           // 等待一小段时间确保页面 JS 验证逻辑已完成初始化
           await new Promise(resolve => setTimeout(resolve, 600));
 
+          const editor = findLikelyCommentTextarea({ allowGenericFallback: true });
+          const history = await captureCurrentCommentHistory(editor, location.href);
+          if (_batchCtx) {
+            const { batchId, urlIndex, url } = _batchCtx;
+            await persistBatchSubmitContext(batchId, urlIndex, url, 'success', text, null, history);
+          }
           const result = await clickCommentSubmitButton();
           if (result.success) {
             setStatus('评论已自动提交！', '#22c55e');
             // 批处理模式：提交成功后上报结果到 batch.html
             if (_batchCtx) {
-              await reportSuccessToBatch(text);
+              await reportSuccessToBatch(text, history);
             }
           } else {
+            if (_batchCtx) {
+              clearBatchSubmitContext();
+            }
             setStatus('自动提交失败：' + (result.error || '未知错误') + '，请手动提交', '#f97373');
           }
         console.log('[AutoComment] >>>[7b] shouldAutoSubmit 为 false，仅填充文案');
@@ -3911,14 +4090,17 @@
         return;
       }
 
+      const editor = findLikelyCommentTextarea({ allowGenericFallback: true });
+      const history = await captureCurrentCommentHistory(editor, url);
       // 提交前先写入 pending 结果（页面刷新后 batch.js 仍能立即读到）
       await writePendingResult(batchId, urlIndex, url, 'success', aiContent, null);
-      await persistBatchSubmitContext(batchId, urlIndex, url, 'success', aiContent, null);
+      await persistBatchSubmitContext(batchId, urlIndex, url, 'success', aiContent, null, history);
       console.log('[content] pending结果写入完成');
       console.log('[content] 7/7 点击提交按钮...');
       const clickResult = await clickCommentSubmitButton();
       console.log('[content] 点击结果:', clickResult);
       if (!clickResult.success) {
+        await clearBatchSubmitContext();
         throw new Error(clickResult.error || '提交按钮点击失败');
       }
 
@@ -3940,24 +4122,15 @@
       // 这是关键：即使页面刷新，background 仍持有 batchId，能正确上报
       // 同时等待 background 响应后再返回，使 batch.js 能收到确认再关闭标签页
       console.log('[content] 通知 background (BATCH_HANDLE_CONFIRM)...');
-      if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
-        try {
-          const response = await window.AutoCommentBatchSubmitContext.confirm({
-            batchId,
-            urlIndex,
-            url: url || '',
-            aiContent
-          });
-          console.log('[content] background 响应:', response);
-        } catch (err) {
-          if (err.message && err.message.includes('message channel closed')) {
-            console.log('[content] 消息通道已关闭（标签页可能已关闭），保留上下文等待重试');
-          } else {
-            console.warn('[content] background 响应失败，保留上下文等待重试:', err);
-          }
-          return;
-        }
-      }
+      const confirmation = await confirmBatchHistoryDurably({
+        type: 'BATCH_HANDLE_CONFIRM',
+        batchId,
+        urlIndex,
+        url: url || '',
+        aiContent,
+        history
+      });
+      console.log('[content] background 响应:', confirmation.acknowledgement);
       console.log('[content] handleBatchTask 完成 <<<', { batchId, urlIndex });
     } catch (err) {
       console.warn('[content] handleBatchTask 捕获错误:', err.message);
