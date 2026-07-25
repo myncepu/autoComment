@@ -203,6 +203,7 @@ test('listener preserves unacknowledged context when its tab closes', async () =
   };
   const saved = [];
   const cleared = [];
+  const recovered = [];
   const contexts = new Map([[77, {
     batchId: 'batch-query',
     urlIndex: 5
@@ -215,6 +216,10 @@ test('listener preserves unacknowledged context when its tab closes', async () =
       const context = contexts.get(tabId);
       return context?.batchId === expected.batchId
         && context?.urlIndex === expected.urlIndex;
+    },
+    async sealAndRecover(tabId, expected, reason) {
+      recovered.push({ tabId, expected, reason });
+      return { sealed: true, recovered: true };
     }
   };
   installBatchSubmitContextListener(chromeApi, store);
@@ -244,6 +249,18 @@ test('listener preserves unacknowledged context when its tab closes', async () =
     { id: 'extension-id' },
     (response) => { unresolved = response; }
   );
+  let recoveryResponse;
+  const recoveryHandled = listener(
+    {
+      type: 'BATCH_RECOVER_SUBMIT_CONTEXT',
+      tabId: 77,
+      batchId: 'batch-query',
+      urlIndex: 5,
+      reason: 'timeout'
+    },
+    { id: 'extension-id' },
+    (response) => { recoveryResponse = response; }
+  );
   await new Promise(setImmediate);
 
   assert.deepEqual(saved, [{ tabId: 42, context: { batchId: 'a' } }]);
@@ -251,6 +268,17 @@ test('listener preserves unacknowledged context when its tab closes', async () =
   assert.deepEqual(invalid, { ok: false, error: 'missing_sender_tab' });
   assert.equal(queryHandled, true);
   assert.deepEqual(unresolved, { ok: true, unresolved: true });
+  assert.equal(recoveryHandled, true);
+  assert.deepEqual(recoveryResponse, {
+    ok: true,
+    sealed: true,
+    recovered: true
+  });
+  assert.deepEqual(recovered, [{
+    tabId: 77,
+    expected: { batchId: 'batch-query', urlIndex: 5 },
+    reason: 'timeout'
+  }]);
   assert.equal(tabRemovedListener, undefined);
   assert.deepEqual(cleared, []);
 });
