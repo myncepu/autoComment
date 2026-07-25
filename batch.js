@@ -1184,7 +1184,31 @@ async function handleTaskConfirmed(
   historySaveStatus,
   confirmedHistoryPendingCount
 ) {
+  const confirmationLifecycle = {
+    batchId,
+    lifecycleToken,
+    scheduler,
+    windowManager,
+    batchItems
+  };
+  const activity = confirmationLifecycle.windowManager?.getByIndex(urlIndex);
+  if (await hasUnresolvedSubmitContext(
+    activity,
+    confirmationLifecycle.batchId,
+    urlIndex
+  )) {
+    return;
+  }
+  if (
+    batchId !== confirmationLifecycle.batchId ||
+    lifecycleToken !== confirmationLifecycle.lifecycleToken ||
+    scheduler !== confirmationLifecycle.scheduler ||
+    windowManager !== confirmationLifecycle.windowManager
+  ) {
+    return;
+  }
   await finalizeTask(urlIndex, result, aiContent, errorMessage, {
+    ownership: confirmationLifecycle,
     historySaveStatus,
     historyPendingCount: confirmedHistoryPendingCount
   });
@@ -1292,6 +1316,22 @@ function stopTimeoutChecker() {
   }
 }
 
+async function hasUnresolvedSubmitContext(activity, taskBatchId, urlIndex) {
+  if (!Number.isInteger(activity?.tabId)) return false;
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'BATCH_HAS_SUBMIT_CONTEXT',
+      tabId: activity.tabId,
+      batchId: taskBatchId,
+      urlIndex
+    });
+    return response?.ok !== true || response.unresolved === true;
+  } catch (_) {
+    // 查询失败时保留工作窗口，避免在历史记录完成持久化前丢失精确上下文。
+    return true;
+  }
+}
+
 async function checkTimeouts() {
   const timeoutLifecycle = {
     batchId,
@@ -1312,6 +1352,29 @@ async function checkTimeouts() {
     const opening = timeoutLifecycle.openings.get(urlIndex);
     const startTime = activity?.startTime || opening?.startTime;
     if (startTime && (Date.now() - startTime) / 1000 > timeoutSeconds) {
+      if (Number.isInteger(activity?.tabId)) {
+        const unresolvedSubmitContext = await hasUnresolvedSubmitContext(
+          activity,
+          timeoutLifecycle.batchId,
+          urlIndex
+        );
+        if (
+          batchId !== timeoutLifecycle.batchId ||
+          lifecycleToken !== timeoutLifecycle.lifecycleToken ||
+          scheduler !== timeoutLifecycle.scheduler ||
+          windowManager !== timeoutLifecycle.windowManager
+        ) {
+          return;
+        }
+        if (unresolvedSubmitContext) {
+          console.warn('[batch] 提交上下文尚未完成持久化，暂缓超时关闭:', {
+            batchId: timeoutLifecycle.batchId,
+            urlIndex,
+            tabId: activity.tabId
+          });
+          continue;
+        }
+      }
       await finalizeTask(
         urlIndex,
         'fail',

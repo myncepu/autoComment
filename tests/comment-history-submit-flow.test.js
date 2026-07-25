@@ -337,7 +337,8 @@ test('rejected confirmations queue exact history and preserve context until clos
         url: message.url,
         result: 'success',
         aiContent: message.aiContent,
-        errorMessage: null
+        errorMessage: null,
+        historyRevision: message.history.historyRevision
       }
     ]);
     assert.deepEqual(
@@ -447,7 +448,8 @@ test('content announces a durable fallback before allowing the worker to close',
       url: message.url,
       result: 'success',
       aiContent: message.aiContent,
-      errorMessage: null
+      errorMessage: null,
+      historyRevision: message.history.historyRevision
     }
   ]);
   assert.deepEqual(harness.storageRemovals, ['submit-context']);

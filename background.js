@@ -152,7 +152,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (isDurableBatchConfirmation(confirmedMessage)) {
           if (Number.isInteger(sender?.tab?.id)) {
             try {
-              await batchSubmitContextStore.clear(sender.tab.id);
+              await batchSubmitContextStore.clearIfMatches(sender.tab.id, {
+                batchId: message.batchId,
+                urlIndex: message.urlIndex,
+                historyRevision: message.history?.historyRevision
+              });
             } catch (_) {
               console.warn('[background] Durable history saved but submit context cleanup deferred');
             }
@@ -189,7 +193,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     (async () => {
       try {
-        await batchSubmitContextStore.clear(sender.tab.id);
+        await batchSubmitContextStore.clearIfMatches(sender.tab.id, {
+          batchId: message.batchId,
+          urlIndex: message.urlIndex,
+          historyRevision: message.historyRevision
+        });
       } catch (_) {
         console.warn('[background] Fallback history queued but submit context cleanup deferred');
       }

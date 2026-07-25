@@ -43,6 +43,10 @@ function createBatchHarness(overrides = {}) {
   };
   const intervalCalls = [];
   const chrome = {
+    runtime: {
+      lastError: null,
+      sendMessage: overrides.runtimeSendMessage || (() => Promise.resolve({ ok: true }))
+    },
     storage: {
       local: {
         set(_values, callback) { callback?.(); },
@@ -542,6 +546,62 @@ test('deferred timeout scan cannot continue into a replacement lifecycle', async
   assert.equal(api.getState().localResults.length, 0);
 });
 
+test('timeout does not close a worker with an unresolved submit context', async () => {
+  let closeCount = 0;
+  let settleCount = 0;
+  const { api } = createBatchHarness({
+    runtimeSendMessage(message) {
+      assert.deepEqual(message, {
+        type: 'BATCH_HAS_SUBMIT_CONTEXT',
+        tabId: 77,
+        batchId: 'batch-ambiguous',
+        urlIndex: 0
+      });
+      return Promise.resolve({ ok: true, unresolved: true });
+    }
+  });
+  api.setState({
+    batchId: 'batch-ambiguous',
+    parsedUrls: [{ url: 'https://ambiguous.test', sourceDomain: '' }],
+    batchItems: [{ url: 'https://ambiguous.test', sourceDomain: '' }],
+    status: 'running',
+    scheduler: {
+      get activeIndices() { return [0]; },
+      settle() { settleCount += 1; },
+      takeAvailable() { return []; }
+    },
+    windowManager: {
+      getByIndex() {
+        return {
+          batchId: 'batch-ambiguous',
+          urlIndex: 0,
+          tabId: 77,
+          startTime: Date.now() - 5000
+        };
+      },
+      async closeByIndex() { closeCount += 1; }
+    },
+    openingActivities: new Map(),
+    isTerminated: false,
+    localResults: [],
+    totalCount: 1,
+    successCount: 0,
+    failCount: 0,
+    skippedCount: 0,
+    noCommentBoxCount: 0,
+    manualRequiredCount: 0,
+    blockedIllegalCount: 0,
+    pendingCount: 1,
+    timeoutSeconds: 1
+  });
+
+  await api.checkTimeouts();
+
+  assert.equal(closeCount, 0);
+  assert.equal(settleCount, 0);
+  assert.deepEqual(api.getState().localResults, []);
+});
+
 test('stale BATCH_HANDLE rejection cannot finalize the replacement batch', async () => {
   const { api, chrome } = createBatchHarness();
   let rejectHandle;
@@ -714,6 +774,68 @@ test('a zero pending count reconciles earlier queued history rows', async () => 
     api.getState().localResults.map((entry) => entry.historySaveStatus),
     ['saved', 'saved']
   );
+});
+
+test('a durable confirmation waits while the same worker still has an unresolved submit context', async () => {
+  let closeCount = 0;
+  let settleCount = 0;
+  const { api } = createBatchHarness({
+    runtimeSendMessage(message) {
+      assert.deepEqual(message, {
+        type: 'BATCH_HAS_SUBMIT_CONTEXT',
+        tabId: 77,
+        batchId: 'batch-confirm',
+        urlIndex: 0
+      });
+      return Promise.resolve({ ok: true, unresolved: true });
+    }
+  });
+  api.setState({
+    batchId: 'batch-confirm',
+    parsedUrls: [{ url: 'https://confirm.test', sourceDomain: '' }],
+    batchItems: [{ url: 'https://confirm.test', sourceDomain: '' }],
+    status: 'running',
+    scheduler: {
+      get activeIndices() { return [0]; },
+      settle() { settleCount += 1; },
+      takeAvailable() { return []; }
+    },
+    windowManager: {
+      getByIndex() {
+        return {
+          batchId: 'batch-confirm',
+          urlIndex: 0,
+          tabId: 77,
+          startTime: Date.now()
+        };
+      },
+      async closeByIndex() { closeCount += 1; }
+    },
+    openingActivities: new Map(),
+    isTerminated: false,
+    localResults: [],
+    totalCount: 1,
+    successCount: 0,
+    failCount: 0,
+    skippedCount: 0,
+    noCommentBoxCount: 0,
+    manualRequiredCount: 0,
+    blockedIllegalCount: 0,
+    pendingCount: 1
+  });
+
+  await api.handleTaskConfirmed(
+    0,
+    'success',
+    'confirmed',
+    null,
+    'saved',
+    0
+  );
+
+  assert.equal(closeCount, 0);
+  assert.equal(settleCount, 0);
+  assert.deepEqual(api.getState().localResults, []);
 });
 
 test('deferred finalizer cannot mutate a replacement same-index lifecycle', async () => {

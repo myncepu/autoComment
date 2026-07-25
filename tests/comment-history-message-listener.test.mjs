@@ -487,6 +487,18 @@ test('background migrates an old record before its startup retention check and c
       history: message.history
     }
   }), [{ ok: true }]);
+  assert.deepEqual(await dispatchConfirm({
+    type: 'BATCH_HAS_SUBMIT_CONTEXT',
+    tabId: 42,
+    batchId: 'batch-ambiguous',
+    urlIndex: 12
+  }), [{ ok: true, unresolved: true }]);
+  assert.deepEqual(await dispatchConfirm({
+    type: 'BATCH_HAS_SUBMIT_CONTEXT',
+    tabId: 42,
+    batchId: 'stale-batch',
+    urlIndex: 12
+  }), [{ ok: true, unresolved: false }]);
   const messagesBeforeAmbiguousFailure = runtimeMessages.length;
   assert.deepEqual(await dispatchConfirm({
     type: 'BATCH_REPORT_RESULT',
@@ -505,6 +517,12 @@ test('background migrates an old record before its startup retention check and c
   assert.deepEqual(await dispatchConfirm({
     type: 'BATCH_CLEAR_SUBMIT_CONTEXT'
   }), [{ ok: true }]);
+  assert.deepEqual(await dispatchConfirm({
+    type: 'BATCH_HAS_SUBMIT_CONTEXT',
+    tabId: 42,
+    batchId: 'batch-ambiguous',
+    urlIndex: 12
+  }), [{ ok: true, unresolved: false }]);
   assert.deepEqual(await dispatchConfirm({
     type: 'BATCH_REPORT_RESULT',
     batchId: 'batch-ambiguous',

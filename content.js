@@ -884,8 +884,8 @@
     });
   }
 
-  function clearBatchSubmitContext() {
-    return Promise.resolve(window.AutoCommentBatchSubmitContext?.clear?.())
+  function clearBatchSubmitContext(match) {
+    return Promise.resolve(window.AutoCommentBatchSubmitContext?.clear?.(match))
       .catch(() => {});
   }
 
@@ -956,7 +956,8 @@
         url: message.url || '',
         result: message.result ?? 'success',
         aiContent: message.aiContent || null,
-        errorMessage: message.errorMessage || null
+        errorMessage: message.errorMessage || null,
+        historyRevision: message.history?.historyRevision || null
       });
       return response?.ok === true;
     } catch (_) {
@@ -995,7 +996,13 @@
     }
     const durable = backgroundAcknowledged || fallbackDurable;
     if (backgroundAcknowledged || fallbackHandoffAcknowledged) {
-      await clearBatchSubmitContext();
+      await clearBatchSubmitContext({
+        batchId: versionedMessage.batchId,
+        urlIndex: versionedMessage.urlIndex,
+        ...(versionedMessage.history?.historyRevision
+          ? { historyRevision: versionedMessage.history.historyRevision }
+          : {})
+      });
     }
     return { durable, acknowledgement };
   }

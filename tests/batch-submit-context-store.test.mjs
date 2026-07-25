@@ -74,18 +74,71 @@ test('can retain an exact pre-submit history context until durable acknowledgeme
   });
 });
 
+test('clearIfMatches cannot remove a replacement context from a delayed acknowledgement', async () => {
+  const storage = createStorageArea();
+  const store = createBatchSubmitContextStore(storage, {
+    now: () => 1000,
+    maxAgeMs: Number.POSITIVE_INFINITY
+  });
+  const replacement = {
+    batchId: 'batch-new',
+    urlIndex: 3,
+    history: {
+      historyRevision: {
+        capturedAt: 2000,
+        recordedAt: 2001,
+        sequence: 2,
+        id: 'revision-new'
+      }
+    }
+  };
+  await store.save(11, replacement);
+
+  assert.equal(await store.clearIfMatches(11, {
+    batchId: 'batch-old',
+    urlIndex: 1,
+    historyRevision: {
+      capturedAt: 1000,
+      recordedAt: 1001,
+      sequence: 1,
+      id: 'revision-old'
+    }
+  }), false);
+  assert.equal((await store.get(11)).batchId, 'batch-new');
+
+  assert.equal(await store.clearIfMatches(11, {
+    batchId: 'batch-new',
+    urlIndex: 3,
+    historyRevision: replacement.history.historyRevision
+  }), true);
+  assert.equal(await store.get(11), null);
+});
+
 test('listener preserves unacknowledged context when its tab closes', async () => {
   let listener;
   let tabRemovedListener;
   const chromeApi = {
-    runtime: { onMessage: { addListener(fn) { listener = fn; } } },
+    runtime: {
+      id: 'extension-id',
+      onMessage: { addListener(fn) { listener = fn; } }
+    },
     tabs: { onRemoved: { addListener(fn) { tabRemovedListener = fn; } } }
   };
   const saved = [];
   const cleared = [];
+  const contexts = new Map([[77, {
+    batchId: 'batch-query',
+    urlIndex: 5
+  }]]);
   const store = {
     async save(tabId, context) { saved.push({ tabId, context }); },
-    async clear(tabId) { cleared.push(tabId); }
+    async get(tabId) { return contexts.get(tabId) || null; },
+    async clear(tabId) { cleared.push(tabId); },
+    async hasMatching(tabId, expected) {
+      const context = contexts.get(tabId);
+      return context?.batchId === expected.batchId
+        && context?.urlIndex === expected.urlIndex;
+    }
   };
   installBatchSubmitContextListener(chromeApi, store);
 
@@ -103,10 +156,24 @@ test('listener preserves unacknowledged context when its tab closes', async () =
       resolve
     );
   });
+  let unresolved;
+  const queryHandled = listener(
+    {
+      type: 'BATCH_HAS_SUBMIT_CONTEXT',
+      tabId: 77,
+      batchId: 'batch-query',
+      urlIndex: 5
+    },
+    { id: 'extension-id' },
+    (response) => { unresolved = response; }
+  );
+  await new Promise(setImmediate);
 
   assert.deepEqual(saved, [{ tabId: 42, context: { batchId: 'a' } }]);
   assert.deepEqual(valid, { ok: true });
   assert.deepEqual(invalid, { ok: false, error: 'missing_sender_tab' });
+  assert.equal(queryHandled, true);
+  assert.deepEqual(unresolved, { ok: true, unresolved: true });
   assert.equal(tabRemovedListener, undefined);
   assert.deepEqual(cleared, []);
 });
