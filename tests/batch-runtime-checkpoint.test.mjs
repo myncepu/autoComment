@@ -385,6 +385,29 @@ test('normalizes active and submitting work into one safe paused checkpoint', ()
   assert.equal(repeated.checkpoint.results.length, 2);
 });
 
+test('deduplicates repeated worker tab IDs during interruption recovery', () => {
+  let checkpoint = createCheckpoint(2);
+  checkpoint = applyBatchRuntimeEvent(checkpoint, {
+    type: 'session_started',
+    batchId: 'batch-1'
+  }, 1100).checkpoint;
+  for (const urlIndex of [0, 1]) {
+    checkpoint = applyBatchRuntimeEvent(checkpoint, {
+      type: 'task_activated',
+      batchId: 'batch-1',
+      urlIndex,
+      attempt: 1,
+      tabId: 21,
+      windowId: 31
+    }, 1200).checkpoint;
+  }
+
+  const normalized = normalizeInterruptedBatch(checkpoint, 2000);
+
+  assert.deepEqual(normalized.orphanTabIds, [21]);
+  assert.equal('orphanWindowIds' in normalized, false);
+});
+
 test('migrates a version 1 checkpoint to attempt-aware version 2', () => {
   const version1 = createVersion1CheckpointFixture();
   const migrated = migrateBatchRuntimeCheckpoint(version1, 2000);
@@ -482,6 +505,28 @@ test('assigns deterministic error codes to all version 1 result types', () => {
     const version1 = createVersion1CheckpointFixture();
     version1.results[0].result = result;
     version1.results[0].errorCode = null;
+
+    const migrated = migrateBatchRuntimeCheckpoint(version1, 2000);
+
+    assert.equal(migrated.ok, true);
+    assert.equal(migrated.checkpoint.results[0].errorCode, expectedErrorCode);
+  }
+});
+
+test('assigns deterministic error codes when the legacy property is absent', () => {
+  const cases = [
+    ['success', null],
+    ['skipped', null],
+    ['no_comment_box', 'no_comment_box'],
+    ['manual_required', 'submission_uncertain'],
+    ['blocked_illegal', 'illegal_site'],
+    ['fail', 'task_failed']
+  ];
+
+  for (const [result, expectedErrorCode] of cases) {
+    const version1 = createVersion1CheckpointFixture();
+    version1.results[0].result = result;
+    delete version1.results[0].errorCode;
 
     const migrated = migrateBatchRuntimeCheckpoint(version1, 2000);
 
