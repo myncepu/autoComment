@@ -490,6 +490,57 @@ test('uses source, captured time, recorded time, sequence, and revision id in on
   ).toBe('revision id');
 });
 
+test('rejects revision ids whose JavaScript and SQLite byte orders disagree', async () => {
+  const result = await push([
+    commentMutation({
+      mutationId: 'unicode-revision-supplementary',
+      revisionId: 'revision-\u{10000}',
+      capturedAt: 100,
+      recordedAt: 100,
+      sequence: 0,
+      commentText: 'supplementary revision'
+    }),
+    commentMutation({
+      mutationId: 'unicode-revision-private-use',
+      revisionId: 'revision-\ue000',
+      capturedAt: 100,
+      recordedAt: 100,
+      sequence: 0,
+      commentText: 'private-use revision'
+    })
+  ]);
+
+  expect(result.results).toEqual([
+    {
+      mutationId: 'unicode-revision-supplementary',
+      status: 'rejected',
+      errorCode: 'INVALID_COMMENT_REVISION'
+    },
+    {
+      mutationId: 'unicode-revision-private-use',
+      status: 'rejected',
+      errorCode: 'INVALID_COMMENT_REVISION'
+    }
+  ]);
+  expect(
+    await env.DB.prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM comment_records
+          WHERE vault_id = ?) AS comments,
+         (SELECT COUNT(*) FROM sync_changes
+          WHERE vault_id = ?) AS changes,
+         (SELECT COUNT(*) FROM sync_mutations
+          WHERE vault_id = ?) AS receipts`
+    )
+      .bind(VALID_VAULT_ID, VALID_VAULT_ID, VALID_VAULT_ID)
+      .first()
+  ).toEqual({
+    comments: 0,
+    changes: 0,
+    receipts: 0
+  });
+});
+
 test('keeps the freshest body when different revisions arrive concurrently', async () => {
   await Promise.all([
     push([
@@ -520,6 +571,69 @@ test('keeps the freshest body when different revisions arrive concurrently', asy
         .first<{ comment_text: string }>()
     )?.comment_text
   ).toBe('new interleaved body');
+});
+
+test('concurrent pushes of one mutation produce one applied and one duplicate receipt', async () => {
+  const mutation = commentMutation({
+    mutationId: 'concurrent-identical-mutation',
+    commentText: 'concurrent exact body',
+    anchors: [
+      { position: 0, anchorText: 'One', hrefDomain: 'one.test' },
+      { position: 1, anchorText: 'Two', hrefDomain: 'two.test' }
+    ]
+  });
+
+  const [first, second] = await Promise.all([
+    push([mutation]),
+    push([mutation])
+  ]);
+  const receipts = [
+    first.results[0],
+    second.results[0]
+  ];
+  expect(receipts.map((receipt) => receipt?.status).sort()).toEqual([
+    'applied',
+    'duplicate'
+  ]);
+  expect(receipts.map((receipt) => receipt?.serverSeq)).toEqual([1, 1]);
+
+  expect(
+    await env.DB.prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM comment_records
+          WHERE vault_id = ? AND record_id = 'batch-a:1') AS comments,
+         (SELECT COUNT(*) FROM comment_anchors
+          WHERE vault_id = ? AND comment_id = 'batch-a:1') AS anchors,
+         (SELECT COUNT(*) FROM sync_changes
+          WHERE vault_id = ?
+            AND mutation_id = 'concurrent-identical-mutation') AS changes,
+         (SELECT COUNT(*) FROM sync_mutations
+          WHERE vault_id = ?
+            AND mutation_id = 'concurrent-identical-mutation') AS receipts`
+    )
+      .bind(
+        VALID_VAULT_ID,
+        VALID_VAULT_ID,
+        VALID_VAULT_ID,
+        VALID_VAULT_ID
+      )
+      .first()
+  ).toEqual({
+    comments: 1,
+    anchors: 2,
+    changes: 1,
+    receipts: 1
+  });
+  expect(
+    (
+      await env.DB.prepare(
+        `SELECT comment_text FROM comment_records
+         WHERE vault_id = ? AND record_id = 'batch-a:1'`
+      )
+        .bind(VALID_VAULT_ID)
+        .first<{ comment_text: string }>()
+    )?.comment_text
+  ).toBe('concurrent exact body');
 });
 
 test('rejects one malformed item without partially writing it or blocking a valid sibling', async () => {
@@ -681,6 +795,74 @@ test('rejects invalid batch cardinality and duplicate request mutation ids', asy
         .first<{ count: number }>()
     )?.count
   ).toBe(0);
+});
+
+test('applies exactly 100 valid comment mutations within the Worker D1 request budget', async () => {
+  const mutations = Array.from({ length: 100 }, (_, index) =>
+    commentMutation({
+      mutationId: `limit-mutation-${index}`,
+      batchId: `limit-batch-${index}`,
+      urlIndex: index,
+      revisionId: `limit-revision-${index}`,
+      capturedAt: 1_000 + index,
+      commentText: `limit body ${index}`
+    })
+  );
+
+  const result = await push(mutations);
+  expect(result.results).toHaveLength(100);
+  expect(
+    result.results.map(({ status }) => status)
+  ).toEqual(Array.from({ length: 100 }, () => 'applied'));
+  expect(
+    result.results.map(({ serverSeq }) => serverSeq)
+  ).toEqual(Array.from({ length: 100 }, (_, index) => index + 1));
+
+  expect(
+    await env.DB.prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM comment_records
+          WHERE vault_id = ?) AS comments,
+         (SELECT COUNT(*) FROM sync_changes
+          WHERE vault_id = ?) AS changes,
+         (SELECT COUNT(*) FROM sync_mutations
+          WHERE vault_id = ?) AS receipts,
+         (SELECT COUNT(DISTINCT server_seq) FROM sync_changes
+          WHERE vault_id = ?) AS distinct_sequences,
+         (SELECT MIN(server_seq) FROM sync_changes
+          WHERE vault_id = ?) AS minimum_sequence,
+         (SELECT MAX(server_seq) FROM sync_changes
+          WHERE vault_id = ?) AS maximum_sequence`
+    )
+      .bind(
+        VALID_VAULT_ID,
+        VALID_VAULT_ID,
+        VALID_VAULT_ID,
+        VALID_VAULT_ID,
+        VALID_VAULT_ID,
+        VALID_VAULT_ID
+      )
+      .first()
+  ).toEqual({
+    comments: 100,
+    changes: 100,
+    receipts: 100,
+    distinct_sequences: 100,
+    minimum_sequence: 1,
+    maximum_sequence: 100
+  });
+  expect(
+    await env.DB.prepare(
+      `SELECT comment_text, accepted_mutation_id
+       FROM comment_records
+       WHERE vault_id = ? AND record_id = 'limit-batch-99:99'`
+    )
+      .bind(VALID_VAULT_ID)
+      .first()
+  ).toEqual({
+    comment_text: 'limit body 99',
+    accepted_mutation_id: 'limit-mutation-99'
+  });
 });
 
 test('keeps a tombstoned comment deleted and makes a stale replay duplicate', async () => {

@@ -72,6 +72,52 @@ test('normalizes a legacy comment revision deterministically', () => {
   });
 });
 
+test('normalizes a non-ASCII legacy comment id to a stable printable ASCII revision', () => {
+  const comment = {
+    id: 'batch-\u{10000}:1',
+    submittedAt: 1721000000000
+  };
+  const first = normalizeCommentRevision(comment);
+  const second = normalizeCommentRevision(comment);
+
+  assert.deepEqual(first, second);
+  assert.match(first.id, /^[\x20-\x7e]+$/);
+  assert.notEqual(
+    first.id,
+    'legacy:batch-\u{10000}:1:1721000000000'
+  );
+});
+
+test('rejects revision ids outside the common JS and SQLite printable ASCII order domain', () => {
+  for (const revisionId of [
+    'revision-\u{10000}',
+    'revision-\ue000'
+  ]) {
+    assert.throws(
+      () => normalizeSyncMutation({
+        mutationId: `mutation-${revisionId}`,
+        entityType: 'comment',
+        entityId: 'batch-a:1',
+        operation: 'upsert',
+        payload: {
+          comment: {
+            id: 'batch-a:1',
+            historyRevision: {
+              capturedAt: 1721000000000,
+              recordedAt: 1721000000000,
+              sequence: 0,
+              id: revisionId
+            }
+          },
+          anchors: []
+        },
+        createdAt: 1721000000001
+      }),
+      /INVALID_COMMENT_REVISION/
+    );
+  }
+});
+
 test('rejects recursively nested sensitive mutation fields', () => {
   assert.throws(
     () => normalizeSyncMutation({

@@ -194,6 +194,22 @@ function stringValue(
   return value;
 }
 
+function printableAsciiValue(
+  value: unknown,
+  maximumLength: number,
+  code: string
+): string {
+  const string = stringValue(
+    value,
+    1,
+    maximumLength,
+    code,
+    true
+  );
+  if (!/^[\x20-\x7e]+$/u.test(string)) invalid(code);
+  return string;
+}
+
 function integerValue(
   value: unknown,
   minimum: number,
@@ -236,12 +252,10 @@ function normalizeRevision(comment: Record<string, unknown>): CommentRevision {
       Number.MAX_SAFE_INTEGER,
       'INVALID_COMMENT_REVISION'
     );
-    stringValue(
+    printableAsciiValue(
       explicit.id,
-      1,
       MAX_ID_LENGTH,
-      'INVALID_COMMENT_REVISION',
-      true
+      'INVALID_COMMENT_REVISION'
     );
   }
   const normalized: unknown = normalizeCommentRevision(comment);
@@ -269,12 +283,10 @@ function normalizeRevision(comment: Record<string, unknown>): CommentRevision {
       Number.MAX_SAFE_INTEGER,
       'INVALID_COMMENT_REVISION'
     ),
-    id: stringValue(
+    id: printableAsciiValue(
       revision.id,
-      1,
       MAX_ID_LENGTH,
-      'INVALID_COMMENT_REVISION',
-      true
+      'INVALID_COMMENT_REVISION'
     )
   };
 }
