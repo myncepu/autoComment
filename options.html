@@ -157,6 +157,48 @@
         color: #dc2626;
       }
 
+      .cloud-sync-section {
+        margin-top: 20px;
+        padding: 16px;
+        border: 1px solid #bfdbfe;
+        border-radius: 10px;
+        background: #eff6ff;
+      }
+
+      .cloud-sync-section h2 {
+        margin: 0;
+        color: #1d4ed8;
+        font-size: 14px;
+      }
+
+      .cloud-sync-status {
+        margin: 8px 0 12px;
+        color: #374151;
+        font-size: 13px;
+        min-height: 20px;
+      }
+
+      .cloud-sync-metadata {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        gap: 6px 12px;
+        margin-top: 12px;
+        color: #4b5563;
+        font-size: 12px;
+      }
+
+      .cloud-sync-danger {
+        color: #b91c1c;
+        border-color: #fecaca;
+        background: #fff1f2;
+      }
+
+      .btn:disabled,
+      input:disabled {
+        cursor: wait;
+        opacity: 0.55;
+      }
+
       .footer {
         margin-top: 22px;
         font-size: 11px;
@@ -269,6 +311,52 @@
         <button id="saveSettingsBtn" class="btn btn-primary">保存</button>
         <span id="settingsStatus" class="status">已保存</span>
       </div>
+
+      <section
+        id="cloudSyncSection"
+        class="cloud-sync-section"
+        aria-labelledby="cloudSyncHeading"
+      >
+        <h2 id="cloudSyncHeading">Cloudflare 云同步</h2>
+        <div
+          id="cloudSyncStatus"
+          class="cloud-sync-status"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        >正在读取状态…</div>
+        <label for="cloudSyncImportInput">同步密钥</label>
+        <input
+          id="cloudSyncImportInput"
+          type="password"
+          autocomplete="off"
+          spellcheck="false"
+          aria-describedby="cloudSyncKeyHint"
+          placeholder="acsync_…"
+        />
+        <div id="cloudSyncKeyHint" class="hint">
+          密钥只会在创建、导入或复制操作期间短暂读取，不会显示在页面中。
+        </div>
+        <div class="row" aria-label="云同步操作">
+          <button id="cloudSyncCreateBtn" class="btn btn-primary" type="button">创建同步密钥</button>
+          <button id="cloudSyncImportBtn" class="btn btn-secondary" type="button">导入同步密钥</button>
+          <button id="cloudSyncCopyBtn" class="btn btn-secondary" type="button">复制同步密钥</button>
+          <button id="cloudSyncRunBtn" class="btn btn-secondary" type="button">立即同步</button>
+        </div>
+        <div class="row">
+          <button id="cloudSyncDisconnectBtn" class="btn btn-secondary" type="button">断开此设备</button>
+          <button
+            id="cloudSyncDeleteBtn"
+            class="btn btn-secondary cloud-sync-danger"
+            type="button"
+          >删除全部云端数据</button>
+        </div>
+        <div class="cloud-sync-metadata" aria-label="云同步状态详情">
+          <div>最后同步：<span id="cloudSyncLastSuccess">—</span></div>
+          <div>等待上传：<span id="cloudSyncPendingCount">0</span></div>
+          <div>设备 ID：<span id="cloudSyncDeviceId">—</span></div>
+        </div>
+      </section>
 
       <div style="margin-top: 20px; padding: 14px 16px; background: #f8fafc; border-radius: 10px; border: 1px solid #e5e7eb;">
         <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">

@@ -4,6 +4,15 @@ import { openCommentHistoryDb } from './lib/comment-history-db.mjs';
 import { createCommentHistoryService } from './lib/comment-history-service.mjs';
 import { installCommentHistoryMessageListener } from './lib/comment-history-message-listener.mjs';
 import { installCommentHistoryRetention } from './lib/comment-history-retention.mjs';
+import { installCloudSyncMessageListener } from './lib/cloud-sync-message-listener.mjs';
+import {
+  createCloudRetentionService,
+  createCloudSyncRuntime,
+  createLazyCloudSyncRepository,
+  installCloudSyncBackground
+} from './lib/cloud-sync-background.mjs';
+import { migratePasswordToLocal } from './lib/cloud-sync-settings.mjs';
+import { cloudQueueStatusFields } from './lib/cloud-sync-batch-status.mjs';
 import { createBatchResultStore } from './lib/batch-result-store.mjs';
 import {
   createBatchRuntimeController,
@@ -32,53 +41,40 @@ const batchSubmitContextStore = createBatchSubmitContextStore(
 );
 installBatchSubmitContextListener(chrome, batchSubmitContextStore);
 
-let commentHistoryRepositoryPromise;
+const commentHistoryRepository = createLazyCloudSyncRepository(
+  () => openCommentHistoryDb()
+);
 
-function getCommentHistoryRepository() {
-  if (!commentHistoryRepositoryPromise) {
-    commentHistoryRepositoryPromise = openCommentHistoryDb();
-  }
-  return commentHistoryRepositoryPromise;
-}
-
-async function callCommentHistoryRepository(method, args) {
-  const repository = await getCommentHistoryRepository();
-  return repository[method](...args);
-}
-
-const commentHistoryRepository = {
-  upsertRecord: (...args) => callCommentHistoryRepository('upsertRecord', args),
-  upsertIfFresher: (...args) => callCommentHistoryRepository('upsertIfFresher', args),
-  insertLegacyIfAbsent: (...args) => (
-    callCommentHistoryRepository('insertLegacyIfAbsent', args)
-  ),
-  getRecord: (...args) => callCommentHistoryRepository('getRecord', args),
-  queryRecords: (...args) => callCommentHistoryRepository('queryRecords', args),
-  countRecords: (...args) => callCommentHistoryRepository('countRecords', args),
-  getRetentionSummary: (...args) => callCommentHistoryRepository('getRetentionSummary', args),
-  getExportChunk: (...args) => callCommentHistoryRepository('getExportChunk', args),
-  deleteConfirmed: (...args) => callCommentHistoryRepository('deleteConfirmed', args),
-  deleteExportSessionAtomic: (...args) => (
-    callCommentHistoryRepository('deleteExportSessionAtomic', args)
-  ),
-  listArchiveEvents: (...args) => callCommentHistoryRepository('listArchiveEvents', args),
-  getMeta: (...args) => callCommentHistoryRepository('getMeta', args),
-  setMeta: (...args) => callCommentHistoryRepository('setMeta', args)
-};
+const cloudSyncService = createCloudSyncRuntime({
+  repository: commentHistoryRepository,
+  storage: chrome.storage,
+  fetchImpl: fetch
+});
 
 const commentHistoryService = createCommentHistoryService({
   repository: commentHistoryRepository,
-  storageLocal: chrome.storage.local
+  storageLocal: chrome.storage.local,
+  cloudSync: cloudSyncService
 });
 
 installCommentHistoryMessageListener(chrome, commentHistoryService);
-const commentHistoryRetention = installCommentHistoryRetention(chrome, {
-  getRetentionStatus: (...args) => commentHistoryService.getRetentionStatus(...args),
-  getMeta: (...args) => commentHistoryRepository.getMeta(...args),
-  setMeta: (...args) => commentHistoryRepository.setMeta(...args)
-}, {
-  startImmediately: false
-});
+installCloudSyncMessageListener(chrome, cloudSyncService);
+if (typeof chrome.storage?.onChanged?.addListener === 'function') {
+  void installCloudSyncBackground(chrome, cloudSyncService, {
+    migratePassword: () => migratePasswordToLocal(chrome.storage)
+  });
+}
+const commentHistoryRetention = installCommentHistoryRetention(
+  chrome,
+  createCloudRetentionService({
+    commentHistoryService,
+    cloudSyncService,
+    repository: commentHistoryRepository
+  }),
+  {
+    startImmediately: false
+  }
+);
 
 (async () => {
   try {
@@ -107,7 +103,12 @@ async function persistBatchReport(message) {
 
 async function broadcastBatchConfirmed(
   message,
-  { historySaveStatus, historyPendingCount, sourceTabId } = {}
+  {
+    historySaveStatus,
+    historyPendingCount,
+    cloudQueueStatus,
+    sourceTabId
+  } = {}
 ) {
   const checkpoint = await batchRuntimeController.markTerminal(message);
   if (!checkpoint.ok) {
@@ -124,6 +125,7 @@ async function broadcastBatchConfirmed(
     ...(Number.isInteger(historyPendingCount) || historyPendingCount === null
       ? { historyPendingCount }
       : {}),
+    ...cloudQueueStatusFields(cloudQueueStatus),
     ...(Number.isInteger(sourceTabId) ? { sourceTabId } : {})
   }).then(() => {
     console.log('[background] BATCH_CONFIRMED 发送成功');
@@ -154,7 +156,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         const {
           historySaveStatus,
-          pendingCount: historyPendingCount
+          pendingCount: historyPendingCount,
+          cloudQueueStatus
         } = await commentHistoryService.saveConfirmedSuccess({
           ...message,
           result: message.result ?? 'success'
@@ -164,7 +167,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const confirmedMessage = {
           ...message,
           historySaveStatus,
-          historyPendingCount
+          historyPendingCount,
+          ...cloudQueueStatusFields(cloudQueueStatus)
         };
         if (isDurableBatchConfirmation(confirmedMessage)) {
           const result = message.result ?? 'success';
@@ -187,6 +191,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             await broadcastBatchConfirmed(message, {
               historySaveStatus,
               historyPendingCount,
+              cloudQueueStatus,
               sourceTabId: sender?.tab?.id
             });
           } else {
@@ -194,6 +199,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               ok: false,
               error: 'submit_context_not_released',
               historySaveStatus,
+              ...cloudQueueStatusFields(cloudQueueStatus),
               ...(Number.isInteger(historyPendingCount) || historyPendingCount === null
                 ? { historyPendingCount }
                 : {})
@@ -205,6 +211,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({
           ok: true,
           historySaveStatus,
+          ...cloudQueueStatusFields(cloudQueueStatus),
           ...(Number.isInteger(historyPendingCount) || historyPendingCount === null
             ? { historyPendingCount }
             : {})

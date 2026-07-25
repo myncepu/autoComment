@@ -33,9 +33,20 @@
       }
 
       .subtitle {
-        margin-bottom: 20px;
+        margin-bottom: 8px;
         color: #6b7280;
         font-size: 13px;
+      }
+
+      .cloud-history-status {
+        margin-bottom: 20px;
+        color: #1d4ed8;
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .cloud-history-status.offline {
+        color: #b45309;
       }
 
       .summary-grid {
@@ -187,6 +198,12 @@
         color: #b91c1c;
       }
 
+      .permanent-delete-button {
+        padding: 5px 9px;
+        font-size: 11px;
+        white-space: nowrap;
+      }
+
       .table-toolbar {
         justify-content: space-between;
         margin-bottom: 12px;
@@ -240,6 +257,25 @@
         max-width: 440px;
         white-space: pre-wrap;
         overflow-wrap: anywhere;
+      }
+
+      .source-badge {
+        display: inline-flex;
+        padding: 3px 8px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 700;
+        white-space: nowrap;
+      }
+
+      .source-local {
+        background: #f3f4f6;
+        color: #4b5563;
+      }
+
+      .source-cloud {
+        background: #dbeafe;
+        color: #1d4ed8;
       }
 
       .expand-button {
@@ -338,7 +374,10 @@
   <body>
     <main class="container">
       <h1>评论历史</h1>
-      <div class="subtitle">评论仅保存在本机浏览器中；筛选和分页均通过本地索引读取。</div>
+      <div class="subtitle">近期评论优先从本机缓存读取；启用云同步后，可浏览更早的云端历史。</div>
+      <div id="cloudHistoryStatus" class="cloud-history-status" role="status" aria-live="polite">
+        正在检查云同步状态…
+      </div>
 
       <section class="summary-grid" aria-label="评论历史摘要">
         <div class="summary-card">
@@ -430,7 +469,7 @@
             >我已完成归档，确认删除</button>
           </div>
         </div>
-        <p class="lifecycle-note">导出和删除是两个独立步骤；未经明确确认，本地历史不会被自动删除。</p>
+        <p class="lifecycle-note">未启用云同步时，导出和删除是两个独立步骤，未经明确确认不会自动删除；启用后，仅已确认同步且无待处理更改的 90 天前本机缓存会自动清理。</p>
         <div id="exportStatus" role="status" aria-live="polite"></div>
         <div class="table-wrap">
           <table>
@@ -442,6 +481,7 @@
                 <th>推广网站</th>
                 <th>评论内容</th>
                 <th>来源</th>
+                <th>操作</th>
               </tr>
             </thead>
             <tbody id="historyTableBody"></tbody>
