@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   CLOUD_SYNC_ALARM_NAME,
+  createCloudRetentionService,
   createCloudSyncRuntime,
   createLazyCloudSyncRepository,
   installCloudSyncBackground
@@ -348,6 +349,52 @@ test('lazy repository facade exposes and delegates every history and cloud sync 
     method,
     ['arg-a', { value: 2 }]
   ]));
+});
+
+test('retention wiring delegates cloud status and guarded cache eviction without a delete API', async () => {
+  const calls = [];
+  const service = createCloudRetentionService({
+    commentHistoryService: {
+      async getRetentionStatus(value) {
+        calls.push(['local-status', value]);
+        return 'local-status';
+      }
+    },
+    cloudSyncService: {
+      async getStatus(value) {
+        calls.push(['cloud-status', value]);
+        return 'cloud-status';
+      }
+    },
+    repository: {
+      async evictSyncedCacheBefore(value) {
+        calls.push(['evict', value]);
+        return 3;
+      },
+      async getMeta(value) {
+        calls.push(['get-meta', value]);
+        return 'meta';
+      },
+      async setMeta(...value) {
+        calls.push(['set-meta', ...value]);
+        return 'saved';
+      }
+    }
+  });
+
+  assert.equal(await service.getRetentionStatus('local'), 'local-status');
+  assert.equal(await service.getCloudSyncStatus('cloud'), 'cloud-status');
+  assert.equal(await service.evictSyncedCacheBefore({ cutoff: 10 }), 3);
+  assert.equal(await service.getMeta('key'), 'meta');
+  assert.equal(await service.setMeta('key', 'value'), 'saved');
+  assert.equal(Object.hasOwn(service, 'deleteConfirmed'), false);
+  assert.deepEqual(calls, [
+    ['local-status', 'local'],
+    ['cloud-status', 'cloud'],
+    ['evict', { cutoff: 10 }],
+    ['get-meta', 'key'],
+    ['set-meta', 'key', 'value']
+  ]);
 });
 
 test('runtime wiring creates transports only with the shipped fixed origin', () => {

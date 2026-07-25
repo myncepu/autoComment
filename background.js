@@ -6,6 +6,7 @@ import { installCommentHistoryMessageListener } from './lib/comment-history-mess
 import { installCommentHistoryRetention } from './lib/comment-history-retention.mjs';
 import { installCloudSyncMessageListener } from './lib/cloud-sync-message-listener.mjs';
 import {
+  createCloudRetentionService,
   createCloudSyncRuntime,
   createLazyCloudSyncRepository,
   installCloudSyncBackground
@@ -63,13 +64,17 @@ if (typeof chrome.storage?.onChanged?.addListener === 'function') {
     migratePassword: () => migratePasswordToLocal(chrome.storage)
   });
 }
-const commentHistoryRetention = installCommentHistoryRetention(chrome, {
-  getRetentionStatus: (...args) => commentHistoryService.getRetentionStatus(...args),
-  getMeta: (...args) => commentHistoryRepository.getMeta(...args),
-  setMeta: (...args) => commentHistoryRepository.setMeta(...args)
-}, {
-  startImmediately: false
-});
+const commentHistoryRetention = installCommentHistoryRetention(
+  chrome,
+  createCloudRetentionService({
+    commentHistoryService,
+    cloudSyncService,
+    repository: commentHistoryRepository
+  }),
+  {
+    startImmediately: false
+  }
+);
 
 (async () => {
   try {
