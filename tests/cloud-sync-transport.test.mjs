@@ -169,6 +169,71 @@ test('maps malformed success JSON and network exceptions to stable retryable err
   );
 });
 
+test('accepts 204 and empty successful JSON responses', async () => {
+  const noContent = createTransport(async () => new Response(null, { status: 204 }));
+  const emptyBody = createTransport(async () => new Response(null, { status: 200 }));
+
+  assert.equal(await noContent.status('device-a'), undefined);
+  assert.equal(await emptyBody.status('device-a'), undefined);
+});
+
+test('keeps response-body reading inside the request timeout', { timeout: 100 }, async () => {
+  const transport = createTransport((url, init) => {
+    void url;
+    const stalledBody = () => new Promise((resolve, reject) => {
+      void resolve;
+      init.signal.addEventListener('abort', () => {
+        reject(new DOMException('body read aborted', 'AbortError'));
+      });
+    });
+    return Promise.resolve({ ok: true, status: 200, json: stalledBody, text: stalledBody });
+  }, { timeoutMs: 5 });
+
+  await assert.rejects(
+    transport.status('device-a'),
+    (error) => error.code === 'SYNC_TIMEOUT'
+      && error.status === 0
+      && error.retryable === true
+      && !error.cause
+  );
+});
+
+test('normalizes query enumeration and value-access exceptions without exposing input text', async () => {
+  let fetchCalled = false;
+  const transport = createTransport(async () => {
+    fetchCalled = true;
+    return successResponse();
+  });
+  const throwingGetter = {};
+  Object.defineProperty(throwingGetter, 'cursor', {
+    enumerable: true,
+    get() {
+      throw new Error(`getter leaked ${VALID_SYNC_KEY}`);
+    }
+  });
+
+  for (const query of [
+    null,
+    new Proxy({}, {
+      ownKeys() {
+        throw new Error(`enumeration leaked ${VALID_SYNC_KEY}`);
+      }
+    }),
+    throwingGetter
+  ]) {
+    await assert.rejects(
+      Promise.resolve().then(() => transport.pull(query)),
+      (error) => error.code === 'INVALID_SYNC_REQUEST'
+        && error.status === 0
+        && error.retryable === false
+        && !error.cause
+        && !error.message.includes(VALID_SYNC_KEY)
+        && !JSON.stringify(error).includes(VALID_SYNC_KEY)
+    );
+  }
+  assert.equal(fetchCalled, false);
+});
+
 test('rejects non-origin base URLs before a request can leave the fixed origin', async () => {
   let called = false;
   const transport = createCloudSyncTransport({
