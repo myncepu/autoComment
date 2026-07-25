@@ -69,3 +69,23 @@ test('redacts auth schemes, JSON secrets, and hash-router tokens', () => {
   assert.match(sanitized, /route\?access_token=REDACTED/);
   assert.match(sanitized, /panel=comments/);
 });
+
+test('redacts escaped JSON auth strings without changing ordinary JSON text', () => {
+  const sensitive = JSON.stringify({
+    authorization: 'Bearer abc\\"stillsecret',
+    note: 'keep "quoted" text'
+  });
+  const ordinary = JSON.stringify({
+    message: 'keep "quoted" text',
+    status: 'ordinary'
+  });
+
+  const sanitized = sanitizeDiagnosticText(sensitive);
+
+  assert.deepEqual(JSON.parse(sanitized), {
+    authorization: 'REDACTED',
+    note: 'keep "quoted" text'
+  });
+  assert.doesNotMatch(sanitized, /abc|stillsecret/);
+  assert.equal(sanitizeDiagnosticText(ordinary), ordinary);
+});

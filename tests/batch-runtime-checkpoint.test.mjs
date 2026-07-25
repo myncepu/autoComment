@@ -549,6 +549,103 @@ test('migration sanitizes legacy and version 2 result diagnostics', () => {
   assert.match(serialized, /view=full/);
 });
 
+test('clean version 2 checkpoint migration is unchanged', () => {
+  const version2 = migrateBatchRuntimeCheckpoint(
+    createVersion1CheckpointFixture(),
+    2000
+  ).checkpoint;
+
+  const migrated = migrateBatchRuntimeCheckpoint(version2, 2100);
+
+  assert.equal(migrated.ok, true);
+  assert.equal(migrated.changed, false);
+  assert.deepEqual(migrated.checkpoint, version2);
+});
+
+test('version 1 migration failures never echo the raw checkpoint', () => {
+  const malformed = createVersion1CheckpointFixture();
+  malformed.results[0].errorMessage =
+    '{"authorization":"Bearer malformed-v1-secret"}';
+  delete malformed.source.rows;
+
+  const postValidationFailure = createVersion1CheckpointFixture();
+  postValidationFailure.results[0].errorMessage =
+    '{"authorization":"Bearer post-validation-secret"}';
+  postValidationFailure.tasks['0'].phase = 'not-a-batch-phase';
+
+  for (const checkpoint of [malformed, postValidationFailure]) {
+    const migrated = migrateBatchRuntimeCheckpoint(checkpoint, 2100);
+
+    assert.equal(migrated.ok, false);
+    assert.equal(migrated.checkpoint, null);
+    assert.doesNotMatch(
+      JSON.stringify(migrated),
+      /malformed-v1-secret|post-validation-secret/
+    );
+  }
+});
+
+test('apply sanitizes existing version 2 history before unrelated events', () => {
+  const checkpoint = createTerminalCheckpoint({
+    result: 'manual_required',
+    errorCode: 'submission_uncertain'
+  });
+  const rawUrl =
+    'https://target.test/0?view=full&token=existing-url-secret';
+  checkpoint.source.rows[0] = [rawUrl];
+  checkpoint.source.parsedUrls[0].url = rawUrl;
+  checkpoint.source.parsedUrls[0].originalRow = [rawUrl];
+  checkpoint.results[0].url = rawUrl;
+  checkpoint.results[0].originalRow = [rawUrl];
+  checkpoint.results[0].errorMessage = JSON.stringify({
+    authorization: 'Bearer existing"stillsecret'
+  });
+
+  const applied = applyBatchRuntimeEvent(checkpoint, {
+    type: 'session_started',
+    batchId: 'batch-1'
+  }, 2200);
+  const serialized = JSON.stringify(applied);
+
+  assert.equal(applied.ok, true);
+  assert.equal(applied.changed, true);
+  assert.doesNotMatch(
+    serialized,
+    /existing-url-secret|existing|stillsecret/
+  );
+  assert.match(serialized, /view=full/);
+  assert.match(serialized, /REDACTED/);
+});
+
+test('invalid version 2 responses never echo raw checkpoint values', () => {
+  const invalid = createTerminalCheckpoint({
+    result: 'fail',
+    errorCode: 'task_failed'
+  });
+  invalid.settings = null;
+  invalid.results[0].errorMessage =
+    '{"authorization":"Bearer invalid-result-secret"}';
+  invalid.debugContext = 'Authorization: Bearer unknown-field-secret';
+
+  const responses = [
+    migrateBatchRuntimeCheckpoint(invalid, 2200),
+    applyBatchRuntimeEvent(invalid, {
+      type: 'session_started',
+      batchId: 'batch-1'
+    }, 2200),
+    normalizeInterruptedBatch(invalid, 2200)
+  ];
+
+  for (const response of responses) {
+    assert.equal(response.ok, false);
+    assert.equal(response.checkpoint, null);
+    assert.doesNotMatch(
+      JSON.stringify(response),
+      /invalid-result-secret|unknown-field-secret/
+    );
+  }
+});
+
 test('migration rejects result URL credentials without echoing them', () => {
   const version1 = createVersion1CheckpointFixture();
   version1.results[0].url =

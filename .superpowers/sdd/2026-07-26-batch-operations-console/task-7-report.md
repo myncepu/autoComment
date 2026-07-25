@@ -172,3 +172,35 @@ Round 2 verification:
 - syntax checks, `git diff --check`, automatic-window scan, and production
   sentinel-secret scan are required again immediately before the Round 2
   commit.
+
+## Round 3 final secret-boundary corrections
+
+Round 3 removed the final two checkpoint/auth disclosure edges:
+
+- quoted JSON redaction now recognizes complete JSON string tokens, including
+  escaped quotes and backslashes, before replacing a sensitive value. It no
+  longer terminates at the first escaped quote, and non-sensitive JSON text is
+  preserved byte-for-byte;
+- version 2 migration, event application, and interruption normalization now
+  clone and sanitize existing source/result URL copies and result diagnostic
+  messages before validation or event handling;
+- clean version 2 checkpoints retain `changed: false`, while sanitization is
+  reflected as a real change even when the requested event is otherwise
+  idempotent;
+- malformed version 1 input, failed version 1-to-2 post-validation, and invalid
+  version 2 input return the existing `{ checkpoint }` response shape with
+  `checkpoint: null`, never the untrusted raw value;
+- the version 2 validator now enforces the sanitized diagnostic invariant in
+  addition to the existing URL-copy invariant.
+
+Strict TDD evidence:
+
+- RED: focused checkpoint/sanitizer run had 24 passed and the four intended
+  regression groups failed;
+- GREEN: focused checkpoint/sanitizer run passed 28/28;
+- broader runtime/security focused run passed 100/100;
+- final full repository suite passed 347/347.
+
+Final verification also passed syntax checks for both changed production
+modules, `git diff --check`, and a production-source scan for every Round 3
+sentinel secret.
