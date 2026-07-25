@@ -3,6 +3,7 @@ import { getBatchStartError } from './lib/batch-readiness.mjs';
 import {
   BatchScheduler,
   isBatchConfirmationFor,
+  isDurableBatchConfirmation,
   normalizeBatchConcurrency
 } from './lib/batch-scheduler.mjs';
 import { BatchWindowManager } from './lib/batch-window-manager.mjs';
@@ -230,6 +231,16 @@ function updateHistoryPendingCount(value, saveStatus) {
   if (Number.isInteger(value)) {
     historyPendingCount = value;
     historyPendingCountUnavailable = false;
+    if (value === 0) {
+      let changed = false;
+      for (const result of localResults) {
+        if (result.result === 'success' && result.historySaveStatus === 'queued') {
+          result.historySaveStatus = 'saved';
+          changed = true;
+        }
+      }
+      if (changed) saveLocalResults();
+    }
   } else if (value === null || saveStatus === 'queued') {
     historyPendingCount = null;
     historyPendingCountUnavailable = true;
@@ -329,6 +340,11 @@ function bindEvents() {
   chrome.runtime.onMessage.addListener((message) => {
     // background 通知：结果已落盘，标签页可以安全关闭了
     if (!isBatchConfirmationFor(message, { batchId, totalCount })) return;
+    if (!isDurableBatchConfirmation(message)) {
+      historyPendingCountUnavailable = true;
+      renderHistorySaveWarning();
+      return;
+    }
 
     console.log('[batch] 收到 BATCH_CONFIRMED >>>', {
       urlIndex: message.urlIndex,
@@ -342,7 +358,8 @@ function bindEvents() {
       message.aiContent,
       message.errorMessage,
       message.historySaveStatus,
-      message.historyPendingCount
+      message.historyPendingCount,
+      message.sourceTabId
     );
   });
 
@@ -762,19 +779,39 @@ async function stopBatch() {
   if (pollTimer) clearTimeout(pollTimer);
   stopTimeoutChecker();
 
-  await Promise.all(activeIndices.map((urlIndex) =>
-    finalizeTask(
+  await Promise.all(activeIndices.map(async (urlIndex) => {
+    const activity = stoppingLifecycle.windowManager?.getByIndex(urlIndex);
+    const recovery = await recoverSubmitContext(
+      activity,
+      stoppingLifecycle.batchId,
       urlIndex,
-      'fail',
+      'stop'
+    );
+    if (
+      batchId !== stoppingLifecycle.batchId ||
+      lifecycleToken !== stoppingLifecycle.lifecycleToken ||
+      scheduler !== stoppingLifecycle.scheduler ||
+      windowManager !== stoppingLifecycle.windowManager
+    ) {
+      return false;
+    }
+    const canClose = !Number.isInteger(activity?.tabId) || recovery.sealed;
+    return finalizeTask(
+      urlIndex,
+      recovery.recovered || !canClose ? 'manual_required' : 'fail',
       null,
-      '手动终止',
+      recovery.recovered
+        ? '手动终止；未确认提交的上下文已保留待恢复'
+        : canClose
+          ? '手动终止'
+          : '手动终止；上下文交接失败，请检查仍打开的工作窗口',
       {
+        closeWindow: canClose,
         suppressCompletion: true,
         ownership: stoppingLifecycle
       }
-    )
-  ));
-  await stoppingLifecycle.windowManager?.closeAll();
+    );
+  }));
 
   for (const [urlIndex, opening] of stoppingLifecycle.openings) {
     if (openingActivities.get(urlIndex) === opening) {
@@ -1166,9 +1203,33 @@ async function handleTaskConfirmed(
   aiContent,
   errorMessage,
   historySaveStatus,
-  confirmedHistoryPendingCount
+  confirmedHistoryPendingCount,
+  sourceTabId
 ) {
+  const confirmationLifecycle = {
+    batchId,
+    lifecycleToken,
+    scheduler,
+    windowManager,
+    batchItems
+  };
+  const activity = confirmationLifecycle.windowManager?.getByIndex(urlIndex);
+  if (
+    Number.isInteger(sourceTabId)
+    && activity?.tabId !== sourceTabId
+  ) {
+    return;
+  }
+  if (
+    batchId !== confirmationLifecycle.batchId ||
+    lifecycleToken !== confirmationLifecycle.lifecycleToken ||
+    scheduler !== confirmationLifecycle.scheduler ||
+    windowManager !== confirmationLifecycle.windowManager
+  ) {
+    return;
+  }
   await finalizeTask(urlIndex, result, aiContent, errorMessage, {
+    ownership: confirmationLifecycle,
     historySaveStatus,
     historyPendingCount: confirmedHistoryPendingCount
   });
@@ -1276,6 +1337,32 @@ function stopTimeoutChecker() {
   }
 }
 
+async function recoverSubmitContext(
+  activity,
+  taskBatchId,
+  urlIndex,
+  reason
+) {
+  if (!Number.isInteger(activity?.tabId)) {
+    return { sealed: false, recovered: false };
+  }
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'BATCH_RECOVER_SUBMIT_CONTEXT',
+      tabId: activity.tabId,
+      batchId: taskBatchId,
+      urlIndex,
+      reason
+    });
+    return {
+      sealed: response?.ok === true && response.sealed === true,
+      recovered: response?.ok === true && response.recovered === true
+    };
+  } catch (_) {
+    return { sealed: false, recovered: false };
+  }
+}
+
 async function checkTimeouts() {
   const timeoutLifecycle = {
     batchId,
@@ -1296,6 +1383,40 @@ async function checkTimeouts() {
     const opening = timeoutLifecycle.openings.get(urlIndex);
     const startTime = activity?.startTime || opening?.startTime;
     if (startTime && (Date.now() - startTime) / 1000 > timeoutSeconds) {
+      if (Number.isInteger(activity?.tabId)) {
+        const recovery = await recoverSubmitContext(
+          activity,
+          timeoutLifecycle.batchId,
+          urlIndex,
+          'timeout'
+        );
+        if (
+          batchId !== timeoutLifecycle.batchId ||
+          lifecycleToken !== timeoutLifecycle.lifecycleToken ||
+          scheduler !== timeoutLifecycle.scheduler ||
+          windowManager !== timeoutLifecycle.windowManager
+        ) {
+          return;
+        }
+        if (!recovery.sealed) {
+          console.warn('[batch] 提交上下文交接失败，暂缓超时关闭:', {
+            batchId: timeoutLifecycle.batchId,
+            urlIndex,
+            tabId: activity.tabId
+          });
+          continue;
+        }
+        if (recovery.recovered) {
+          await finalizeTask(
+            urlIndex,
+            'manual_required',
+            null,
+            '提交结果不明确；上下文已保留待恢复',
+            { ownership: timeoutLifecycle }
+          );
+          continue;
+        }
+      }
       await finalizeTask(
         urlIndex,
         'fail',

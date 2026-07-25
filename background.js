@@ -9,6 +9,7 @@ import {
   createBatchSubmitContextStore,
   installBatchSubmitContextListener
 } from './lib/batch-submit-context-store.mjs';
+import { isDurableBatchConfirmation } from './lib/batch-scheduler.mjs';
 
 installLlmMessageListener(chrome);
 installActionClickHandler(chrome);
@@ -94,7 +95,7 @@ async function persistBatchReport(message) {
 
 function broadcastBatchConfirmed(
   message,
-  { historySaveStatus, historyPendingCount } = {}
+  { historySaveStatus, historyPendingCount, sourceTabId } = {}
 ) {
   chrome.runtime.sendMessage({
     type: 'BATCH_CONFIRMED',
@@ -106,7 +107,8 @@ function broadcastBatchConfirmed(
     ...(historySaveStatus ? { historySaveStatus } : {}),
     ...(Number.isInteger(historyPendingCount) || historyPendingCount === null
       ? { historyPendingCount }
-      : {})
+      : {}),
+    ...(Number.isInteger(sourceTabId) ? { sourceTabId } : {})
   }).then(() => {
     console.log('[background] BATCH_CONFIRMED 发送成功');
   }).catch((e) => {
@@ -143,10 +145,46 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
 
         // 关键：先通知 batch.js（popup）落盘已完成，batch.js 等到确认后才关闭标签页
-        broadcastBatchConfirmed(message, {
+        const confirmedMessage = {
+          ...message,
           historySaveStatus,
           historyPendingCount
-        });
+        };
+        if (isDurableBatchConfirmation(confirmedMessage)) {
+          const result = message.result ?? 'success';
+          let submitContextReleased = result !== 'success';
+          if (result === 'success' && Number.isInteger(sender?.tab?.id)) {
+            try {
+              submitContextReleased = await batchSubmitContextStore.clearIfMatches(
+                sender.tab.id,
+                {
+                  batchId: message.batchId,
+                  urlIndex: message.urlIndex,
+                  historyRevision: message.history?.historyRevision
+                }
+              );
+            } catch (_) {
+              console.warn('[background] Durable history saved but submit context cleanup deferred');
+            }
+          }
+          if (submitContextReleased) {
+            broadcastBatchConfirmed(message, {
+              historySaveStatus,
+              historyPendingCount,
+              sourceTabId: sender?.tab?.id
+            });
+          } else {
+            sendResponse({
+              ok: false,
+              error: 'submit_context_not_released',
+              historySaveStatus,
+              ...(Number.isInteger(historyPendingCount) || historyPendingCount === null
+                ? { historyPendingCount }
+                : {})
+            });
+            return;
+          }
+        }
 
         sendResponse({
           ok: true,
@@ -160,6 +198,45 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         console.error('[background] BATCH_HANDLE_CONFIRM 错误:', e);
         sendResponse({ ok: false, error: String(e) });
       }
+    })();
+    return true;
+  }
+});
+
+// content.js 已把精确历史写入不可变 pending 队列，可以安全释放对应窗口。
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message && message.type === 'BATCH_HISTORY_FALLBACK_DURABLE') {
+    if (!Number.isInteger(sender?.tab?.id)) {
+      sendResponse({ ok: false, error: 'missing_sender_tab' });
+      return false;
+    }
+    (async () => {
+      let submitContextReleased = false;
+      try {
+        submitContextReleased = await batchSubmitContextStore.clearIfMatches(
+          sender.tab.id,
+          {
+            batchId: message.batchId,
+            urlIndex: message.urlIndex,
+            historyRevision: message.historyRevision
+          }
+        );
+      } catch (_) {
+        console.warn('[background] Fallback history queued but submit context cleanup deferred');
+      }
+      if (!submitContextReleased) {
+        sendResponse({
+          ok: false,
+          error: 'submit_context_not_released'
+        });
+        return;
+      }
+      broadcastBatchConfirmed(message, {
+        historySaveStatus: 'queued',
+        historyPendingCount: null,
+        sourceTabId: sender.tab.id
+      });
+      sendResponse({ ok: true });
     })();
     return true;
   }
@@ -188,7 +265,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async () => {
       try {
         await persistBatchReport(message);
-        broadcastBatchConfirmed(message);
+        const tabId = sender?.tab?.id;
+        const submitContext = Number.isInteger(tabId)
+          ? await batchSubmitContextStore.get(tabId)
+          : null;
+        const hasUnacknowledgedSubmission = Boolean(
+          message.result === 'fail'
+          && submitContext
+          && submitContext.batchId === message.batchId
+          && submitContext.urlIndex === message.urlIndex
+        );
+        if (hasUnacknowledgedSubmission) {
+          sendResponse({ ok: true, deferred: true });
+          return;
+        }
+        broadcastBatchConfirmed(message, { sourceTabId: tabId });
         console.log('[background] BATCH_REPORT_RESULT <<< sendResponse({ok:true})');
         sendResponse({ ok: true });
       } catch (e) {

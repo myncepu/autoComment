@@ -420,6 +420,17 @@ test('background migrates an old record before its startup retention check and c
     return responses;
   }
 
+  assert.deepEqual(await dispatchConfirm({
+    type: 'BATCH_SAVE_SUBMIT_CONTEXT',
+    context: {
+      batchId: message.batchId,
+      urlIndex: message.urlIndex,
+      result: 'success',
+      history: message.history
+    }
+  }), [{ ok: true }]);
+  assert.ok(storageData.batchSubmitContextsByTab['42']);
+
   const responses = await dispatchConfirm(message);
   assert.deepEqual(responses, [{
     ok: true,
@@ -428,8 +439,80 @@ test('background migrates an old record before its startup retention check and c
   }]);
   assert.equal(runtimeMessages.length, 1);
   assert.equal(runtimeMessages[0].type, 'BATCH_CONFIRMED');
+  assert.equal(runtimeMessages[0].sourceTabId, 42);
   assert.equal(runtimeMessages[0].historySaveStatus, 'saved');
   assert.equal(runtimeMessages[0].historyPendingCount, 0);
+  assert.equal(storageData.batchSubmitContextsByTab['42'], undefined);
+
+  const oldRevision = {
+    capturedAt: fixedNow,
+    recordedAt: fixedNow + 1,
+    sequence: 1,
+    id: 'revision-old-ack'
+  };
+  const replacementRevision = {
+    capturedAt: fixedNow + 10,
+    recordedAt: fixedNow + 11,
+    sequence: 2,
+    id: 'revision-replacement'
+  };
+  assert.deepEqual(await dispatchConfirm({
+    type: 'BATCH_SAVE_SUBMIT_CONTEXT',
+    context: {
+      batchId: 'batch-cas',
+      urlIndex: 13,
+      result: 'success',
+      history: {
+        ...message.history,
+        historyRevision: replacementRevision
+      }
+    }
+  }), [{ ok: true }]);
+  const messagesBeforeOldAck = runtimeMessages.length;
+  assert.deepEqual(await dispatchConfirm({
+    ...message,
+    batchId: 'batch-cas',
+    urlIndex: 13,
+    history: {
+      ...message.history,
+      historyRevision: oldRevision
+    }
+  }), [{
+    ok: false,
+    error: 'submit_context_not_released',
+    historySaveStatus: 'saved',
+    historyPendingCount: 0
+  }]);
+  assert.equal(runtimeMessages.length, messagesBeforeOldAck);
+  assert.deepEqual(
+    storageData.batchSubmitContextsByTab['42'].history.historyRevision,
+    replacementRevision
+  );
+  assert.deepEqual(await dispatchConfirm({
+    type: 'BATCH_CLEAR_SUBMIT_CONTEXT'
+  }), [{ ok: true }]);
+
+  assert.deepEqual(await dispatchConfirm({
+    type: 'BATCH_SAVE_SUBMIT_CONTEXT',
+    context: {
+      batchId: 'batch-fallback',
+      urlIndex: 8,
+      result: 'success',
+      history: message.history
+    }
+  }), [{ ok: true }]);
+  assert.deepEqual(await dispatchConfirm({
+    type: 'BATCH_HISTORY_FALLBACK_DURABLE',
+    batchId: 'batch-fallback',
+    urlIndex: 8,
+    url: 'https://target.test/post',
+    result: 'success',
+    aiContent: 'Generated fallback',
+    errorMessage: null
+  }), [{ ok: true }]);
+  assert.equal(runtimeMessages.at(-1).historySaveStatus, 'queued');
+  assert.equal(runtimeMessages.at(-1).historyPendingCount, null);
+  assert.equal(storageData.batchSubmitContextsByTab['42'], undefined);
 
   for (const [offset, result] of ['', false, 0].entries()) {
     const explicitResultResponses = await dispatchConfirm({
@@ -443,4 +526,60 @@ test('background migrates an old record before its startup retention check and c
     }]);
     assert.equal(runtimeMessages.at(-1).result, result);
   }
+
+  assert.deepEqual(await dispatchConfirm({
+    type: 'BATCH_SAVE_SUBMIT_CONTEXT',
+    context: {
+      batchId: 'batch-ambiguous',
+      urlIndex: 12,
+      result: 'success',
+      history: message.history
+    }
+  }), [{ ok: true }]);
+  assert.deepEqual(await dispatchConfirm({
+    type: 'BATCH_HAS_SUBMIT_CONTEXT',
+    tabId: 42,
+    batchId: 'batch-ambiguous',
+    urlIndex: 12
+  }), [{ ok: true, unresolved: true }]);
+  assert.deepEqual(await dispatchConfirm({
+    type: 'BATCH_HAS_SUBMIT_CONTEXT',
+    tabId: 42,
+    batchId: 'stale-batch',
+    urlIndex: 12
+  }), [{ ok: true, unresolved: false }]);
+  const messagesBeforeAmbiguousFailure = runtimeMessages.length;
+  assert.deepEqual(await dispatchConfirm({
+    type: 'BATCH_REPORT_RESULT',
+    batchId: 'batch-ambiguous',
+    urlIndex: 12,
+    result: 'fail',
+    url: 'https://target.test/post',
+    errorMessage: '提交结果不明确'
+  }), [{ ok: true, deferred: true }]);
+  assert.equal(
+    runtimeMessages.length,
+    messagesBeforeAmbiguousFailure,
+    'an unresolved post-click context must prevent a terminal close broadcast'
+  );
+
+  assert.deepEqual(await dispatchConfirm({
+    type: 'BATCH_CLEAR_SUBMIT_CONTEXT'
+  }), [{ ok: true }]);
+  assert.deepEqual(await dispatchConfirm({
+    type: 'BATCH_HAS_SUBMIT_CONTEXT',
+    tabId: 42,
+    batchId: 'batch-ambiguous',
+    urlIndex: 12
+  }), [{ ok: true, unresolved: false }]);
+  assert.deepEqual(await dispatchConfirm({
+    type: 'BATCH_REPORT_RESULT',
+    batchId: 'batch-ambiguous',
+    urlIndex: 12,
+    result: 'fail',
+    url: 'https://target.test/post',
+    errorMessage: '确定失败'
+  }), [{ ok: true }]);
+  assert.equal(runtimeMessages.at(-1).type, 'BATCH_CONFIRMED');
+  assert.equal(runtimeMessages.at(-1).result, 'fail');
 });

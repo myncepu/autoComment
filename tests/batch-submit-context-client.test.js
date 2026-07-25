@@ -57,6 +57,27 @@ test('saves, restores, and clears through background messages', async () => {
   ]);
 });
 
+test('clears only the submit context matching the acknowledged history revision', async () => {
+  const { client, messages } = loadClient();
+  const match = {
+    batchId: 'batch-a',
+    urlIndex: 2,
+    historyRevision: {
+      capturedAt: 1000,
+      recordedAt: 1001,
+      sequence: 1,
+      id: 'revision-a'
+    }
+  };
+
+  await client.clear(match);
+
+  assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{
+    type: 'BATCH_CLEAR_SUBMIT_CONTEXT',
+    match
+  }]);
+});
+
 test('acknowledged confirmation clears the persisted submit context', async () => {
   const { client, messages } = loadClient({
     BATCH_HANDLE_CONFIRM: { ok: true }
@@ -66,7 +87,10 @@ test('acknowledged confirmation clears the persisted submit context', async () =
 
   assert.deepEqual(JSON.parse(JSON.stringify(messages)), [
     { type: 'BATCH_HANDLE_CONFIRM', batchId: 'a', urlIndex: 2 },
-    { type: 'BATCH_CLEAR_SUBMIT_CONTEXT' }
+    {
+      type: 'BATCH_CLEAR_SUBMIT_CONTEXT',
+      match: { batchId: 'a', urlIndex: 2 }
+    }
   ]);
 });
 

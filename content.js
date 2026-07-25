@@ -884,8 +884,8 @@
     });
   }
 
-  function clearBatchSubmitContext() {
-    return Promise.resolve(window.AutoCommentBatchSubmitContext?.clear?.())
+  function clearBatchSubmitContext(match) {
+    return Promise.resolve(window.AutoCommentBatchSubmitContext?.clear?.(match))
       .catch(() => {});
   }
 
@@ -946,6 +946,25 @@
     });
   }
 
+  async function notifyHistoryFallbackDurable(message) {
+    if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return false;
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'BATCH_HISTORY_FALLBACK_DURABLE',
+        batchId: message.batchId,
+        urlIndex: message.urlIndex,
+        url: message.url || '',
+        result: message.result ?? 'success',
+        aiContent: message.aiContent || null,
+        errorMessage: message.errorMessage || null,
+        historyRevision: message.history?.historyRevision || null
+      });
+      return response?.ok === true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   async function confirmBatchHistoryDurably(message) {
     const versionedMessage = message?.history
       ? {
@@ -961,9 +980,30 @@
         acknowledgement = null;
       }
     }
-    let durable = isAcknowledgedBatchHistoryConfirmation(versionedMessage, acknowledgement);
-    if (!durable) durable = await persistHistoryPendingFallback(versionedMessage);
-    if (durable) clearBatchSubmitContext();
+    const backgroundAcknowledged = isAcknowledgedBatchHistoryConfirmation(
+      versionedMessage,
+      acknowledgement
+    );
+    let fallbackDurable = false;
+    let fallbackHandoffAcknowledged = false;
+    if (!backgroundAcknowledged) {
+      fallbackDurable = await persistHistoryPendingFallback(versionedMessage);
+      if (fallbackDurable) {
+        fallbackHandoffAcknowledged = await notifyHistoryFallbackDurable(
+          versionedMessage
+        );
+      }
+    }
+    const durable = backgroundAcknowledged || fallbackDurable;
+    if (backgroundAcknowledged || fallbackHandoffAcknowledged) {
+      await clearBatchSubmitContext({
+        batchId: versionedMessage.batchId,
+        urlIndex: versionedMessage.urlIndex,
+        ...(versionedMessage.history?.historyRevision
+          ? { historyRevision: versionedMessage.history.historyRevision }
+          : {})
+      });
+    }
     return { durable, acknowledgement };
   }
 
@@ -4060,7 +4100,7 @@
       const clickResult = await clickCommentSubmitButton();
       console.log('[content] 点击结果:', clickResult);
       if (!clickResult.success) {
-        clearBatchSubmitContext();
+        await clearBatchSubmitContext();
         throw new Error(clickResult.error || '提交按钮点击失败');
       }
 

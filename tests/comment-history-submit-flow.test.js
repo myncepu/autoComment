@@ -182,7 +182,7 @@ test('pre-click context persistence rejects quota errors and ambiguous post-clic
   );
   assert.match(
     definiteFailure,
-    /if \(!clickResult\.success\) \{\s*clearBatchSubmitContext\(\);/,
+    /if \(!clickResult\.success\) \{\s*await clearBatchSubmitContext\(\);/,
     'a definite no-click result must clear the pre-click success context'
   );
   const ambiguousTimeout = sourceBetween(
@@ -228,7 +228,11 @@ function createConfirmationHarness({
     lastError: null,
     sendMessage(message) {
       sentMessages.push(plain(message));
-      return rejection ? Promise.reject(rejection) : Promise.resolve(response);
+      if (rejection) return Promise.reject(rejection);
+      const resolved = typeof response === 'function'
+        ? response(message)
+        : response;
+      return Promise.resolve(resolved);
     }
   };
   context.chrome = {
@@ -309,7 +313,7 @@ function expectedPendingWrite(entryId, message) {
   };
 }
 
-test('rejected and closed confirmation messages durably transfer the exact payload before clearing', async () => {
+test('rejected confirmations queue exact history and preserve context until close handoff', async () => {
   for (const rejection of [
     new Error('background rejected'),
     new Error('The message channel closed before a response was received.')
@@ -324,12 +328,24 @@ test('rejected and closed confirmation messages durably transfer the exact paylo
       plain(await harness.context.confirmBatchHistoryDurably(message)),
       { durable: true, acknowledgement: null }
     );
-    assert.deepEqual(harness.sentMessages, [message]);
+    assert.deepEqual(harness.sentMessages, [
+      message,
+      {
+        type: 'BATCH_HISTORY_FALLBACK_DURABLE',
+        batchId: message.batchId,
+        urlIndex: message.urlIndex,
+        url: message.url,
+        result: 'success',
+        aiContent: message.aiContent,
+        errorMessage: null,
+        historyRevision: message.history.historyRevision
+      }
+    ]);
     assert.deepEqual(
       harness.storageWrites,
       [expectedPendingWrite('rejected-entry', message)]
     );
-    assert.deepEqual(harness.storageRemovals, ['submit-context']);
+    assert.deepEqual(harness.storageRemovals, []);
   }
 });
 
@@ -399,6 +415,44 @@ test('content fallback creates immutable queue entries for same-ID exact revisio
       }
     ]
   );
+});
+
+test('content announces a durable fallback before allowing the worker to close', async () => {
+  const harness = createConfirmationHarness({
+    response(message) {
+      if (message.type === 'BATCH_HANDLE_CONFIRM') {
+        return { ok: true, historySaveStatus: 'failed' };
+      }
+      if (message.type === 'BATCH_HISTORY_FALLBACK_DURABLE') {
+        return { ok: true };
+      }
+      throw new Error(`unexpected message: ${message.type}`);
+    },
+    pendingEntryIds: ['fallback-handoff-entry']
+  });
+  const message = exactConfirmationMessage();
+
+  assert.deepEqual(
+    plain(await harness.context.confirmBatchHistoryDurably(message)),
+    {
+      durable: true,
+      acknowledgement: { ok: true, historySaveStatus: 'failed' }
+    }
+  );
+  assert.deepEqual(harness.sentMessages, [
+    message,
+    {
+      type: 'BATCH_HISTORY_FALLBACK_DURABLE',
+      batchId: message.batchId,
+      urlIndex: message.urlIndex,
+      url: message.url,
+      result: 'success',
+      aiContent: message.aiContent,
+      errorMessage: null,
+      historyRevision: message.history.historyRevision
+    }
+  ]);
+  assert.deepEqual(harness.storageRemovals, ['submit-context']);
 });
 
 test('failed acknowledgement falls back, while a fallback write failure preserves submit context', async () => {

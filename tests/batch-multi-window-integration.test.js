@@ -43,6 +43,14 @@ function createBatchHarness(overrides = {}) {
   };
   const intervalCalls = [];
   const chrome = {
+    runtime: {
+      lastError: null,
+      sendMessage: overrides.runtimeSendMessage || ((message) => Promise.resolve(
+        message.type === 'BATCH_RECOVER_SUBMIT_CONTEXT'
+          ? { ok: true, sealed: true, recovered: false }
+          : { ok: true }
+      ))
+    },
     storage: {
       local: {
         set(_values, callback) { callback?.(); },
@@ -83,6 +91,11 @@ function createBatchHarness(overrides = {}) {
     chrome,
     BatchScheduler: overrides.BatchScheduler || FakeScheduler,
     BatchWindowManager: overrides.BatchWindowManager || FakeWindowManager,
+    isDurableBatchConfirmation: overrides.isDurableBatchConfirmation || ((message) => {
+      const result = message?.result ?? 'success';
+      return result !== 'success' || ['saved', 'queued', 'not_applicable']
+        .includes(message?.historySaveStatus);
+    }),
     loadLlmConfig: overrides.loadLlmConfig || (async () => ({ apiKey: 'test' })),
     getBatchStartError: overrides.getBatchStartError || (() => ''),
     window: {
@@ -124,6 +137,7 @@ function createBatchHarness(overrides = {}) {
         sendTaskWhenReady,
         recordTaskResult,
         finalizeTask,
+        handleTaskConfirmed,
         onAllCompleted,
         startBatch,
         stopBatch,
@@ -517,7 +531,7 @@ test('deferred timeout scan cannot continue into a replacement lifecycle', async
     openingActivities: new Map(),
     isTerminated: false,
     localResults: [],
-    totalCount: 1,
+    totalCount: 2,
     successCount: 0,
     failCount: 0,
     skippedCount: 0,
@@ -534,6 +548,66 @@ test('deferred timeout scan cannot continue into a replacement lifecycle', async
   assert.equal(replacementCloseCount, 0);
   assert.equal(replacementSettleCount, 0);
   assert.equal(api.getState().localResults.length, 0);
+});
+
+test('timeout seals and recovers a worker context before closing its window', async () => {
+  let closeCount = 0;
+  let settleCount = 0;
+  let recoveryMessage;
+  const { api } = createBatchHarness({
+    runtimeSendMessage(message) {
+      recoveryMessage = JSON.parse(JSON.stringify(message));
+      return Promise.resolve({ ok: true, sealed: true, recovered: true });
+    }
+  });
+  api.setState({
+    batchId: 'batch-ambiguous',
+    parsedUrls: [{ url: 'https://ambiguous.test', sourceDomain: '' }],
+    batchItems: [{ url: 'https://ambiguous.test', sourceDomain: '' }],
+    status: 'running',
+    scheduler: {
+      get activeIndices() { return [0]; },
+      settle() { settleCount += 1; },
+      takeAvailable() { return []; }
+    },
+    windowManager: {
+      getByIndex() {
+        return {
+          batchId: 'batch-ambiguous',
+          urlIndex: 0,
+          tabId: 77,
+          startTime: Date.now() - 5000
+        };
+      },
+      async closeByIndex() { closeCount += 1; }
+    },
+    openingActivities: new Map(),
+    isTerminated: false,
+    localResults: [],
+    totalCount: 2,
+    successCount: 0,
+    failCount: 0,
+    skippedCount: 0,
+    noCommentBoxCount: 0,
+    manualRequiredCount: 0,
+    blockedIllegalCount: 0,
+    pendingCount: 2,
+    timeoutSeconds: 1
+  });
+
+  await api.checkTimeouts();
+
+  assert.deepEqual(recoveryMessage, {
+    type: 'BATCH_RECOVER_SUBMIT_CONTEXT',
+    tabId: 77,
+    batchId: 'batch-ambiguous',
+    urlIndex: 0,
+    reason: 'timeout'
+  });
+  assert.equal(closeCount, 1);
+  assert.equal(settleCount, 1);
+  assert.equal(api.getState().localResults[0].result, 'manual_required');
+  assert.match(api.getState().localResults[0].errorMessage, /已保留/);
 });
 
 test('stale BATCH_HANDLE rejection cannot finalize the replacement batch', async () => {
@@ -648,6 +722,119 @@ test('missing parsed URL records a terminal failure with safe defaults', () => {
   assert.equal(state.successCount, 0);
   assert.equal(state.failCount, 1);
   assert.equal(state.pendingCount, 0);
+});
+
+test('a zero pending count reconciles earlier queued history rows', async () => {
+  const { api } = createBatchHarness();
+  const items = [
+    { url: 'https://first.test', sourceDomain: '', originalRow: [] },
+    { url: 'https://second.test', sourceDomain: '', originalRow: [] },
+    { url: 'https://third.test', sourceDomain: '', originalRow: [] }
+  ];
+  api.setState({
+    batchId: 'batch-history',
+    parsedUrls: items,
+    batchItems: items,
+    status: 'running',
+    scheduler: {
+      settle() {},
+      takeAvailable() { return []; },
+      get activeIndices() { return [1]; }
+    },
+    windowManager: {
+      getByIndex() {
+        return { batchId: 'batch-history', urlIndex: 1, startTime: Date.now() };
+      },
+      async closeByIndex() {}
+    },
+    localResults: [{
+      originalIndex: 0,
+      url: 'https://first.test',
+      sourceDomain: '',
+      result: 'success',
+      aiContent: 'first',
+      errorMessage: null,
+      historySaveStatus: 'queued',
+      timestamp: Date.now(),
+      elapsed: 1,
+      originalRow: []
+    }],
+    totalCount: 3,
+    successCount: 1,
+    failCount: 0,
+    skippedCount: 0,
+    noCommentBoxCount: 0,
+    manualRequiredCount: 0,
+    blockedIllegalCount: 0,
+    pendingCount: 2
+  });
+
+  await api.handleTaskConfirmed(
+    1,
+    'success',
+    'second',
+    null,
+    'saved',
+    0
+  );
+
+  assert.deepEqual(
+    api.getState().localResults.map((entry) => entry.historySaveStatus),
+    ['saved', 'saved']
+  );
+});
+
+test('a durable confirmation from an old tab cannot close a replacement worker', async () => {
+  let closeCount = 0;
+  let settleCount = 0;
+  const { api } = createBatchHarness();
+  api.setState({
+    batchId: 'batch-confirm',
+    parsedUrls: [{ url: 'https://confirm.test', sourceDomain: '' }],
+    batchItems: [{ url: 'https://confirm.test', sourceDomain: '' }],
+    status: 'running',
+    scheduler: {
+      get activeIndices() { return [0]; },
+      settle() { settleCount += 1; },
+      takeAvailable() { return []; }
+    },
+    windowManager: {
+      getByIndex() {
+        return {
+          batchId: 'batch-confirm',
+          urlIndex: 0,
+          tabId: 77,
+          startTime: Date.now()
+        };
+      },
+      async closeByIndex() { closeCount += 1; }
+    },
+    openingActivities: new Map(),
+    isTerminated: false,
+    localResults: [],
+    totalCount: 1,
+    successCount: 0,
+    failCount: 0,
+    skippedCount: 0,
+    noCommentBoxCount: 0,
+    manualRequiredCount: 0,
+    blockedIllegalCount: 0,
+    pendingCount: 1
+  });
+
+  await api.handleTaskConfirmed(
+    0,
+    'success',
+    'confirmed',
+    null,
+    'saved',
+    0,
+    66
+  );
+
+  assert.equal(closeCount, 0);
+  assert.equal(settleCount, 0);
+  assert.deepEqual(api.getState().localResults, []);
 });
 
 test('deferred finalizer cannot mutate a replacement same-index lifecycle', async () => {
@@ -892,6 +1079,7 @@ test('deferred Stop cleanup cannot close or erase a replacement lifecycle', asyn
 
   const stopping = api.stopBatch();
   assert.equal(oldStopCount, 1);
+  await new Promise(setImmediate);
   assert.equal(oldCloseCount, 1);
 
   let replacementStopCount = 0;
@@ -935,12 +1123,71 @@ test('deferred Stop cleanup cannot close or erase a replacement lifecycle', asyn
   await stopping;
 
   assert.equal(oldSettleCount, 1);
-  assert.equal(oldCloseAllCount, 1);
+  assert.equal(oldCloseAllCount, 0);
   assert.equal(replacementStopCount, 0);
   assert.equal(replacementSettleCount, 0);
   assert.equal(replacementCloseAllCount, 0);
   assert.equal(replacementOpenings.get(0), replacementOpening);
   assert.equal(api.getState().status, 'running');
+});
+
+test('Stop recovers an unresolved submit context before closing its worker', async () => {
+  let recoveryMessage;
+  let closeCount = 0;
+  let settleCount = 0;
+  const { api } = createBatchHarness({
+    runtimeSendMessage(message) {
+      recoveryMessage = JSON.parse(JSON.stringify(message));
+      return Promise.resolve({ ok: true, sealed: true, recovered: true });
+    }
+  });
+  api.setState({
+    batchId: 'batch-stop-recovery',
+    parsedUrls: [{ url: 'https://stop.test', sourceDomain: '' }],
+    batchItems: [{ url: 'https://stop.test', sourceDomain: '' }],
+    status: 'running',
+    scheduler: {
+      get activeIndices() { return [0]; },
+      stop() {},
+      settle() { settleCount += 1; },
+      takeAvailable() { return []; }
+    },
+    windowManager: {
+      getByIndex() {
+        return {
+          batchId: 'batch-stop-recovery',
+          urlIndex: 0,
+          tabId: 44,
+          startTime: Date.now()
+        };
+      },
+      async closeByIndex() { closeCount += 1; }
+    },
+    openingActivities: new Map(),
+    isTerminated: false,
+    localResults: [],
+    totalCount: 1,
+    successCount: 0,
+    failCount: 0,
+    skippedCount: 0,
+    noCommentBoxCount: 0,
+    manualRequiredCount: 0,
+    blockedIllegalCount: 0,
+    pendingCount: 1
+  });
+
+  await api.stopBatch();
+
+  assert.deepEqual(recoveryMessage, {
+    type: 'BATCH_RECOVER_SUBMIT_CONTEXT',
+    tabId: 44,
+    batchId: 'batch-stop-recovery',
+    urlIndex: 0,
+    reason: 'stop'
+  });
+  assert.equal(closeCount, 1);
+  assert.equal(settleCount, 1);
+  assert.equal(api.getState().localResults[0].result, 'manual_required');
 });
 
 test('deferred completion cannot stop or clear a replacement lifecycle', async () => {
