@@ -431,9 +431,15 @@ Power API 或关键写入失败时不打开任何目标网站，并清理未启�
 修改 Profile 密码不会改变当前批次。批次 `completed`、`terminated` 或明确清除后，
 后台删除对应 vault。后台启动时也清理没有匹配可恢复 checkpoint 的孤立 vault。
 
-### checkpoint v2
+### checkpoint v3
 
-checkpoint v2 在现有状态机基础上增加：
+并行的桌面作业控制台设计已经把 checkpoint v2 用于
+`attempt/phase/manualResolution`。为了避免两个分支产生同号异构 schema，本功能在
+集成后使用 checkpoint v3：v3 包含控制台 v2 的全部 attempt/phase 字段，再增加多身份
+Assignment 和安全快照字段。Cloudflare 同步协议 v2、领域配置 v2 和 `BATCH_HANDLE`
+协议 v2 与 checkpoint 版本相互独立，不受此编号调整影响。
+
+checkpoint v3 在控制台 v2 状态机基础上增加：
 
 - `planFingerprint` 和确认摘要。
 - 安全 Profile 与 Promotion Site 快照。
@@ -441,9 +447,15 @@ checkpoint v2 在现有状态机基础上增加：
 - `attemptCount`、最近失败阶段和安全错误码。
 - 每个结果的归属字段与非敏感显示快照。
 
-checkpoint 明确拒绝 `password`、`secret`、`apiKey`、Cookie 和 token 属性。v1 checkpoint
-升级时先进入 `paused_recovery`，再用迁移产生的默认组合补成 v2；这与 v1 原本只能使用
-全局默认配置的语义一致。v1 `submitting` 任务仍转换为 `manual_required`，不自动重发。
+checkpoint 明确拒绝 `password`、`secret`、`apiKey`、Cookie 和 token 属性。迁移支持：
+
+- 当前 master 的 v1 直接升级为 v3，同时补齐 attempt/phase 和默认 Assignment。
+- 控制台分支的 v2 升级为 v3，保留 attempt/phase/manualResolution，再补齐默认
+  Assignment。
+
+升级先进入 `paused_recovery`；旧 checkpoint 用迁移产生的默认组合补齐，这与旧版本原本
+只能使用全局默认配置的语义一致。旧 `submitting` 任务仍转换为
+`manual_required`，不自动重发。
 
 ### 任务消息
 
@@ -781,7 +793,7 @@ UI 层不能直接读取 storage key 或 secret map。
 - `lib/batch-secret-vault.mjs`：批次密码快照和最小权限读取。
 - `lib/batch-task-config.js`：content script 可测试的任务配置与缓存隔离。
 - `lib/batch-result-record.mjs`：结果归属、skip reason 和 CSV 字段。
-- `lib/batch-runtime-checkpoint.mjs`：checkpoint v2 和 v1 升级。
+- `lib/batch-runtime-checkpoint.mjs`：checkpoint v3、v1 直升和控制台 v2 升级。
 - Cloudflare 分支现有协议、service 和 Worker 模块：扩展 v2 entity，不另建平行实现。
 
 `batch.js` 只负责把 UI controller、计划、scheduler 和 window manager 连接起来；
@@ -796,7 +808,7 @@ UI 层不能直接读取 storage key 或 secret map。
 - 旧单身份/单网站幂等迁移为固定默认实体。
 - local 密码优先；sync 密码必须先成功复制并验证后才删除。
 - 迁移失败保留原密码并可重试。
-- 旧 v1 checkpoint 安全升级且不会自动重发 submitting 任务。
+- 旧 v1 和控制台 v2 checkpoint 安全升级且不会自动重发 submitting 任务。
 
 ### 导入与导出
 
@@ -906,8 +918,8 @@ UI 分支集成后使用其 controller 测试覆盖：
 
 ## 实施顺序与协作边界
 
-1. 在当前独立 worktree 完成纯领域模型、迁移、CSV、计划编译、secret vault、
-   checkpoint v2 和自动化测试。
+1. 在当前独立 worktree 完成纯领域模型、迁移、CSV、计划编译、secret vault 和自动化
+   测试；checkpoint 集成等待控制台 v2 契约可用后升级为 v3。
 2. 检查并集成 Cloudflare 分支最新提交，扩展协议、D1 migration 和历史筛选。
 3. 检查 UI 重构任务的分支和契约；只有依赖可用后才接入页面。
 4. 完成 content/background/batch 的薄适配，删除批次流程对全局 Profile/Site 的读取。
