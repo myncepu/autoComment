@@ -816,63 +816,53 @@
   }
 
   async function persistBatchSubmitContext(batchId, urlIndex, url, result, aiContent, errorMessage) {
-    if (typeof chrome === 'undefined' || !chrome.storage) return;
-    await new Promise((resolve) => {
-      chrome.storage.local.set({
-        batchSubmitCtx: {
-          batchId,
-          urlIndex,
-          url,
-          result,
-          aiContent: aiContent || null,
-          errorMessage: errorMessage || null,
-          timestamp: Date.now()
-        }
-      }, resolve);
+    await window.AutoCommentBatchSubmitContext.save({
+      batchId,
+      urlIndex,
+      url,
+      result,
+      aiContent: aiContent || null,
+      errorMessage: errorMessage || null
     });
   }
 
-  function clearBatchSubmitContext() {
-    if (typeof chrome !== 'undefined' && chrome.storage) {
-      chrome.storage.local.remove('batchSubmitCtx', () => {});
-    }
+  async function clearBatchSubmitContext() {
+    try {
+      await window.AutoCommentBatchSubmitContext.clear();
+    } catch (_) {}
   }
 
   async function confirmRestoredBatchSubmit(ctx) {
     if (!ctx || !ctx.batchId || ctx.urlIndex === undefined) return;
     if (Date.now() - (ctx.timestamp || 0) > 10 * 60 * 1000) {
-      clearBatchSubmitContext();
+      await clearBatchSubmitContext();
       return;
     }
 
     console.log('[AutoComment] 恢复提交后上下文，仅补发确认，不重新生成AI:', ctx);
-    await new Promise((resolve) => {
-      chrome.runtime.sendMessage({
-        type: 'BATCH_HANDLE_CONFIRM',
+    try {
+      await window.AutoCommentBatchSubmitContext.confirm({
         batchId: ctx.batchId,
         urlIndex: ctx.urlIndex,
         url: ctx.url || '',
         aiContent: ctx.aiContent || '',
         result: ctx.result || 'success',
         errorMessage: ctx.errorMessage || null
-      }).then(resolve).catch(resolve);
-    });
-
-    clearBatchSubmitContext();
+      });
+    } catch (error) {
+      console.warn('[AutoComment] 恢复提交确认失败，保留上下文等待重试:', error);
+    }
   }
 
   // 从 storage 恢复提交后上下文（仅补确认，不再恢复成可执行批处理任务）
   async function restoreBatchContext() {
     console.log('[AutoComment] restoreBatchContext 开始');
-    if (typeof chrome === 'undefined' || !chrome.storage) return;
-    const data = await new Promise((resolve) => chrome.storage.local.get(['batchSubmitCtx', 'batchCtx'], resolve));
-    if (data.batchCtx) {
-      chrome.storage.local.remove('batchCtx', () => {});
-    }
-    console.log('[AutoComment] restoreBatchContext batchSubmitCtx:', data.batchSubmitCtx);
-    if (data.batchSubmitCtx) {
-      await confirmRestoredBatchSubmit(data.batchSubmitCtx);
-    }
+    let context = null;
+    try {
+      context = await window.AutoCommentBatchSubmitContext.restore();
+    } catch (_) {}
+    console.log('[AutoComment] restoreBatchContext batchSubmitCtx:', context);
+    if (context) await confirmRestoredBatchSubmit(context);
   }
 
   // 批处理模式专用：直接上报成功到 background
@@ -3951,31 +3941,26 @@
       // 同时等待 background 响应后再返回，使 batch.js 能收到确认再关闭标签页
       console.log('[content] 通知 background (BATCH_HANDLE_CONFIRM)...');
       if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
-        await new Promise((resolve) => {
-          chrome.runtime.sendMessage({
-            type: 'BATCH_HANDLE_CONFIRM',
+        try {
+          const response = await window.AutoCommentBatchSubmitContext.confirm({
             batchId,
             urlIndex,
             url: url || '',
             aiContent
-          }).then((res) => {
-            console.log('[content] background 响应:', res);
-            resolve(res);
-          }).catch((err) => {
-            if (err.message && err.message.includes('message channel closed')) {
-              console.log('[content] 消息通道已关闭（标签页可能已关闭），忽略错误');
-            } else {
-              console.warn('[content] background 响应失败:', err);
-            }
-            resolve(null);
           });
-        });
+          console.log('[content] background 响应:', response);
+        } catch (err) {
+          if (err.message && err.message.includes('message channel closed')) {
+            console.log('[content] 消息通道已关闭（标签页可能已关闭），保留上下文等待重试');
+          } else {
+            console.warn('[content] background 响应失败，保留上下文等待重试:', err);
+          }
+          return;
+        }
       }
-      clearBatchSubmitContext();
       console.log('[content] handleBatchTask 完成 <<<', { batchId, urlIndex });
     } catch (err) {
       console.warn('[content] handleBatchTask 捕获错误:', err.message);
-      clearBatchSubmitContext();
 
       // 特殊错误：未找到评论框
       if (err.message === '__NO_COMMENT_BOX__') {
@@ -4298,44 +4283,19 @@
    */
   async function writePendingResult(batchId, urlIndex, url, result, aiContent, errorMessage) {
     console.log('[content] writePendingResult >>>', { batchId, urlIndex, url, result, aiContentLen: aiContent ? aiContent.length : 0, errorMessage });
-    if (typeof chrome === 'undefined' || !chrome.storage) {
-      console.warn('[content] writePendingResult: chrome.storage 不可用');
-      return;
+    const response = await chrome.runtime.sendMessage({
+      type: 'BATCH_PERSIST_PENDING_RESULT',
+      batchId,
+      urlIndex,
+      url: url || '',
+      result,
+      aiContent,
+      errorMessage
+    });
+    if (!response?.ok) {
+      throw new Error(response?.error || '批处理待确认结果保存失败');
     }
-    try {
-      const data = await new Promise((resolve) => {
-        chrome.storage.local.get(['batchResults', 'batchReportedUrls'], (d) => resolve(d));
-      });
-      const results = Array.isArray(data.batchResults) ? data.batchResults : [];
-      const entry = {
-        batchId,
-        urlIndex,
-        url: url || '',
-        result,
-        aiContent,
-        errorMessage,
-        timestamp: Date.now()
-      };
-      const existingIndex = results.findIndex((item) => item.batchId === batchId && item.urlIndex === urlIndex);
-      if (existingIndex >= 0) {
-        results[existingIndex] = { ...results[existingIndex], ...entry };
-      } else {
-        results.push(entry);
-      }
-      if (results.length > 100) results.shift();
-      const reported = Array.isArray(data.batchReportedUrls) ? data.batchReportedUrls : [];
-      const urlKey = `${batchId}:${urlIndex}`;
-      if (!reported.includes(urlKey)) {
-        reported.push(urlKey);
-        if (reported.length > 500) reported.shift();
-      }
-      await new Promise((resolve) => {
-        chrome.storage.local.set({ batchResults: results, batchReportedUrls: reported }, resolve);
-      });
-      console.log('[content] writePendingResult <<< 写入完成, 当前results长度:', results.length);
-    } catch (e) {
-      console.error('[content] writePendingResult 错误:', e);
-    }
+    console.log('[content] writePendingResult <<< 写入完成');
   }
 
   async function reportBatchResult(batchId, urlIndex, result, aiContent, errorMessage, pageUrl) {

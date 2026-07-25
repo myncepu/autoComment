@@ -72,6 +72,16 @@
         background-color: #f0fdf4;
       }
 
+      .upload-zone.disabled {
+        cursor: not-allowed;
+        opacity: 0.6;
+      }
+
+      .upload-zone.disabled:hover {
+        border-color: #d1d5db;
+        background-color: #f9fafb;
+      }
+
       .upload-icon {
         font-size: 36px;
         margin-bottom: 8px;
@@ -130,6 +140,11 @@
       }
 
       .file-remove:hover { color: #dc2626; }
+      .file-remove.disabled {
+        cursor: not-allowed;
+        pointer-events: none;
+        opacity: 0.5;
+      }
 
       /* URL 预览 */
       .url-preview {
@@ -695,6 +710,20 @@
           <div class="hint" style="margin-left: 22px; margin-top: 4px;">
             勾选后，生成文案并填入评论框后，将自动点击"发送评论"按钮。
           </div>
+        </div>
+
+        <div class="card-title" style="margin-top: 16px;">并发配置</div>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <label for="concurrencyInput" style="font-size:13px;font-weight:500;color:#374151;white-space:nowrap;margin:0;">并发窗口数：</label>
+          <input
+            type="number"
+            id="concurrencyInput"
+            min="1"
+            max="10"
+            value="3"
+            style="width:80px;padding:7px 10px;border-radius:8px;border:1px solid #d1d5db;font-size:13px;outline:none;"
+          />
+          <span style="font-size:12px;color:#9ca3af;">范围 1~10，默认 3</span>
         </div>
 
         <div class="card-title" style="margin-top: 16px;">超时配置</div>
