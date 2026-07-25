@@ -195,6 +195,37 @@ test('stores only allowlisted settings in canonical JSON and replays without ove
   });
 });
 
+test('rejects canonical setting JSON above 64 KiB without any D1 writes', async () => {
+  const result = await push([
+    settingMutation(
+      'setting-too-large',
+      'batch_checkbox_settings',
+      'x'.repeat(65_536)
+    )
+  ]);
+
+  expect(result.results).toEqual([
+    {
+      mutationId: 'setting-too-large',
+      status: 'rejected',
+      errorCode: 'SETTING_VALUE_TOO_LARGE'
+    }
+  ]);
+  expect(
+    await env.DB.prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM synced_settings
+          WHERE vault_id = ?) AS settings,
+         (SELECT COUNT(*) FROM sync_changes
+          WHERE vault_id = ?) AS changes,
+         (SELECT COUNT(*) FROM sync_mutations
+          WHERE vault_id = ?) AS receipts`
+    )
+      .bind(VALID_VAULT_ID, VALID_VAULT_ID, VALID_VAULT_ID)
+      .first()
+  ).toEqual({ settings: 0, changes: 0, receipts: 0 });
+});
+
 test('pull paginates only the authenticated vault and materializes current setting rows', async () => {
   await push([
     settingMutation('setting-1', 'batch_concurrency', 2),
@@ -349,6 +380,22 @@ test('pull materializes a current comment with anchors and a delete tombstone', 
     recordId: 'deleted:1',
     deletedAt: 1_721_000_000_005
   });
+});
+
+test('rejects a cursor above the vault high watermark without device writes', async () => {
+  const { response } = await pull(
+    'cursor=1&limit=1&deviceId=device-future-cursor'
+  );
+
+  expect(response.status).toBe(400);
+  expect(
+    await env.DB.prepare(
+      `SELECT COUNT(*) AS count FROM sync_devices
+       WHERE vault_id = ? AND device_id = 'device-future-cursor'`
+    )
+      .bind(VALID_VAULT_ID)
+      .first<{ count: number }>()
+  ).toEqual({ count: 0 });
 });
 
 test.each([

@@ -15,6 +15,7 @@ const MAX_DEVICE_ID_LENGTH = 128;
 const MAX_PULL_LIMIT = 100;
 const MAX_BOOTSTRAP_CURSOR_LENGTH = 4_096;
 const BOOTSTRAP_RETENTION_MS = 90 * 24 * 60 * 60 * 1_000;
+const MIN_BOOTSTRAP_SIGNING_KEY_BYTES = 32;
 const SETTING_ALLOWLIST_PLACEHOLDERS = CLOUD_SYNC_SETTING_KEYS
   .map(() => '?')
   .join(', ');
@@ -52,12 +53,27 @@ interface PullRow extends StoredCommentRow {
   tombstone_deleted_at: number | null;
 }
 
-interface BootstrapCursor {
+interface BootstrapCommentCursor {
   serverCursor: number;
   serverNow: number;
+  phase: 'comments';
   submittedAt: number;
   id: string;
+  tombstoneId: null;
 }
+
+interface BootstrapTombstoneCursor {
+  serverCursor: number;
+  serverNow: number;
+  phase: 'tombstones';
+  submittedAt: null;
+  id: null;
+  tombstoneId: string;
+}
+
+type BootstrapCursor =
+  | BootstrapCommentCursor
+  | BootstrapTombstoneCursor;
 
 interface SettingRow {
   setting_key: string;
@@ -233,19 +249,73 @@ function decodeBase64Url(value: string): Uint8Array {
   }
 }
 
-function encodeBootstrapCursor(cursor: BootstrapCursor): string {
-  return encodeBase64Url(
-    new TextEncoder().encode(JSON.stringify({
-      v: 1,
-      s: cursor.serverCursor,
-      n: cursor.serverNow,
-      t: cursor.submittedAt,
-      i: cursor.id
-    }))
+async function bootstrapSigningKey(env: Env): Promise<CryptoKey> {
+  const value = env.BOOTSTRAP_CURSOR_SIGNING_KEY;
+  if (typeof value !== 'string') {
+    fail('INTERNAL_ERROR', 500, true);
+  }
+  const bytes = new TextEncoder().encode(value);
+  if (bytes.byteLength < MIN_BOOTSTRAP_SIGNING_KEY_BYTES) {
+    fail('INTERNAL_ERROR', 500, true);
+  }
+  return crypto.subtle.importKey(
+    'raw',
+    bytes,
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign', 'verify']
   );
 }
 
-function parseBootstrapCursor(value: string): BootstrapCursor {
+function bootstrapCursorPayload(
+  vaultId: string,
+  cursor: BootstrapCursor
+): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify({
+    v: 2,
+    u: vaultId,
+    s: cursor.serverCursor,
+    n: cursor.serverNow,
+    p: cursor.phase,
+    t: cursor.submittedAt,
+    i: cursor.id,
+    r: cursor.tombstoneId
+  }));
+}
+
+async function encodeBootstrapCursor(
+  key: CryptoKey,
+  vaultId: string,
+  cursor: BootstrapCursor
+): Promise<string> {
+  const payload = bootstrapCursorPayload(vaultId, cursor);
+  const signature = await crypto.subtle.sign('HMAC', key, payload);
+  return `${encodeBase64Url(payload)}.${encodeBase64Url(
+    new Uint8Array(signature)
+  )}`;
+}
+
+async function parseBootstrapCursor(
+  value: string,
+  key: CryptoKey,
+  vaultId: string
+): Promise<BootstrapCursor> {
+  const parts = value.split('.');
+  if (parts.length !== 2) fail('INVALID_REQUEST', 400);
+  const payloadBytes = decodeBase64Url(parts[0] ?? '');
+  const signatureBytes = decodeBase64Url(parts[1] ?? '');
+  if (
+    signatureBytes.byteLength !== 32 ||
+    !await crypto.subtle.verify(
+      'HMAC',
+      key,
+      signatureBytes,
+      payloadBytes
+    )
+  ) {
+    fail('INVALID_REQUEST', 400);
+  }
+
   let parsed: unknown;
   try {
     parsed = JSON.parse(
@@ -253,7 +323,7 @@ function parseBootstrapCursor(value: string): BootstrapCursor {
         fatal: true,
         ignoreBOM: false
       }).decode(
-        decodeBase64Url(value)
+        payloadBytes
       )
     );
   } catch (error) {
@@ -266,27 +336,67 @@ function parseBootstrapCursor(value: string): BootstrapCursor {
   const cursor = parsed as Record<string, unknown>;
   const keys = Object.keys(cursor);
   if (
-    keys.length !== 5 ||
-    keys.some((key) => !['v', 's', 'n', 't', 'i'].includes(key)) ||
-    cursor.v !== 1 ||
+    keys.length !== 8 ||
+    keys.some((key) => ![
+      'v',
+      'u',
+      's',
+      'n',
+      'p',
+      't',
+      'i',
+      'r'
+    ].includes(key)) ||
+    cursor.v !== 2 ||
+    cursor.u !== vaultId ||
     !Number.isSafeInteger(cursor.s) ||
     (cursor.s as number) < 0 ||
     !Number.isSafeInteger(cursor.n) ||
     (cursor.n as number) < 0 ||
-    !Number.isSafeInteger(cursor.t) ||
-    (cursor.t as number) < 0 ||
-    typeof cursor.i !== 'string' ||
-    cursor.i.length < 1 ||
-    cursor.i.length > 512 ||
-    cursor.i.trim() !== cursor.i
+    (cursor.p !== 'comments' && cursor.p !== 'tombstones')
+  ) {
+    fail('INVALID_REQUEST', 400);
+  }
+  const common = {
+    serverCursor: cursor.s as number,
+    serverNow: cursor.n as number
+  };
+  if (cursor.p === 'comments') {
+    if (
+      !Number.isSafeInteger(cursor.t) ||
+      (cursor.t as number) < 0 ||
+      typeof cursor.i !== 'string' ||
+      cursor.i.length < 1 ||
+      cursor.i.length > 512 ||
+      cursor.i.trim() !== cursor.i ||
+      cursor.r !== null
+    ) {
+      fail('INVALID_REQUEST', 400);
+    }
+    return {
+      ...common,
+      phase: 'comments',
+      submittedAt: cursor.t as number,
+      id: cursor.i,
+      tombstoneId: null
+    };
+  }
+  if (
+    cursor.t !== null ||
+    cursor.i !== null ||
+    typeof cursor.r !== 'string' ||
+    cursor.r.length < 1 ||
+    cursor.r.length > 512 ||
+    cursor.r.trim() !== cursor.r
   ) {
     fail('INVALID_REQUEST', 400);
   }
   return {
-    serverCursor: cursor.s as number,
-    serverNow: cursor.n as number,
-    submittedAt: cursor.t as number,
-    id: cursor.i
+    ...common,
+    phase: 'tombstones',
+    submittedAt: null,
+    id: null,
+    tombstoneId: cursor.r
   };
 }
 
@@ -396,7 +506,8 @@ async function readBootstrapComments(
   database: D1Database,
   vaultId: string,
   cutoff: number,
-  cursor: BootstrapCursor | null,
+  serverCursor: number,
+  cursor: BootstrapCommentCursor | null,
   limit: number
 ): Promise<StoredCommentRow[]> {
   const cursorClause = cursor
@@ -406,7 +517,12 @@ async function readBootstrapComments(
          )
        )`
     : '';
-  const bindings: unknown[] = [vaultId, vaultId, cutoff];
+  const bindings: unknown[] = [
+    vaultId,
+    serverCursor,
+    vaultId,
+    cutoff
+  ];
   if (cursor) {
     bindings.push(cursor.submittedAt, cursor.submittedAt, cursor.id);
   }
@@ -441,6 +557,11 @@ async function readBootstrapComments(
          ) AS anchor_row
        ) AS anchors_json
      FROM comment_records AS comment
+     JOIN sync_changes AS accepted_change
+       ON accepted_change.vault_id = comment.vault_id
+      AND accepted_change.mutation_id = comment.accepted_mutation_id
+      AND accepted_change.entity_type = 'comment'
+      AND accepted_change.server_seq <= ?
      WHERE comment.vault_id = ?
        AND comment.submitted_at >= ?
        ${cursorClause}
@@ -454,16 +575,22 @@ async function readBootstrapComments(
 
 async function readBootstrapSettings(
   database: D1Database,
-  vaultId: string
+  vaultId: string,
+  serverCursor: number
 ): Promise<Array<{ key: string; value: unknown }>> {
   const result = await database.prepare(
-    `SELECT setting_key, value_json
-     FROM synced_settings
-     WHERE vault_id = ?
-       AND setting_key IN (${SETTING_ALLOWLIST_PLACEHOLDERS})
-     ORDER BY setting_key ASC`
+    `SELECT setting.setting_key, setting.value_json
+     FROM synced_settings AS setting
+     JOIN sync_changes AS accepted_change
+       ON accepted_change.vault_id = setting.vault_id
+      AND accepted_change.mutation_id = setting.accepted_mutation_id
+      AND accepted_change.entity_type = 'setting'
+      AND accepted_change.server_seq <= ?
+     WHERE setting.vault_id = ?
+       AND setting.setting_key IN (${SETTING_ALLOWLIST_PLACEHOLDERS})
+     ORDER BY setting.setting_key ASC`
   )
-    .bind(vaultId, ...CLOUD_SYNC_SETTING_KEYS)
+    .bind(serverCursor, vaultId, ...CLOUD_SYNC_SETTING_KEYS)
     .all<SettingRow>();
   return result.results.map((row) => ({
     key: row.setting_key,
@@ -473,20 +600,33 @@ async function readBootstrapSettings(
 
 async function readBootstrapTombstones(
   database: D1Database,
-  vaultId: string
-): Promise<Array<{ recordId: string; deletedAt: number }>> {
+  vaultId: string,
+  serverCursor: number,
+  afterRecordId: string | null,
+  limit: number
+): Promise<TombstoneRow[]> {
+  const cursorClause = afterRecordId === null
+    ? ''
+    : 'AND tombstone.record_id > ?';
+  const bindings: unknown[] = [serverCursor, vaultId];
+  if (afterRecordId !== null) bindings.push(afterRecordId);
+  bindings.push(limit + 1);
   const result = await database.prepare(
-    `SELECT record_id, deleted_at
-     FROM comment_tombstones
-     WHERE vault_id = ?
-     ORDER BY record_id ASC`
+    `SELECT tombstone.record_id, tombstone.deleted_at
+     FROM comment_tombstones AS tombstone
+     JOIN sync_changes AS accepted_change
+       ON accepted_change.vault_id = tombstone.vault_id
+      AND accepted_change.mutation_id = tombstone.mutation_id
+      AND accepted_change.entity_type = 'comment_delete'
+      AND accepted_change.server_seq <= ?
+     WHERE tombstone.vault_id = ?
+       ${cursorClause}
+     ORDER BY tombstone.record_id ASC
+     LIMIT ?`
   )
-    .bind(vaultId)
+    .bind(...bindings)
     .all<TombstoneRow>();
-  return result.results.map((row) => ({
-    recordId: row.record_id,
-    deletedAt: row.deleted_at
-  }));
+  return result.results;
 }
 
 async function updateDeviceCursor(
@@ -541,6 +681,7 @@ export async function pullChanges(
     cursor,
     limit
   );
+  if (cursor > page.highWatermark) fail('INVALID_REQUEST', 400);
   const pageRows = page.rows.slice(0, limit);
   const changes = pageRows.map(materializeChange);
   const nextCursor =
@@ -581,46 +722,103 @@ export async function bootstrapSnapshot(
   );
   const cursorValues = url.searchParams.getAll('cursor');
   if (cursorValues.length > 1) fail('INVALID_REQUEST', 400);
+  const signingKey = await bootstrapSigningKey(env);
   const cursor = cursorValues.length === 1
-    ? parseBootstrapCursor(
+    ? await parseBootstrapCursor(
         boundedQueryString(
           url,
           'cursor',
           1,
           MAX_BOOTSTRAP_CURSOR_LENGTH
-        )
+        ),
+        signingKey,
+        vault.vaultId
       )
     : null;
-  const serverNow = cursor?.serverNow ?? Date.now();
-  const serverCursor = cursor?.serverCursor ?? await currentHighWatermark(
+  const requestNow = Date.now();
+  const highWatermark = await currentHighWatermark(
     env.DB,
     vault.vaultId
   );
+  if (
+    cursor &&
+    (
+      cursor.serverNow > requestNow ||
+      cursor.serverCursor > highWatermark
+    )
+  ) {
+    fail('INVALID_REQUEST', 400);
+  }
+  const serverNow = cursor?.serverNow ?? requestNow;
+  const serverCursor = cursor?.serverCursor ?? highWatermark;
   const cutoff = serverNow - BOOTSTRAP_RETENTION_MS;
-  const rows = await readBootstrapComments(
-    env.DB,
-    vault.vaultId,
-    cutoff,
-    cursor,
-    limit
-  );
-  const pageRows = rows.slice(0, limit);
-  const hasMore = rows.length > limit;
-  const lastRow = pageRows.at(-1);
-  const nextCursor = hasMore && lastRow
-    ? encodeBootstrapCursor({
+  const commentRows = cursor?.phase === 'tombstones'
+    ? []
+    : await readBootstrapComments(
+        env.DB,
+        vault.vaultId,
+        cutoff,
+        serverCursor,
+        cursor,
+        limit
+      );
+  const pageRows = commentRows.slice(0, limit);
+  const commentsHaveMore = commentRows.length > limit;
+  const tombstoneRows = commentsHaveMore
+    ? []
+    : await readBootstrapTombstones(
+        env.DB,
+        vault.vaultId,
+        serverCursor,
+        cursor?.phase === 'tombstones'
+          ? cursor.tombstoneId
+          : null,
+        limit
+      );
+  const pageTombstoneRows = tombstoneRows.slice(0, limit);
+  const tombstonesHaveMore = tombstoneRows.length > limit;
+  const hasMore = commentsHaveMore || tombstonesHaveMore;
+  let nextCursor: string | null = null;
+  const lastComment = pageRows.at(-1);
+  const lastTombstone = pageTombstoneRows.at(-1);
+  if (commentsHaveMore && lastComment) {
+    nextCursor = await encodeBootstrapCursor(
+      signingKey,
+      vault.vaultId,
+      {
         serverCursor,
         serverNow,
-        submittedAt: requiredNumber(lastRow.submitted_at),
-        id: requiredString(lastRow.record_id)
-      })
-    : null;
-  const [settings, tombstones] = cursor
-    ? [[], []]
-    : await Promise.all([
-        readBootstrapSettings(env.DB, vault.vaultId),
-        readBootstrapTombstones(env.DB, vault.vaultId)
-      ]);
+        phase: 'comments',
+        submittedAt: requiredNumber(lastComment.submitted_at),
+        id: requiredString(lastComment.record_id),
+        tombstoneId: null
+      }
+    );
+  } else if (tombstonesHaveMore && lastTombstone) {
+    nextCursor = await encodeBootstrapCursor(
+      signingKey,
+      vault.vaultId,
+      {
+        serverCursor,
+        serverNow,
+        phase: 'tombstones',
+        submittedAt: null,
+        id: null,
+        tombstoneId: lastTombstone.record_id
+      }
+    );
+  }
+  const settings = cursor
+    ? []
+    : await readBootstrapSettings(
+        env.DB,
+        vault.vaultId,
+        serverCursor
+      );
+  const tombstones = pageTombstoneRows.map((row) => ({
+    recordId: row.record_id,
+    deletedAt: row.deleted_at
+  }));
 
   if (!hasMore) {
     await updateDeviceCursor(

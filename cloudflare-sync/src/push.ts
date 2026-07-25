@@ -40,6 +40,7 @@ const MAX_COMMENT_TEXT_LENGTH = 100_000;
 const MAX_STATUS_LENGTH = 64;
 const MAX_ANCHOR_TEXT_LENGTH = 10_000;
 const MAX_ANCHORS = 1_000;
+const MAX_SETTING_VALUE_JSON_BYTES = 64 * 1_024;
 
 const MAX_D1_QUERY_BUDGET = 1_000;
 const AUTH_QUERY_COST = 1;
@@ -600,6 +601,12 @@ function parseMutation(input: unknown): IncomingMutation {
     );
     if (!Object.hasOwn(payload, 'value')) {
       invalid('INVALID_MUTATION_PAYLOAD');
+    }
+    if (
+      new TextEncoder().encode(canonicalJson(payload.value)).byteLength >
+      MAX_SETTING_VALUE_JSON_BYTES
+    ) {
+      invalid('SETTING_VALUE_TOO_LARGE');
     }
     return {
       mutationId,
