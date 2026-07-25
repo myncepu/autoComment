@@ -4,6 +4,11 @@ import {
   loadLlmConfig
 } from './lib/llm-config.mjs';
 import { saveOptionsModelConfig, testOptionsModelConfig } from './lib/llm-options-controller.mjs';
+import {
+  buildExportableSettings,
+  migratePasswordToLocal,
+  splitImportedSettings
+} from './lib/cloud-sync-settings.mjs';
 
 const LEGACY_SKILL_TEMPLATE_STORAGE_KEY = 'qwen_skill_template';
 const WEBSITE_URL_STORAGE_KEY = 'promotion_website_url';
@@ -20,7 +25,6 @@ const ACTIVE_STORAGE_KEYS = [
   WEBSITE_CONTENT_STORAGE_KEY,
   USER_NAME_STORAGE_KEY,
   USER_EMAIL_STORAGE_KEY,
-  USER_PASSWORD_STORAGE_KEY,
   LLM_SYNC_KEYS.apiBaseUrl,
   LLM_SYNC_KEYS.model,
   SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY
@@ -28,6 +32,7 @@ const ACTIVE_STORAGE_KEYS = [
 
 const IMPORT_COMPAT_STORAGE_KEYS = [
   ...ACTIVE_STORAGE_KEYS,
+  USER_PASSWORD_STORAGE_KEY,
   LEGACY_SKILL_TEMPLATE_STORAGE_KEY,
   LEGACY_PROMPT_FIELD_VALUES_STORAGE_KEY
 ];
@@ -142,7 +147,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       [WEBSITE_CONTENT_STORAGE_KEY]: getInputValue(websiteContentInput),
       [USER_NAME_STORAGE_KEY]: getInputValue(userNameInput),
       [USER_EMAIL_STORAGE_KEY]: getInputValue(userEmailInput),
-      [USER_PASSWORD_STORAGE_KEY]: getInputValue(userPasswordInput),
       [LLM_SYNC_KEYS.apiBaseUrl]: getInputValue(llmApiBaseUrlInput),
       [LLM_SYNC_KEYS.model]: getInputValue(llmModelInput)
     };
@@ -223,13 +227,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     return toSave;
   }
 
-  function loadSettings() {
-    chrome.storage.sync.get(IMPORT_COMPAT_STORAGE_KEYS, (result) => {
-      if (chrome.runtime.lastError) {
-        console.error('读取设置失败：', chrome.runtime.lastError);
-        return;
-      }
-      const data = result || {};
+  async function loadSettings() {
+    try {
+      await migratePasswordToLocal(chrome.storage);
+      const [syncValues, localValues] = await Promise.all([
+        chrome.storage.sync.get(IMPORT_COMPAT_STORAGE_KEYS),
+        chrome.storage.local.get([USER_PASSWORD_STORAGE_KEY])
+      ]);
+      const data = { ...syncValues, ...localValues };
       websiteUrlInput.value = typeof data[WEBSITE_URL_STORAGE_KEY] === 'string'
         ? data[WEBSITE_URL_STORAGE_KEY]
         : getLegacyWebsiteUrl(data);
@@ -241,7 +246,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       userPasswordInput.value = typeof data[USER_PASSWORD_STORAGE_KEY] === 'string' ? data[USER_PASSWORD_STORAGE_KEY] : '';
       showExportOutlinksFloatingButton = data[SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY] !== false;
       renderExportOutlinksFloatingToggle();
-    });
+    } catch (error) {
+      console.error('读取设置失败：', error);
+    }
   }
 
   const requiredSettingsFields = [
@@ -317,16 +324,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  saveSettingsBtn.addEventListener('click', () => {
+  saveSettingsBtn.addEventListener('click', async () => {
     if (!validateRequiredSettings()) return;
-    chrome.storage.sync.set(getSettingsPayloadFromInputs(), () => {
-      if (chrome.runtime.lastError) {
-        console.error('保存设置失败：', chrome.runtime.lastError);
-        showStatus(settingsStatusEl, '保存失败', 2000);
-        return;
-      }
+    try {
+      const { syncValues, localValues } = splitImportedSettings(getSettingsPayloadFromInputs());
+      await Promise.all([
+        chrome.storage.sync.set(syncValues),
+        chrome.storage.local.set(localValues)
+      ]);
       showStatus(settingsStatusEl, '已保存');
-    });
+    } catch (error) {
+      console.error('保存设置失败：', error);
+      showStatus(settingsStatusEl, '保存失败', 2000);
+    }
   });
 
   if (toggleExportOutlinksFloatingBtn) {
@@ -347,13 +357,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   if (exportConfigBtn) {
-    exportConfigBtn.addEventListener('click', () => {
-      chrome.storage.sync.get(ACTIVE_STORAGE_KEYS, (result) => {
-        if (chrome.runtime.lastError) {
-          showImportExportStatus('导出失败：' + chrome.runtime.lastError.message, true);
-          return;
-        }
-        const mergedData = mergeCurrentFormValues(result);
+    exportConfigBtn.addEventListener('click', async () => {
+      try {
+        const [syncValues, localValues] = await Promise.all([
+          chrome.storage.sync.get(ACTIVE_STORAGE_KEYS),
+          chrome.storage.local.get([])
+        ]);
+        const mergedData = buildExportableSettings(
+          mergeCurrentFormValues(syncValues),
+          localValues
+        );
         const config = { _version: CONFIG_VERSION, _exportTime: new Date().toISOString(), data: {} };
         ACTIVE_STORAGE_KEYS.forEach((key) => {
           if (mergedData[key] !== undefined) config.data[key] = mergedData[key];
@@ -372,7 +385,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         a.remove();
         URL.revokeObjectURL(url);
         showImportExportStatus('配置已导出！', false);
-      });
+      } catch (error) {
+        showImportExportStatus('导出失败：' + error.message, true);
+      }
     });
   }
 
@@ -395,14 +410,16 @@ document.addEventListener('DOMContentLoaded', async () => {
             showImportExportStatus('导入失败：配置缺少网站链接、网站内容、姓名或邮箱。', true);
             return;
           }
-          chrome.storage.sync.set(toSave, () => {
-            if (chrome.runtime.lastError) {
-              showImportExportStatus('导入失败：' + chrome.runtime.lastError.message, true);
-              return;
-            }
+          const { syncValues, localValues } = splitImportedSettings(toSave);
+          Promise.all([
+            chrome.storage.sync.set(syncValues),
+            chrome.storage.local.set(localValues)
+          ]).then(() => {
             showStatus(settingsStatusEl, '已保存');
             showImportExportStatus('配置已导入并保存！页面将自动刷新...', false);
             setTimeout(() => location.reload(), 1500);
+          }).catch((error) => {
+            showImportExportStatus('导入失败：' + error.message, true);
           });
         } catch (error) {
           showImportExportStatus('解析文件失败：' + error.message, true);
