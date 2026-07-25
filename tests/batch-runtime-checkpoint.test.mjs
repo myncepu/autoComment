@@ -5,6 +5,7 @@ import {
   BATCH_RUNTIME_VERSION,
   applyBatchRuntimeEvent,
   createBatchRuntimeCheckpoint,
+  migrateBatchRuntimeCheckpoint,
   normalizeInterruptedBatch,
   validateBatchRuntimeCheckpoint
 } from '../lib/batch-runtime-checkpoint.mjs';
@@ -99,6 +100,7 @@ test('moves one task through active, submitting, and terminal states', () => {
     type: 'task_activated',
     batchId: 'batch-1',
     urlIndex: 0,
+    attempt: 1,
     tabId: 41,
     windowId: 51,
     startedAt: 1200
@@ -106,12 +108,14 @@ test('moves one task through active, submitting, and terminal states', () => {
   const submitting = applyBatchRuntimeEvent(active.checkpoint, {
     type: 'task_submitting',
     batchId: 'batch-1',
-    urlIndex: 0
+    urlIndex: 0,
+    attempt: 1
   }, 1300);
   const terminal = applyBatchRuntimeEvent(submitting.checkpoint, {
     type: 'task_terminal',
     batchId: 'batch-1',
     urlIndex: 0,
+    attempt: 1,
     result: {
       result: 'success',
       aiContent: 'saved comment',
@@ -125,12 +129,17 @@ test('moves one task through active, submitting, and terminal states', () => {
     active.checkpoint.tasks['0'],
     {
       urlIndex: 0,
+      attempt: 1,
       state: 'active',
       phase: null,
       tabId: 41,
       windowId: 51,
       startedAt: 1200,
-      updatedAt: 1200
+      updatedAt: 1200,
+      manualResolution: {
+        status: 'idle',
+        updatedAt: null
+      }
     }
   );
   assert.equal(submitting.checkpoint.tasks['0'].state, 'submitting');
@@ -140,10 +149,12 @@ test('moves one task through active, submitting, and terminal states', () => {
     terminal.checkpoint.results[0],
     {
       originalIndex: 0,
+      attempt: 1,
       url: 'https://example.test/0',
       sourceDomain: 'example.test',
       result: 'success',
       aiContent: 'saved comment',
+      errorCode: null,
       errorMessage: null,
       timestamp: 1400,
       elapsed: 0,
@@ -164,12 +175,14 @@ test('rejects stale identities, skipped states, and conflicting terminal results
   const skipped = applyBatchRuntimeEvent(initial, {
     type: 'task_submitting',
     batchId: 'batch-1',
-    urlIndex: 0
+    urlIndex: 0,
+    attempt: 1
   }, 1100);
   const outOfRange = applyBatchRuntimeEvent(initial, {
     type: 'task_activated',
     batchId: 'batch-1',
     urlIndex: 7,
+    attempt: 1,
     tabId: 1,
     windowId: 2
   }, 1100);
@@ -195,6 +208,7 @@ test('rejects stale identities, skipped states, and conflicting terminal results
     type: 'task_activated',
     batchId: 'batch-1',
     urlIndex: 0,
+    attempt: 1,
     tabId: 1,
     windowId: 2
   }, 1200);
@@ -202,18 +216,21 @@ test('rejects stale identities, skipped states, and conflicting terminal results
     type: 'task_terminal',
     batchId: 'batch-1',
     urlIndex: 0,
+    attempt: 1,
     result: { result: 'fail', errorMessage: 'first' }
   }, 1300);
   const duplicate = applyBatchRuntimeEvent(terminal.checkpoint, {
     type: 'task_terminal',
     batchId: 'batch-1',
     urlIndex: 0,
+    attempt: 1,
     result: { result: 'fail', errorMessage: 'first' }
   }, 1400);
   const conflict = applyBatchRuntimeEvent(terminal.checkpoint, {
     type: 'task_terminal',
     batchId: 'batch-1',
     urlIndex: 0,
+    attempt: 1,
     result: { result: 'success' }
   }, 1400);
 
@@ -256,6 +273,7 @@ test('a queued task can terminate locally before a worker window opens', () => {
     type: 'task_terminal',
     batchId: 'batch-1',
     urlIndex: 0,
+    attempt: 1,
     result: {
       result: 'blocked_illegal',
       errorMessage: 'blocked before opening'
@@ -277,6 +295,7 @@ test('normalizes active and submitting work into one safe paused checkpoint', ()
     type: 'task_activated',
     batchId: 'batch-1',
     urlIndex: 1,
+    attempt: 1,
     tabId: 21,
     windowId: 31,
     startedAt: 1200
@@ -285,6 +304,7 @@ test('normalizes active and submitting work into one safe paused checkpoint', ()
     type: 'task_activated',
     batchId: 'batch-1',
     urlIndex: 2,
+    attempt: 1,
     tabId: 22,
     windowId: 32,
     startedAt: 1200
@@ -292,12 +312,14 @@ test('normalizes active and submitting work into one safe paused checkpoint', ()
   checkpoint = applyBatchRuntimeEvent(checkpoint, {
     type: 'task_submitting',
     batchId: 'batch-1',
-    urlIndex: 2
+    urlIndex: 2,
+    attempt: 1
   }, 1300).checkpoint;
   checkpoint = applyBatchRuntimeEvent(checkpoint, {
     type: 'task_activated',
     batchId: 'batch-1',
     urlIndex: 3,
+    attempt: 1,
     tabId: 23,
     windowId: 33,
     startedAt: 1200
@@ -306,6 +328,7 @@ test('normalizes active and submitting work into one safe paused checkpoint', ()
     type: 'task_terminal',
     batchId: 'batch-1',
     urlIndex: 3,
+    attempt: 1,
     result: { result: 'success', aiContent: 'done' }
   }, 1400).checkpoint;
 
@@ -320,12 +343,17 @@ test('normalizes active and submitting work into one safe paused checkpoint', ()
     normalized.checkpoint.tasks['1'],
     {
       urlIndex: 1,
+      attempt: 1,
       state: 'queued',
       phase: null,
       tabId: null,
       windowId: null,
       startedAt: null,
-      updatedAt: 2000
+      updatedAt: 2000,
+      manualResolution: {
+        status: 'idle',
+        updatedAt: null
+      }
     }
   );
   assert.equal(normalized.checkpoint.tasks['2'].state, 'terminal');
@@ -338,10 +366,12 @@ test('normalizes active and submitting work into one safe paused checkpoint', ()
     ),
     {
       originalIndex: 2,
+      attempt: 1,
       url: 'https://example.test/2',
       sourceDomain: 'example.test',
       result: 'manual_required',
       aiContent: null,
+      errorCode: 'submission_uncertain',
       errorMessage: '任务在提交确认前中断，评论可能已提交，请人工确认',
       timestamp: 2000,
       elapsed: 1,
@@ -352,3 +382,126 @@ test('normalizes active and submitting work into one safe paused checkpoint', ()
   assert.deepEqual(repeated.orphanWindowIds, []);
   assert.equal(repeated.checkpoint.results.length, 2);
 });
+
+test('migrates a version 1 checkpoint to attempt-aware version 2', () => {
+  const version1 = createVersion1CheckpointFixture();
+  const migrated = migrateBatchRuntimeCheckpoint(version1, 2000);
+
+  assert.equal(migrated.ok, true);
+  assert.equal(migrated.changed, true);
+  assert.equal(migrated.checkpoint.version, 2);
+  assert.equal(migrated.checkpoint.tasks['0'].attempt, 1);
+  assert.deepEqual(migrated.checkpoint.tasks['0'].manualResolution, {
+    status: 'idle',
+    updatedAt: null
+  });
+  assert.equal(migrated.checkpoint.results[0].attempt, 1);
+});
+
+test('retries a safe terminal attempt without deleting attempt history', () => {
+  const terminal = createTerminalCheckpoint({
+    result: 'fail',
+    errorCode: 'task_timeout'
+  });
+  const retried = applyBatchRuntimeEvent(terminal, {
+    type: 'task_retried',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    confirmedRisk: false
+  }, 2200);
+
+  assert.equal(retried.ok, true);
+  assert.equal(retried.checkpoint.tasks['0'].state, 'queued');
+  assert.equal(retried.checkpoint.tasks['0'].attempt, 2);
+  assert.equal(retried.checkpoint.results.length, 1);
+  assert.equal(retried.checkpoint.results[0].attempt, 1);
+});
+
+test('requires confirmation for uncertain submissions and rejects stale attempts', () => {
+  const terminal = createTerminalCheckpoint({
+    result: 'manual_required',
+    errorCode: 'submission_uncertain'
+  });
+  const unconfirmed = applyBatchRuntimeEvent(terminal, {
+    type: 'task_retried',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    confirmedRisk: false
+  }, 2200);
+  const stale = applyBatchRuntimeEvent(terminal, {
+    type: 'task_phase',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 0,
+    phase: 'loading'
+  }, 2200);
+
+  assert.equal(unconfirmed.error, 'retry_confirmation_required');
+  assert.equal(stale.error, 'stale_attempt');
+});
+
+function createVersion1CheckpointFixture() {
+  return {
+    version: 1,
+    batchId: 'batch-1',
+    status: 'completed',
+    createdAt: 1000,
+    updatedAt: 1500,
+    source: {
+      fileName: 'targets.csv',
+      headers: ['原URL'],
+      rows: [['https://target.test/0']],
+      parsedUrls: [{
+        originalIndex: 0,
+        url: 'https://target.test/0',
+        sourceDomain: 'target.test',
+        originalRow: ['https://target.test/0']
+      }]
+    },
+    settings: {
+      autoOpenPanel: false,
+      autoGenerate: true,
+      autoSubmit: true,
+      timeoutSeconds: 60,
+      concurrency: 3
+    },
+    cursor: { nextIndex: 1 },
+    tasks: {
+      0: {
+        urlIndex: 0,
+        state: 'terminal',
+        phase: null,
+        tabId: null,
+        windowId: null,
+        startedAt: null,
+        updatedAt: 1500
+      }
+    },
+    results: [{
+      originalIndex: 0,
+      url: 'https://target.test/0',
+      sourceDomain: 'target.test',
+      result: 'success',
+      aiContent: 'saved',
+      errorCode: null,
+      errorMessage: null,
+      timestamp: 1500,
+      elapsed: 1,
+      originalRow: ['https://target.test/0']
+    }]
+  };
+}
+
+function createTerminalCheckpoint({ result, errorCode }) {
+  const checkpoint = migrateBatchRuntimeCheckpoint(
+    createVersion1CheckpointFixture(),
+    2000
+  ).checkpoint;
+  checkpoint.status = 'paused_recovery';
+  checkpoint.results[0].result = result;
+  checkpoint.results[0].errorCode = errorCode;
+  checkpoint.results[0].errorMessage = errorCode;
+  return checkpoint;
+}
