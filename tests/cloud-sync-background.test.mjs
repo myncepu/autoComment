@@ -126,7 +126,72 @@ test('installation is idempotent and matching alarms run exactly once', async ()
   assert.equal(fixture.createdAlarms.length, 1);
   assert.equal(fixture.alarmListeners.length, 1);
   assert.equal(fixture.storageListeners.length, 1);
+  assert.equal(service.initialUploads, 2);
   assert.deepEqual(service.runReasons, ['startup', 'alarm']);
+});
+
+test('each matching alarm advances one initial-history page before sync', async () => {
+  const fixture = createChromeFixture();
+  const sequence = [];
+  const service = createSyncService({
+    async enqueueInitialHistory() {
+      sequence.push('initial');
+      return { scanned: 50, queued: 50, done: false };
+    },
+    async runOnce(reason) {
+      sequence.push(`run:${reason}`);
+      return { reason };
+    }
+  });
+  await installCloudSyncBackground(fixture.chromeApi, service, {
+    migratePassword: async () => undefined
+  });
+  sequence.length = 0;
+
+  await fixture.triggerAlarm(CLOUD_SYNC_ALARM_NAME);
+
+  assert.deepEqual(sequence, ['initial', 'run:alarm']);
+});
+
+test('more than 100 initial records finish through three bounded alarm pages', async () => {
+  const fixture = createChromeFixture();
+  let enabled = false;
+  let remaining = 120;
+  const pages = [];
+  const service = createSyncService({
+    async enqueueInitialHistory() {
+      if (!enabled) {
+        pages.push({ skipped: 'disabled', scanned: 0, done: false });
+        return pages.at(-1);
+      }
+      const scanned = Math.min(50, remaining);
+      remaining -= scanned;
+      pages.push({ scanned, done: remaining === 0 });
+      return pages.at(-1);
+    }
+  });
+  await installCloudSyncBackground(fixture.chromeApi, service, {
+    migratePassword: async () => undefined
+  });
+  enabled = true;
+
+  await fixture.triggerAlarm(CLOUD_SYNC_ALARM_NAME);
+  await fixture.triggerAlarm(CLOUD_SYNC_ALARM_NAME);
+  await fixture.triggerAlarm(CLOUD_SYNC_ALARM_NAME);
+
+  assert.deepEqual(pages, [
+    { skipped: 'disabled', scanned: 0, done: false },
+    { scanned: 50, done: false },
+    { scanned: 50, done: false },
+    { scanned: 20, done: true }
+  ]);
+  assert.equal(remaining, 0);
+  assert.deepEqual(service.runReasons, [
+    'startup',
+    'alarm',
+    'alarm',
+    'alarm'
+  ]);
 });
 
 test('startup and alarm rejections are caught without blocking later work', async () => {
@@ -156,6 +221,7 @@ test('startup and alarm rejections are caught without blocking later work', asyn
     '[background] Password migration deferred',
     '[background] Initial cloud history upload deferred',
     '[background] Cloud sync startup deferred',
+    '[background] Initial cloud history upload deferred',
     '[background] Cloud sync alarm deferred'
   ]);
   assert.equal(
@@ -164,7 +230,7 @@ test('startup and alarm rejections are caught without blocking later work', asyn
   );
 });
 
-test('storage listener forwards only allowlisted local changes and runs after queueing', async () => {
+test('storage listener forwards only allowlisted sync changes and runs after queueing', async () => {
   const fixture = createChromeFixture();
   const sequence = [];
   const service = createSyncService({
@@ -184,20 +250,27 @@ test('storage listener forwards only allowlisted local changes and runs after qu
 
   await fixture.triggerStorage({
     promotion_website_url: { oldValue: '', newValue: 'https://promo.test' },
+    batch_concurrency: { oldValue: 2, newValue: 3 },
     auto_fill_user_password: { newValue: 'must-not-forward' },
     llm_api_key: { newValue: 'sk-must-not-forward' }
-  }, 'local');
-  await fixture.triggerStorage({
-    batch_concurrency: { oldValue: 2, newValue: 3 }
   }, 'sync');
+  await fixture.triggerStorage({
+    promotion_website_url: { newValue: 'https://local-ignored.test' },
+    cloud_sync_secret: { newValue: 'must-not-forward' },
+    auto_fill_user_password: { newValue: 'must-not-forward' }
+  }, 'local');
 
   assert.deepEqual(sequence, [
     ['enqueue', {
       promotion_website_url: {
         oldValue: '',
         newValue: 'https://promo.test'
+      },
+      batch_concurrency: {
+        oldValue: 2,
+        newValue: 3
       }
-    }, 'local'],
+    }, 'sync'],
     ['run', 'setting_change']
   ]);
 });

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import { createCloudSyncService } from '../lib/cloud-sync-service.mjs';
 import { hashSyncSecret } from '../lib/cloud-sync-credentials.mjs';
+import { createCloudSyncSettings } from '../lib/cloud-sync-settings.mjs';
 import { CloudSyncError } from '../lib/cloud-sync-transport.mjs';
 
 const VALID_SYNC_KEY =
@@ -2017,25 +2018,24 @@ test('exposes status and credentials without copying the secret into repository 
   assert.doesNotMatch(JSON.stringify([...repository.meta]), /AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/u);
 });
 
-test('enqueues only local-area allowlisted setting mutations and ignores remote echoes', async () => {
+test('enqueues real options and batch sync changes while ignoring local secrets and remote echoes', async () => {
   const repository = createSyncRepository();
-  let createCalls = 0;
-  const settings = {
-    async load() {
-      return {};
+  const syncWrites = [];
+  const settings = createCloudSyncSettings({
+    sync: {
+      async get() {
+        return {};
+      },
+      async set(values) {
+        syncWrites.push(structuredClone(values));
+      }
     },
-    async saveRemote() {},
-    createMutations(changes, areaName) {
-      createCalls += 1;
-      assert.equal(areaName, 'local');
-      if (!Object.hasOwn(changes, 'batch_concurrency')) return [];
-      return [normalizeSettingMutationForTest(
-        'setting-local-1',
-        'batch_concurrency',
-        changes.batch_concurrency.newValue
-      )];
+    local: {
+      async get() {
+        return {};
+      }
     }
-  };
+  });
   const service = createCloudSyncService({
     repository,
     storageLocal: createCredentialStorage(),
@@ -2045,22 +2045,42 @@ test('enqueues only local-area allowlisted setting mutations and ignores remote 
   });
 
   assert.deepEqual(await service.enqueueSettingChanges({
-    batch_concurrency: { newValue: 4 }
-  }, 'sync'), { queued: 0 });
-  assert.equal(createCalls, 0);
-  assert.deepEqual(await service.enqueueSettingChanges({
+    promotion_website_url: { newValue: 'https://local-ignored.test' },
+    batch_concurrency: { newValue: 9 },
     auto_fill_user_password: { newValue: 'must-not-leave' },
-    llm_api_key: { newValue: 'sk-must-not-leave' }
+    llm_api_key: { newValue: 'sk-must-not-leave' },
+    cloud_sync_secret: { newValue: 'must-not-leave' }
   }, 'local'), { queued: 0 });
   assert.deepEqual(await service.enqueueSettingChanges({
-    batch_concurrency: { newValue: 4 }
-  }, 'local'), { queued: 1 });
-  assert.equal(repository.enqueued.length, 1);
-  assert.equal(repository.enqueued[0].vaultId, 'AAAAAAAAAAAAAAAAAAAAAA');
+    promotion_website_url: { newValue: 'https://promo.test' },
+    batch_concurrency: { newValue: 4 },
+    auto_fill_user_password: { newValue: 'must-not-leave' },
+    llm_api_key: { newValue: 'sk-must-not-leave' }
+  }, 'sync'), { queued: 2 });
+  assert.deepEqual(
+    repository.enqueued.map(({ entityId, payload }) => [entityId, payload]),
+    [
+      ['promotion_website_url', { value: 'https://promo.test' }],
+      ['batch_concurrency', { value: 4 }]
+    ]
+  );
+  assert.equal(
+    repository.enqueued.every(
+      ({ vaultId }) => vaultId === 'AAAAAAAAAAAAAAAAAAAAAA'
+    ),
+    true
+  );
   assert.doesNotMatch(
     JSON.stringify(repository.enqueued),
     /must-not-leave|password|api.?key/iu
   );
+
+  await settings.saveRemote({ batch_concurrency: 7 });
+  assert.deepEqual(syncWrites, [{ batch_concurrency: 7 }]);
+  assert.deepEqual(await service.enqueueSettingChanges({
+    batch_concurrency: { oldValue: 4, newValue: 7 }
+  }, 'sync'), { queued: 0 });
+  assert.equal(repository.enqueued.length, 2);
 });
 
 test('delegates cloud history APIs and deletes locally only after cloud success', async () => {

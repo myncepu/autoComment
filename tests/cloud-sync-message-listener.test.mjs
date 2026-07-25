@@ -54,6 +54,14 @@ function createChromeMessageFixture() {
   };
 }
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 function createService(overrides = {}) {
   return {
     async getStatus() {
@@ -121,6 +129,69 @@ test('routes every fixed cloud sync and cloud history message once', async () =>
   }
 });
 
+test('create and import await one bounded initial-history page before one response', async () => {
+  for (const message of [
+    { type: 'CLOUD_SYNC_CREATE' },
+    { type: 'CLOUD_SYNC_IMPORT', syncKey: 'acsync_imported' }
+  ]) {
+    const fixture = createChromeMessageFixture();
+    const pageGate = deferred();
+    const sequence = [];
+    let connected = false;
+    const service = createService({
+      async createVault() {
+        sequence.push('connect:create');
+        connected = true;
+        return { connected: true, operation: 'create' };
+      },
+      async importKey() {
+        sequence.push('connect:import');
+        connected = true;
+        return { connected: true, operation: 'import' };
+      },
+      async enqueueInitialHistory() {
+        if (!connected) {
+          sequence.push('initial:disabled');
+          return { skipped: 'disabled', scanned: 0, done: false };
+        }
+        sequence.push('initial:start');
+        await pageGate.promise;
+        sequence.push('initial:done');
+        return { scanned: 50, queued: 50, done: false };
+      }
+    });
+    assert.deepEqual(await service.enqueueInitialHistory(), {
+      skipped: 'disabled',
+      scanned: 0,
+      done: false
+    });
+    assert.deepEqual(sequence, ['initial:disabled']);
+    sequence.length = 0;
+    installCloudSyncMessageListener(fixture.chromeApi, service);
+
+    const dispatched = fixture.dispatch(message);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(dispatched.asyncResult, true);
+    assert.equal(dispatched.responseCount, 0);
+    assert.deepEqual(sequence, [
+      `connect:${message.type === 'CLOUD_SYNC_CREATE' ? 'create' : 'import'}`,
+      'initial:start'
+    ]);
+
+    pageGate.resolve();
+    assert.deepEqual(await dispatched.response, {
+      ok: true,
+      data: {
+        connected: true,
+        operation: message.type === 'CLOUD_SYNC_CREATE' ? 'create' : 'import'
+      }
+    });
+    assert.equal(dispatched.responseCount, 1);
+    assert.deepEqual(sequence.slice(-1), ['initial:done']);
+  }
+});
+
 test('ignores unknown messages without responding', () => {
   const fixture = createChromeMessageFixture();
   installCloudSyncMessageListener(fixture.chromeApi, createService());
@@ -129,6 +200,25 @@ test('ignores unknown messages without responding', () => {
 
   assert.equal(dispatched.asyncResult, false);
   assert.equal(dispatched.responseCount, 0);
+});
+
+test('ignores prototype property names and non-string types without responding', () => {
+  const fixture = createChromeMessageFixture();
+  installCloudSyncMessageListener(fixture.chromeApi, createService());
+
+  for (const type of [
+    'toString',
+    'constructor',
+    '__proto__',
+    Symbol('CLOUD_SYNC_STATUS'),
+    { toString: () => 'CLOUD_SYNC_STATUS' },
+    42,
+    null
+  ]) {
+    const dispatched = fixture.dispatch({ type });
+    assert.equal(dispatched.asyncResult, false);
+    assert.equal(dispatched.responseCount, 0);
+  }
 });
 
 test('rejects every known message from content, external, and forged extension senders', async () => {
