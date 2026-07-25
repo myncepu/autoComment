@@ -306,7 +306,7 @@ test('normalizes active and submitting work into one safe paused checkpoint', ()
     urlIndex: 2,
     attempt: 1,
     tabId: 22,
-    windowId: 32,
+    windowId: 31,
     startedAt: 1200
   }, 1200).checkpoint;
   checkpoint = applyBatchRuntimeEvent(checkpoint, {
@@ -336,7 +336,8 @@ test('normalizes active and submitting work into one safe paused checkpoint', ()
   const repeated = normalizeInterruptedBatch(normalized.checkpoint, 3000);
 
   assert.equal(normalized.ok, true);
-  assert.deepEqual(normalized.orphanWindowIds, [31, 32]);
+  assert.deepEqual(normalized.orphanTabIds, [21, 22]);
+  assert.equal('orphanWindowIds' in normalized, false);
   assert.equal(normalized.checkpoint.status, 'paused_recovery');
   assert.equal(normalized.checkpoint.tasks['0'].state, 'queued');
   assert.deepEqual(
@@ -379,7 +380,8 @@ test('normalizes active and submitting work into one safe paused checkpoint', ()
     }
   );
   assert.equal(repeated.changed, false);
-  assert.deepEqual(repeated.orphanWindowIds, []);
+  assert.deepEqual(repeated.orphanTabIds, []);
+  assert.equal('orphanWindowIds' in repeated, false);
   assert.equal(repeated.checkpoint.results.length, 2);
 });
 
@@ -440,6 +442,52 @@ test('requires confirmation for uncertain submissions and rejects stale attempts
 
   assert.equal(unconfirmed.error, 'retry_confirmation_required');
   assert.equal(stale.error, 'stale_attempt');
+});
+
+test('rejects retries after the batch is completed or terminated', () => {
+  for (const status of ['completed', 'terminated']) {
+    const terminal = createTerminalCheckpoint({
+      result: 'fail',
+      errorCode: 'task_timeout'
+    });
+    terminal.status = status;
+
+    const retried = applyBatchRuntimeEvent(terminal, {
+      type: 'task_retried',
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      confirmedRisk: false
+    }, 2200);
+
+    assert.equal(retried.ok, false);
+    assert.equal(retried.error, 'invalid_transition');
+    assert.equal(retried.checkpoint.status, status);
+    assert.equal(retried.checkpoint.tasks['0'].state, 'terminal');
+    assert.equal(retried.checkpoint.tasks['0'].attempt, 1);
+  }
+});
+
+test('assigns deterministic error codes to all version 1 result types', () => {
+  const cases = [
+    ['success', null],
+    ['skipped', null],
+    ['no_comment_box', 'no_comment_box'],
+    ['manual_required', 'submission_uncertain'],
+    ['blocked_illegal', 'illegal_site'],
+    ['fail', 'task_failed']
+  ];
+
+  for (const [result, expectedErrorCode] of cases) {
+    const version1 = createVersion1CheckpointFixture();
+    version1.results[0].result = result;
+    version1.results[0].errorCode = null;
+
+    const migrated = migrateBatchRuntimeCheckpoint(version1, 2000);
+
+    assert.equal(migrated.ok, true);
+    assert.equal(migrated.checkpoint.results[0].errorCode, expectedErrorCode);
+  }
 });
 
 function createVersion1CheckpointFixture() {
