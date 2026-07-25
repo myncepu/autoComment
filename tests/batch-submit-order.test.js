@@ -22,14 +22,15 @@ test('batch submission arms result detection before dispatching the synchronous 
 test('batch confirmation stores and renders the background history save status', () => {
   const batch = fs.readFileSync(path.resolve(__dirname, '..', 'batch.js'), 'utf8');
   const html = fs.readFileSync(path.resolve(__dirname, '..', 'batch.html'), 'utf8');
+  const background = fs.readFileSync(path.resolve(__dirname, '..', 'background.js'), 'utf8');
 
   assert.match(
     batch,
-    /handleTabConfirmed\([\s\S]*message\.historySaveStatus,\s*message\.historyPendingCount\s*\)/
+    /handleTaskConfirmed\([\s\S]*message\.historySaveStatus,\s*message\.historyPendingCount\s*\)/
   );
   assert.match(
     batch,
-    /function handleTabConfirmed\([\s\S]*historySaveStatus,\s*historyPendingCount\s*\)/
+    /async function handleTaskConfirmed\([\s\S]*historySaveStatus,\s*confirmedHistoryPendingCount\s*\)/
   );
   assert.match(batch, /historySaveStatus:\s*historySaveStatus\s*\|\|\s*null/);
   assert.match(batch, /type:\s*'HISTORY_RETRY_PENDING'/);
@@ -41,7 +42,7 @@ test('batch confirmation stores and renders the background history save status',
   assert.match(batch, /historyPendingCountUnavailable = true;/);
   assert.match(
     batch,
-    /updateHistoryPendingCount\(historyPendingCount,\s*historySaveStatus\)/
+    /updateHistoryPendingCount\(confirmedHistoryPendingCount,\s*historySaveStatus\)/
   );
   assert.match(batch, /saved:\s*'历史已保存'/);
   assert.match(batch, /queued:\s*'历史待重试'/);
@@ -50,4 +51,9 @@ test('batch confirmation stores and renders the background history save status',
 
   assert.match(html, /id="historySaveWarning"/);
   assert.match(html, /<th>历史保存<\/th>/);
+  assert.match(
+    background,
+    /createBatchSubmitContextStore\([\s\S]*maxAgeMs:\s*Number\.POSITIVE_INFINITY/,
+    'exact pre-submit history must remain restorable until durable acknowledgement'
+  );
 });

@@ -110,7 +110,7 @@ test('forwards one captured history payload through direct, restored, and panel 
     "\n    copyBtn.addEventListener('click'"
   );
 
-  assert.match(persist, /history,\s*\n\s*timestamp:/);
+  assert.match(persist, /AutoCommentBatchSubmitContext\.save\(\{[\s\S]*history\s*\n\s*\}\)/);
   assert.match(restored, /history:\s*ctx\.history/);
   assert.match(
     restored,
@@ -144,17 +144,9 @@ test('pre-click context persistence rejects quota errors and ambiguous post-clic
     runScripts: 'outside-only'
   });
   const context = dom.getInternalVMContext();
-  const runtime = { lastError: null };
-  context.chrome = {
-    runtime,
-    storage: {
-      local: {
-        set(_values, callback) {
-          runtime.lastError = { message: 'QUOTA_BYTES quota exceeded' };
-          callback();
-          runtime.lastError = null;
-        }
-      }
+  context.AutoCommentBatchSubmitContext = {
+    async save() {
+      throw new Error('QUOTA_BYTES quota exceeded');
     }
   };
   const persistSource = sourceBetween(
@@ -257,6 +249,12 @@ function createConfirmationHarness({
       }
     }
   };
+  context.AutoCommentBatchSubmitContext = {
+    clear() {
+      storageRemovals.push('submit-context');
+      return Promise.resolve();
+    }
+  };
   context.console = { log() {}, warn() {}, error() {} };
   const confirmationSource = sourceBetween(
     'function createHistoryUniqueId',
@@ -331,7 +329,7 @@ test('rejected and closed confirmation messages durably transfer the exact paylo
       harness.storageWrites,
       [expectedPendingWrite('rejected-entry', message)]
     );
-    assert.deepEqual(harness.storageRemovals, ['batchSubmitCtx']);
+    assert.deepEqual(harness.storageRemovals, ['submit-context']);
   }
 });
 
@@ -420,7 +418,7 @@ test('failed acknowledgement falls back, while a fallback write failure preserve
     failedAck.storageWrites,
     [expectedPendingWrite('failed-ack-entry', message)]
   );
-  assert.deepEqual(failedAck.storageRemovals, ['batchSubmitCtx']);
+  assert.deepEqual(failedAck.storageRemovals, ['submit-context']);
 
   for (const failureOptions of [
     { fallbackLastError: { message: 'quota exceeded' } },
@@ -453,7 +451,7 @@ test('restored exact and marked legacy contexts clear only after a valid acknowl
   await exactHarness.context.confirmRestoredBatchSubmit(exactContext);
   assert.equal(exactHarness.sentMessages[0].history.commentHtml, 'Exact submitted body');
   assert.deepEqual(exactHarness.storageWrites, []);
-  assert.deepEqual(exactHarness.storageRemovals, ['batchSubmitCtx']);
+  assert.deepEqual(exactHarness.storageRemovals, ['submit-context']);
 
   const legacyHarness = createConfirmationHarness({
     response: { ok: true, historySaveStatus: 'not_applicable' }
@@ -471,7 +469,7 @@ test('restored exact and marked legacy contexts clear only after a valid acknowl
     'legacy_context'
   );
   assert.deepEqual(legacyHarness.storageWrites, []);
-  assert.deepEqual(legacyHarness.storageRemovals, ['batchSubmitCtx']);
+  assert.deepEqual(legacyHarness.storageRemovals, ['submit-context']);
 });
 
 test('non-success confirmations do not attach history', () => {

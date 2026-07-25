@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Auto Register Filler",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "description": "自动填充注册表单，并为当前网站生成推广文案。",
   "permissions": [
     "activeTab",
@@ -28,7 +28,7 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["illegal-site-filter.js", "lib/llm-content-bridge.js", "lib/comment-history-capture.js", "content.js"],
+      "js": ["illegal-site-filter.js", "lib/llm-content-bridge.js", "lib/batch-submit-context-client.js", "lib/comment-history-capture.js", "content.js"],
       "run_at": "document_idle"
     }
   ]

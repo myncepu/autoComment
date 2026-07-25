@@ -64,6 +64,7 @@ test('loads the bridge before content code and routes every generation through i
   assert.deepEqual(manifest.content_scripts[0].js, [
     'illegal-site-filter.js',
     'lib/llm-content-bridge.js',
+    'lib/batch-submit-context-client.js',
     'lib/comment-history-capture.js',
     'content.js'
   ]);

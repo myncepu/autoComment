@@ -361,6 +361,7 @@ test('background migrates an old record before its startup retention check and c
       }
     },
     tabs: {
+      onRemoved: { addListener() {} },
       async sendMessage() {},
       async create() {}
     }

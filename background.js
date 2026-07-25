@@ -4,9 +4,20 @@ import { openCommentHistoryDb } from './lib/comment-history-db.mjs';
 import { createCommentHistoryService } from './lib/comment-history-service.mjs';
 import { installCommentHistoryMessageListener } from './lib/comment-history-message-listener.mjs';
 import { installCommentHistoryRetention } from './lib/comment-history-retention.mjs';
+import { createBatchResultStore } from './lib/batch-result-store.mjs';
+import {
+  createBatchSubmitContextStore,
+  installBatchSubmitContextListener
+} from './lib/batch-submit-context-store.mjs';
 
 installLlmMessageListener(chrome);
 installActionClickHandler(chrome);
+const batchResultStore = createBatchResultStore(chrome.storage.local);
+const batchSubmitContextStore = createBatchSubmitContextStore(
+  chrome.storage.local,
+  { maxAgeMs: Number.POSITIVE_INFINITY }
+);
+installBatchSubmitContextListener(chrome, batchSubmitContextStore);
 
 let commentHistoryRepositoryPromise;
 
@@ -78,38 +89,33 @@ const commentHistoryRetention = installCommentHistoryRetention(chrome, {
  * 将批量结果写入 storage（本地存储，由 batch.js 轮询读取）
  */
 async function persistBatchReport(message) {
-  const { batchId, urlIndex, url: pageUrl = '', result, aiContent, errorMessage } = message;
-  console.log('[background] persistBatchReport >>>', { batchId, urlIndex, url: pageUrl, result, aiContentLen: aiContent ? aiContent.length : 0, errorMessage, time: new Date().toISOString() });
+  await batchResultStore.save(message);
+}
 
-  const data = await chrome.storage.local.get(['batchResults', 'batchReportedUrls']);
-  const results = Array.isArray(data.batchResults) ? data.batchResults : [];
-  const entry = {
-    batchId,
-    urlIndex,
-    url: pageUrl,
-    result,
-    aiContent,
-    errorMessage,
-    timestamp: Date.now()
-  };
-  const existingIndex = results.findIndex((item) => item.batchId === batchId && item.urlIndex === urlIndex);
-  if (existingIndex >= 0) {
-    results[existingIndex] = { ...results[existingIndex], ...entry };
-  } else {
-    results.push(entry);
-  }
-  if (results.length > 100) results.shift();
-
-  let reported = data.batchReportedUrls || [];
-  if (!Array.isArray(reported)) reported = [];
-  const urlKey = `${batchId}:${urlIndex}`;
-  if (!reported.includes(urlKey)) {
-    reported.push(urlKey);
-    if (reported.length > 500) reported.shift();
-  }
-
-  await chrome.storage.local.set({ batchResults: results, batchReportedUrls: reported });
-  console.log('[background] persistBatchReport <<< 写入完成, 当前results长度:', results.length, 'time:', new Date().toISOString());
+function broadcastBatchConfirmed(
+  message,
+  { historySaveStatus, historyPendingCount } = {}
+) {
+  chrome.runtime.sendMessage({
+    type: 'BATCH_CONFIRMED',
+    batchId: message.batchId,
+    urlIndex: message.urlIndex,
+    result: message.result ?? 'success',
+    aiContent: message.aiContent || null,
+    errorMessage: message.errorMessage || null,
+    ...(historySaveStatus ? { historySaveStatus } : {}),
+    ...(Number.isInteger(historyPendingCount) || historyPendingCount === null
+      ? { historyPendingCount }
+      : {})
+  }).then(() => {
+    console.log('[background] BATCH_CONFIRMED 发送成功');
+  }).catch((e) => {
+    if (e.message && e.message.includes('message channel closed')) {
+      console.log('[background] BATCH_CONFIRMED 发送失败（接收方已关闭），忽略');
+    } else {
+      console.error('[background] BATCH_CONFIRMED 发送失败:', e);
+    }
+  });
 }
 
 // content.js 确认评论已提交（标签页可能刷新，context 丢失，background 仍活着）
@@ -137,25 +143,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
 
         // 关键：先通知 batch.js（popup）落盘已完成，batch.js 等到确认后才关闭标签页
-        // 再转发给 popup（batch.js），确保 batch.js 收到后再关 tab
-        chrome.runtime.sendMessage({
-          type: 'BATCH_CONFIRMED',
-          urlIndex: message.urlIndex,
-          result: message.result ?? 'success',
-          aiContent: message.aiContent || null,
-          errorMessage: message.errorMessage || null,
+        broadcastBatchConfirmed(message, {
           historySaveStatus,
-          ...(Number.isInteger(historyPendingCount) || historyPendingCount === null
-            ? { historyPendingCount }
-            : {})
-        }).then(() => {
-          console.log('[background] BATCH_CONFIRMED 发送成功');
-        }).catch((e) => {
-          if (e.message && e.message.includes('message channel closed')) {
-            console.log('[background] BATCH_CONFIRMED 发送失败（接收方已关闭），忽略');
-          } else {
-            console.error('[background] BATCH_CONFIRMED 发送失败:', e);
-          }
+          historyPendingCount
         });
 
         sendResponse({
@@ -175,6 +165,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
+// 提交前待确认结果：仅持久化，不能提前释放 batch.js 的窗口槽位。
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message && message.type === 'BATCH_PERSIST_PENDING_RESULT') {
+    (async () => {
+      try {
+        await batchResultStore.save(message);
+        sendResponse({ ok: true });
+      } catch (e) {
+        console.error('[background] BATCH_PERSIST_PENDING_RESULT 错误:', e);
+        sendResponse({ ok: false, error: String(e) });
+      }
+    })();
+    return true;
+  }
+});
+
 // 批量任务结果：content / batch 页 -> background 持久化
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message && message.type === 'BATCH_REPORT_RESULT') {
@@ -182,6 +188,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async () => {
       try {
         await persistBatchReport(message);
+        broadcastBatchConfirmed(message);
         console.log('[background] BATCH_REPORT_RESULT <<< sendResponse({ok:true})');
         sendResponse({ ok: true });
       } catch (e) {
