@@ -294,7 +294,7 @@ function normalizeRevision(comment: Record<string, unknown>): CommentRevision {
     );
     printableAsciiValue(
       explicit.id,
-      MAX_REVISION_ID_LENGTH,
+      MAX_ID_LENGTH,
       'INVALID_COMMENT_REVISION'
     );
   }

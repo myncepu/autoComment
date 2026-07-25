@@ -558,6 +558,76 @@ test('rejects revision ids whose JavaScript and SQLite byte orders disagree', as
   });
 });
 
+test('rejects a 513-character explicit revision id without writes', async () => {
+  const result = await push([
+    commentMutation({
+      mutationId: 'explicit-revision-over-limit',
+      revisionId: 'r'.repeat(513)
+    })
+  ]);
+
+  expect(result.results).toEqual([
+    {
+      mutationId: 'explicit-revision-over-limit',
+      status: 'rejected',
+      errorCode: 'INVALID_COMMENT_REVISION'
+    }
+  ]);
+  expect(
+    await env.DB.prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM comment_records
+          WHERE vault_id = ?) AS comments,
+         (SELECT COUNT(*) FROM comment_anchors
+          WHERE vault_id = ?) AS anchors,
+         (SELECT COUNT(*) FROM sync_changes
+          WHERE vault_id = ?) AS changes,
+         (SELECT COUNT(*) FROM sync_mutations
+          WHERE vault_id = ?) AS receipts`
+    )
+      .bind(
+        VALID_VAULT_ID,
+        VALID_VAULT_ID,
+        VALID_VAULT_ID,
+        VALID_VAULT_ID
+      )
+      .first()
+  ).toEqual({
+    comments: 0,
+    anchors: 0,
+    changes: 0,
+    receipts: 0
+  });
+});
+
+test('accepts a 512-character printable ASCII explicit revision id', async () => {
+  const revisionId = 'r'.repeat(512);
+  const result = await push([
+    commentMutation({
+      mutationId: 'explicit-revision-at-limit',
+      revisionId
+    })
+  ]);
+
+  expect(result.results).toEqual([
+    {
+      mutationId: 'explicit-revision-at-limit',
+      status: 'applied',
+      serverSeq: 1
+    }
+  ]);
+  expect(
+    (
+      await env.DB.prepare(
+        `SELECT revision_id FROM comment_records
+         WHERE vault_id = ? AND record_id = ?`
+      )
+        .bind(VALID_VAULT_ID, 'batch-a:1')
+        .first<{ revision_id: string }>()
+    )?.revision_id
+  ).toBe(revisionId);
+});
+
 test('accepts bounded ASCII legacy revisions for long non-ASCII comment ids', async () => {
   const longBatchId = '界'.repeat(130);
   const longRecordId = `${longBatchId}:1`;
