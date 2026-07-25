@@ -74,7 +74,7 @@ test('can retain an exact pre-submit history context until durable acknowledgeme
   });
 });
 
-test('listener uses sender tab id and rejects extension-page senders', async () => {
+test('listener preserves unacknowledged context when its tab closes', async () => {
   let listener;
   let tabRemovedListener;
   const chromeApi = {
@@ -107,7 +107,6 @@ test('listener uses sender tab id and rejects extension-page senders', async () 
   assert.deepEqual(saved, [{ tabId: 42, context: { batchId: 'a' } }]);
   assert.deepEqual(valid, { ok: true });
   assert.deepEqual(invalid, { ok: false, error: 'missing_sender_tab' });
-  tabRemovedListener(42);
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(cleared, [42]);
+  assert.equal(tabRemovedListener, undefined);
+  assert.deepEqual(cleared, []);
 });

@@ -6,6 +6,7 @@ import {
   isBatchConfirmationFor,
   normalizeBatchConcurrency
 } from '../lib/batch-scheduler.mjs';
+import * as batchSchedulerModule from '../lib/batch-scheduler.mjs';
 
 test('normalizes batch concurrency to the supported 1 through 10 range', () => {
   assert.equal(normalizeBatchConcurrency(undefined), 3);
@@ -70,4 +71,22 @@ test('accepts confirmations only for the current batch and valid URL index', () 
     type: 'BATCH_CONFIRMED',
     urlIndex: 0
   }, current), false);
+});
+
+test('allows a success window to close only after history is durable', () => {
+  assert.equal(
+    typeof batchSchedulerModule.isDurableBatchConfirmation,
+    'function',
+    'batch/history integration must expose one shared close gate'
+  );
+  const isDurable = batchSchedulerModule.isDurableBatchConfirmation;
+
+  for (const historySaveStatus of ['saved', 'queued', 'not_applicable']) {
+    assert.equal(isDurable({ result: 'success', historySaveStatus }), true);
+  }
+  for (const historySaveStatus of ['failed', undefined, null]) {
+    assert.equal(isDurable({ result: 'success', historySaveStatus }), false);
+  }
+  assert.equal(isDurable({ result: 'fail' }), true);
+  assert.equal(isDurable({ result: 'manual_required' }), true);
 });

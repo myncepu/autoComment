@@ -3,6 +3,7 @@ import { getBatchStartError } from './lib/batch-readiness.mjs';
 import {
   BatchScheduler,
   isBatchConfirmationFor,
+  isDurableBatchConfirmation,
   normalizeBatchConcurrency
 } from './lib/batch-scheduler.mjs';
 import { BatchWindowManager } from './lib/batch-window-manager.mjs';
@@ -230,6 +231,16 @@ function updateHistoryPendingCount(value, saveStatus) {
   if (Number.isInteger(value)) {
     historyPendingCount = value;
     historyPendingCountUnavailable = false;
+    if (value === 0) {
+      let changed = false;
+      for (const result of localResults) {
+        if (result.result === 'success' && result.historySaveStatus === 'queued') {
+          result.historySaveStatus = 'saved';
+          changed = true;
+        }
+      }
+      if (changed) saveLocalResults();
+    }
   } else if (value === null || saveStatus === 'queued') {
     historyPendingCount = null;
     historyPendingCountUnavailable = true;
@@ -329,6 +340,11 @@ function bindEvents() {
   chrome.runtime.onMessage.addListener((message) => {
     // background 通知：结果已落盘，标签页可以安全关闭了
     if (!isBatchConfirmationFor(message, { batchId, totalCount })) return;
+    if (!isDurableBatchConfirmation(message)) {
+      historyPendingCountUnavailable = true;
+      renderHistorySaveWarning();
+      return;
+    }
 
     console.log('[batch] 收到 BATCH_CONFIRMED >>>', {
       urlIndex: message.urlIndex,

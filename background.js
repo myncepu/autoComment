@@ -9,6 +9,7 @@ import {
   createBatchSubmitContextStore,
   installBatchSubmitContextListener
 } from './lib/batch-submit-context-store.mjs';
+import { isDurableBatchConfirmation } from './lib/batch-scheduler.mjs';
 
 installLlmMessageListener(chrome);
 installActionClickHandler(chrome);
@@ -143,10 +144,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
 
         // 关键：先通知 batch.js（popup）落盘已完成，batch.js 等到确认后才关闭标签页
-        broadcastBatchConfirmed(message, {
+        const confirmedMessage = {
+          ...message,
           historySaveStatus,
           historyPendingCount
-        });
+        };
+        if (isDurableBatchConfirmation(confirmedMessage)) {
+          if (Number.isInteger(sender?.tab?.id)) {
+            try {
+              await batchSubmitContextStore.clear(sender.tab.id);
+            } catch (_) {
+              console.warn('[background] Durable history saved but submit context cleanup deferred');
+            }
+          }
+          broadcastBatchConfirmed(message, {
+            historySaveStatus,
+            historyPendingCount
+          });
+        }
 
         sendResponse({
           ok: true,
@@ -160,6 +175,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         console.error('[background] BATCH_HANDLE_CONFIRM 错误:', e);
         sendResponse({ ok: false, error: String(e) });
       }
+    })();
+    return true;
+  }
+});
+
+// content.js 已把精确历史写入不可变 pending 队列，可以安全释放对应窗口。
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message && message.type === 'BATCH_HISTORY_FALLBACK_DURABLE') {
+    if (!Number.isInteger(sender?.tab?.id)) {
+      sendResponse({ ok: false, error: 'missing_sender_tab' });
+      return false;
+    }
+    (async () => {
+      try {
+        await batchSubmitContextStore.clear(sender.tab.id);
+      } catch (_) {
+        console.warn('[background] Fallback history queued but submit context cleanup deferred');
+      }
+      broadcastBatchConfirmed(message, {
+        historySaveStatus: 'queued',
+        historyPendingCount: null
+      });
+      sendResponse({ ok: true });
     })();
     return true;
   }
@@ -188,6 +226,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async () => {
       try {
         await persistBatchReport(message);
+        const tabId = sender?.tab?.id;
+        const submitContext = Number.isInteger(tabId)
+          ? await batchSubmitContextStore.get(tabId)
+          : null;
+        const hasUnacknowledgedSubmission = Boolean(
+          message.result === 'fail'
+          && submitContext
+          && submitContext.batchId === message.batchId
+          && submitContext.urlIndex === message.urlIndex
+        );
+        if (hasUnacknowledgedSubmission) {
+          sendResponse({ ok: true, deferred: true });
+          return;
+        }
         broadcastBatchConfirmed(message);
         console.log('[background] BATCH_REPORT_RESULT <<< sendResponse({ok:true})');
         sendResponse({ ok: true });

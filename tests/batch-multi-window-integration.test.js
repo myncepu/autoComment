@@ -83,6 +83,11 @@ function createBatchHarness(overrides = {}) {
     chrome,
     BatchScheduler: overrides.BatchScheduler || FakeScheduler,
     BatchWindowManager: overrides.BatchWindowManager || FakeWindowManager,
+    isDurableBatchConfirmation: overrides.isDurableBatchConfirmation || ((message) => {
+      const result = message?.result ?? 'success';
+      return result !== 'success' || ['saved', 'queued', 'not_applicable']
+        .includes(message?.historySaveStatus);
+    }),
     loadLlmConfig: overrides.loadLlmConfig || (async () => ({ apiKey: 'test' })),
     getBatchStartError: overrides.getBatchStartError || (() => ''),
     window: {
@@ -124,6 +129,7 @@ function createBatchHarness(overrides = {}) {
         sendTaskWhenReady,
         recordTaskResult,
         finalizeTask,
+        handleTaskConfirmed,
         onAllCompleted,
         startBatch,
         stopBatch,
@@ -648,6 +654,66 @@ test('missing parsed URL records a terminal failure with safe defaults', () => {
   assert.equal(state.successCount, 0);
   assert.equal(state.failCount, 1);
   assert.equal(state.pendingCount, 0);
+});
+
+test('a zero pending count reconciles earlier queued history rows', async () => {
+  const { api } = createBatchHarness();
+  const items = [
+    { url: 'https://first.test', sourceDomain: '', originalRow: [] },
+    { url: 'https://second.test', sourceDomain: '', originalRow: [] },
+    { url: 'https://third.test', sourceDomain: '', originalRow: [] }
+  ];
+  api.setState({
+    batchId: 'batch-history',
+    parsedUrls: items,
+    batchItems: items,
+    status: 'running',
+    scheduler: {
+      settle() {},
+      takeAvailable() { return []; },
+      get activeIndices() { return [1]; }
+    },
+    windowManager: {
+      getByIndex() {
+        return { batchId: 'batch-history', urlIndex: 1, startTime: Date.now() };
+      },
+      async closeByIndex() {}
+    },
+    localResults: [{
+      originalIndex: 0,
+      url: 'https://first.test',
+      sourceDomain: '',
+      result: 'success',
+      aiContent: 'first',
+      errorMessage: null,
+      historySaveStatus: 'queued',
+      timestamp: Date.now(),
+      elapsed: 1,
+      originalRow: []
+    }],
+    totalCount: 3,
+    successCount: 1,
+    failCount: 0,
+    skippedCount: 0,
+    noCommentBoxCount: 0,
+    manualRequiredCount: 0,
+    blockedIllegalCount: 0,
+    pendingCount: 2
+  });
+
+  await api.handleTaskConfirmed(
+    1,
+    'success',
+    'second',
+    null,
+    'saved',
+    0
+  );
+
+  assert.deepEqual(
+    api.getState().localResults.map((entry) => entry.historySaveStatus),
+    ['saved', 'saved']
+  );
 });
 
 test('deferred finalizer cannot mutate a replacement same-index lifecycle', async () => {

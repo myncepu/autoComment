@@ -56,4 +56,14 @@ test('batch confirmation stores and renders the background history save status',
     /createBatchSubmitContextStore\([\s\S]*maxAgeMs:\s*Number\.POSITIVE_INFINITY/,
     'exact pre-submit history must remain restorable until durable acknowledgement'
   );
+  assert.match(
+    background,
+    /if \(isDurableBatchConfirmation\(confirmedMessage\)\) \{[\s\S]*broadcastBatchConfirmed/,
+    'background must not release a success window on a failed history save'
+  );
+  assert.match(
+    batch,
+    /if \(!isDurableBatchConfirmation\(message\)\) \{[\s\S]*return;/,
+    'batch page must independently reject a non-durable success confirmation'
+  );
 });
