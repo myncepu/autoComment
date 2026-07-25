@@ -660,6 +660,8 @@
 
       .status-badge.idle { background: #f3f4f6; color: #6b7280; }
       .status-badge.running { background: #dbeafe; color: #1d4ed8; }
+      .status-badge.completing { background: #e0e7ff; color: #4338ca; }
+      .status-badge.paused_recovery { background: #fef3c7; color: #92400e; }
       .status-badge.completed { background: #d1fae5; color: #065f46; }
       .status-badge.terminated { background: #f3e8ff; color: #7c3aed; }
 
@@ -667,6 +669,33 @@
         font-size: 13px;
         color: #374151;
         margin-bottom: 10px;
+      }
+
+      .wake-status {
+        display: inline-flex;
+        align-items: center;
+        margin-top: 8px;
+        padding: 4px 10px;
+        border-radius: 999px;
+        background: #eef2ff;
+        color: #4338ca;
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .recovery-banner {
+        margin: 12px 0 0;
+        padding: 10px 12px;
+        border: 1px solid #f59e0b;
+        border-radius: 8px;
+        background: #fffbeb;
+        color: #92400e;
+        font-size: 13px;
+        font-weight: 600;
+      }
+
+      .recovery-banner[hidden] {
+        display: none;
       }
 
     </style>
@@ -791,6 +820,10 @@
         <div class="card-title">任务状态</div>
         <div class="current-status">
           当前状态：<span class="status-badge idle" id="statusBadge">空闲</span>
+        </div>
+        <div class="wake-status" id="wakeStatus">系统保活已暂停</div>
+        <div class="recovery-banner" id="recoveryBanner" role="status" hidden>
+          <span id="recoveryMessage">上次任务异常中断，已暂停恢复</span>
         </div>
         <div class="hint">模型调用使用设置页中保存的自有 API，不消耗插件积分。</div>
       </div>

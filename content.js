@@ -884,6 +884,22 @@
     });
   }
 
+  async function markBatchTaskSubmitting(batchId, urlIndex) {
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'BATCH_TASK_SUBMITTING',
+        batchId,
+        urlIndex
+      });
+      if (!response?.ok) {
+        throw new Error(response?.error || '无法保存批处理提交阶段');
+      }
+    } catch (error) {
+      await clearBatchSubmitContext({ batchId, urlIndex });
+      throw error;
+    }
+  }
+
   function clearBatchSubmitContext(match) {
     return Promise.resolve(window.AutoCommentBatchSubmitContext?.clear?.(match))
       .catch(() => {});
@@ -1117,6 +1133,7 @@
       const editor = findLikelyCommentTextarea({ allowGenericFallback: true });
       const history = await captureCurrentCommentHistory(editor, url);
       await persistBatchSubmitContext(batchId, urlIndex, url, 'success', promotionText, null, history);
+      await markBatchTaskSubmitting(batchId, urlIndex);
       const navResult = await waitForNavigate(12000);
 
       await reportSuccessToBatch(promotionText, history);
@@ -3446,6 +3463,7 @@
           if (_batchCtx) {
             const { batchId, urlIndex, url } = _batchCtx;
             await persistBatchSubmitContext(batchId, urlIndex, url, 'success', text, null, history);
+            await markBatchTaskSubmitting(batchId, urlIndex);
           }
           const result = await clickCommentSubmitButton();
           if (result.success) {
@@ -4095,6 +4113,7 @@
       // 提交前先写入 pending 结果（页面刷新后 batch.js 仍能立即读到）
       await writePendingResult(batchId, urlIndex, url, 'success', aiContent, null);
       await persistBatchSubmitContext(batchId, urlIndex, url, 'success', aiContent, null, history);
+      await markBatchTaskSubmitting(batchId, urlIndex);
       console.log('[content] pending结果写入完成');
       console.log('[content] 7/7 点击提交按钮...');
       const clickResult = await clickCommentSubmitButton();

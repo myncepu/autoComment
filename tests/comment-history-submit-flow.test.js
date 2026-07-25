@@ -72,20 +72,83 @@ test('captures the final editor before pending context persistence and synthetic
   const captureIndex = flow.indexOf('captureCurrentCommentHistory');
   const pendingIndex = flow.indexOf('writePendingResult');
   const contextIndex = flow.indexOf('persistBatchSubmitContext');
+  const submittingIndex = flow.indexOf('markBatchTaskSubmitting');
   const clickIndex = flow.indexOf('clickCommentSubmitButton');
 
   assert.notEqual(validationIndex, -1, 'final form validation must remain in the flow');
   assert.notEqual(captureIndex, -1, 'actual editor history must be captured');
   assert.notEqual(pendingIndex, -1, 'pending result must remain persisted');
   assert.notEqual(contextIndex, -1, 'reload context must remain persisted');
+  assert.notEqual(submittingIndex, -1, 'submitting phase must be durable');
   assert.notEqual(clickIndex, -1, 'synthetic click must remain dispatched');
   assert.ok(validationIndex < captureIndex, 'capture must happen after final validation');
   assert.ok(captureIndex < pendingIndex, 'capture must happen before pending result persistence');
   assert.ok(pendingIndex < contextIndex, 'pending result must precede submit context');
-  assert.ok(contextIndex < clickIndex, 'submit context must be durable before the click');
+  assert.ok(
+    contextIndex < submittingIndex,
+    'submit context must precede the submitting checkpoint'
+  );
+  assert.ok(
+    submittingIndex < clickIndex,
+    'submitting checkpoint must be durable before the click'
+  );
   assert.match(flow, /const editor = findLikelyCommentTextarea\(\{ allowGenericFallback: true \}\);/);
   assert.match(flow, /persistBatchSubmitContext\([^;]+history\)/);
   assert.match(flow, /confirmBatchHistoryDurably\(\{[\s\S]*history[\s\S]*\}\)/);
+});
+
+test('submitting checkpoint gate forwards task identity and rejects a failed write', async () => {
+  const dom = new JSDOM('<!doctype html><body></body>', {
+    url: 'https://target.test/post',
+    runScripts: 'outside-only'
+  });
+  const context = dom.getInternalVMContext();
+  const sentMessages = [];
+  const clearedContexts = [];
+  context.clearBatchSubmitContext = async (match) => {
+    clearedContexts.push(plain(match));
+  };
+  context.chrome = {
+    runtime: {
+      async sendMessage(message) {
+        sentMessages.push(plain(message));
+        return message.batchId === 'accepted'
+          ? { ok: true }
+          : { ok: false, error: 'checkpoint_write_failed' };
+      }
+    }
+  };
+  const gateSource = sourceBetween(
+    'async function markBatchTaskSubmitting',
+    '\n  function clearBatchSubmitContext'
+  );
+  vm.runInContext(
+    `${gateSource}
+globalThis.markBatchTaskSubmitting = markBatchTaskSubmitting;`,
+    context
+  );
+
+  await context.markBatchTaskSubmitting('accepted', 7);
+  await assert.rejects(
+    context.markBatchTaskSubmitting('rejected', 8),
+    /checkpoint_write_failed/
+  );
+  assert.deepEqual(sentMessages, [
+    {
+      type: 'BATCH_TASK_SUBMITTING',
+      batchId: 'accepted',
+      urlIndex: 7
+    },
+    {
+      type: 'BATCH_TASK_SUBMITTING',
+      batchId: 'rejected',
+      urlIndex: 8
+    }
+  ]);
+  assert.deepEqual(clearedContexts, [{
+    batchId: 'rejected',
+    urlIndex: 8
+  }]);
 });
 
 test('forwards one captured history payload through direct, restored, and panel confirmations', () => {
@@ -121,15 +184,27 @@ test('forwards one captured history payload through direct, restored, and panel 
   assert.match(reporter, /confirmBatchHistoryDurably\(\{[\s\S]*history[\s\S]*\}\)/);
 
   const autoCaptureIndex = autoMode.indexOf('captureCurrentCommentHistory');
+  const autoSubmittingIndex = autoMode.indexOf('markBatchTaskSubmitting');
   const autoWaitIndex = autoMode.indexOf('waitForNavigate');
   const autoReportIndex = autoMode.indexOf('reportSuccessToBatch(promotionText, history)');
   assert.ok(autoCaptureIndex < autoWaitIndex, 'auto-mode capture must precede navigation');
+  assert.ok(
+    autoSubmittingIndex > autoCaptureIndex &&
+      autoSubmittingIndex < autoWaitIndex,
+    'auto-mode submission phase must be durable before navigation'
+  );
   assert.ok(autoWaitIndex < autoReportIndex, 'auto-mode success must forward the pre-navigation payload');
 
   const panelCaptureIndex = panel.indexOf('captureCurrentCommentHistory');
+  const panelSubmittingIndex = panel.indexOf('markBatchTaskSubmitting');
   const panelClickIndex = panel.indexOf('clickCommentSubmitButton');
   const panelReportIndex = panel.indexOf('reportSuccessToBatch(text, history)');
   assert.ok(panelCaptureIndex < panelClickIndex, 'panel capture must precede the click');
+  assert.ok(
+    panelSubmittingIndex > panelCaptureIndex &&
+      panelSubmittingIndex < panelClickIndex,
+    'panel submitting checkpoint must precede the click'
+  );
   assert.ok(panelClickIndex < panelReportIndex, 'panel success must reuse the pre-click payload');
   assert.match(
     panel,

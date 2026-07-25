@@ -6,6 +6,10 @@ import { installCommentHistoryMessageListener } from './lib/comment-history-mess
 import { installCommentHistoryRetention } from './lib/comment-history-retention.mjs';
 import { createBatchResultStore } from './lib/batch-result-store.mjs';
 import {
+  createBatchRuntimeController,
+  installBatchRuntimeController
+} from './lib/batch-runtime-controller.mjs';
+import {
   createBatchSubmitContextStore,
   installBatchSubmitContextListener
 } from './lib/batch-submit-context-store.mjs';
@@ -14,6 +18,14 @@ import { isDurableBatchConfirmation } from './lib/batch-scheduler.mjs';
 installLlmMessageListener(chrome);
 installActionClickHandler(chrome);
 const batchResultStore = createBatchResultStore(chrome.storage.local);
+const batchRuntimeController = createBatchRuntimeController({
+  storageArea: chrome.storage.local,
+  power: chrome.power,
+  tabs: chrome.tabs,
+  windows: chrome.windows,
+  runtime: chrome.runtime
+});
+installBatchRuntimeController(chrome, batchRuntimeController);
 const batchSubmitContextStore = createBatchSubmitContextStore(
   chrome.storage.local,
   { maxAgeMs: Number.POSITIVE_INFINITY }
@@ -93,11 +105,15 @@ async function persistBatchReport(message) {
   await batchResultStore.save(message);
 }
 
-function broadcastBatchConfirmed(
+async function broadcastBatchConfirmed(
   message,
   { historySaveStatus, historyPendingCount, sourceTabId } = {}
 ) {
-  chrome.runtime.sendMessage({
+  const checkpoint = await batchRuntimeController.markTerminal(message);
+  if (!checkpoint.ok) {
+    throw new Error(`checkpoint_write_failed:${checkpoint.error}`);
+  }
+  await chrome.runtime.sendMessage({
     type: 'BATCH_CONFIRMED',
     batchId: message.batchId,
     urlIndex: message.urlIndex,
@@ -168,7 +184,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             }
           }
           if (submitContextReleased) {
-            broadcastBatchConfirmed(message, {
+            await broadcastBatchConfirmed(message, {
               historySaveStatus,
               historyPendingCount,
               sourceTabId: sender?.tab?.id
@@ -211,8 +227,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return false;
     }
     (async () => {
-      let submitContextReleased = false;
       try {
+        let submitContextReleased = false;
         submitContextReleased = await batchSubmitContextStore.clearIfMatches(
           sender.tab.id,
           {
@@ -221,22 +237,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             historyRevision: message.historyRevision
           }
         );
-      } catch (_) {
-        console.warn('[background] Fallback history queued but submit context cleanup deferred');
-      }
-      if (!submitContextReleased) {
+        if (!submitContextReleased) {
+          sendResponse({
+            ok: false,
+            error: 'submit_context_not_released'
+          });
+          return;
+        }
+        await broadcastBatchConfirmed(message, {
+          historySaveStatus: 'queued',
+          historyPendingCount: null,
+          sourceTabId: sender.tab.id
+        });
+        sendResponse({ ok: true });
+      } catch (error) {
+        console.warn('[background] Fallback history handoff deferred');
         sendResponse({
           ok: false,
-          error: 'submit_context_not_released'
+          error: error?.message?.startsWith('checkpoint_write_failed:')
+            ? 'checkpoint_write_failed'
+            : 'submit_context_not_released'
         });
-        return;
       }
-      broadcastBatchConfirmed(message, {
-        historySaveStatus: 'queued',
-        historyPendingCount: null,
-        sourceTabId: sender.tab.id
-      });
-      sendResponse({ ok: true });
     })();
     return true;
   }
@@ -279,7 +301,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({ ok: true, deferred: true });
           return;
         }
-        broadcastBatchConfirmed(message, { sourceTabId: tabId });
+        await broadcastBatchConfirmed(message, { sourceTabId: tabId });
         console.log('[background] BATCH_REPORT_RESULT <<< sendResponse({ok:true})');
         sendResponse({ ok: true });
       } catch (e) {
