@@ -9,6 +9,7 @@ import {
 } from './http';
 import { requireVault } from './auth';
 import { pushMutations } from './push';
+import { bootstrapSnapshot, pullChanges } from './pull';
 import { deleteVault, getStatus, putVault } from './vault';
 
 function pushPreflight(
@@ -56,6 +57,49 @@ function pushPreflight(
   });
 }
 
+function readPreflight(
+  request: Request,
+  env: Env,
+  requestId: string
+): Response {
+  if (!allowedOrigin(request, env)) {
+    return apiError('CORS_ORIGIN_FORBIDDEN', 403, false, requestId);
+  }
+  if (
+    request.headers.get('Access-Control-Request-Method') !== 'GET'
+  ) {
+    const response = apiError(
+      'METHOD_NOT_ALLOWED',
+      405,
+      false,
+      requestId
+    );
+    response.headers.set('Allow', 'GET, OPTIONS');
+    return response;
+  }
+  const requestedHeaders = request.headers.get(
+    'Access-Control-Request-Headers'
+  );
+  if (requestedHeaders) {
+    const supported = new Set(['authorization', 'content-type']);
+    const valid = requestedHeaders
+      .split(',')
+      .map((header) => header.trim().toLowerCase())
+      .every((header) => supported.has(header));
+    if (!valid) {
+      return apiError('CORS_HEADER_NOT_ALLOWED', 403, false, requestId);
+    }
+  }
+  return new Response(null, {
+    status: 204,
+    headers: {
+      'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+      'Cache-Control': 'no-store'
+    }
+  });
+}
+
 function methodNotAllowed(pathname: string, requestId: string): Response {
   const response = apiError(
     'METHOD_NOT_ALLOWED',
@@ -78,6 +122,12 @@ async function route(
   if (request.method === 'OPTIONS') {
     if (pathname === '/v1/sync/push') {
       return pushPreflight(request, env, requestId);
+    }
+    if (
+      pathname === '/v1/sync/pull' ||
+      pathname === '/v1/sync/bootstrap'
+    ) {
+      return readPreflight(request, env, requestId);
     }
     return preflight(request, env, requestId);
   }
@@ -111,6 +161,36 @@ async function route(
       requestId
     );
     response.headers.set('Allow', 'POST, OPTIONS');
+    return response;
+  }
+
+  if (pathname === '/v1/sync/pull') {
+    if (request.method === 'GET') {
+      const vault = await requireVault(request, env);
+      return pullChanges(request, env, vault, requestId);
+    }
+    const response = apiError(
+      'METHOD_NOT_ALLOWED',
+      405,
+      false,
+      requestId
+    );
+    response.headers.set('Allow', 'GET, OPTIONS');
+    return response;
+  }
+
+  if (pathname === '/v1/sync/bootstrap') {
+    if (request.method === 'GET') {
+      const vault = await requireVault(request, env);
+      return bootstrapSnapshot(request, env, vault, requestId);
+    }
+    const response = apiError(
+      'METHOD_NOT_ALLOWED',
+      405,
+      false,
+      requestId
+    );
+    response.headers.set('Allow', 'GET, OPTIONS');
     return response;
   }
 

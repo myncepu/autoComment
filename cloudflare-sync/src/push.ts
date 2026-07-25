@@ -47,6 +47,7 @@ const MISSING_RECEIPT_DIAGNOSTIC_RESERVE = 1;
 const RECEIPT_READ_QUERY_COST = 1;
 const COMMENT_FIXED_BATCH_STATEMENTS = 4;
 const COMMENT_DELETE_BATCH_STATEMENTS = 6;
+const SETTING_BATCH_STATEMENTS = 4;
 
 const COMMENT_KEYS = [
   'id',
@@ -148,17 +149,26 @@ export interface CommentDeleteMutation {
   createdAt: number;
 }
 
-interface UnsupportedMutation {
+export interface SettingMutation {
   mutationId: string;
   entityType: 'setting';
+  entityId: string;
+  operation: 'upsert';
+  payload: {
+    value: unknown;
+  };
+  createdAt: number;
 }
 
 type IncomingMutation =
   | CommentMutation
   | CommentDeleteMutation
-  | UnsupportedMutation;
+  | SettingMutation;
 
-type ApplicableMutation = CommentMutation | CommentDeleteMutation;
+type ApplicableMutation =
+  | CommentMutation
+  | CommentDeleteMutation
+  | SettingMutation;
 
 export type MutationReceipt =
   | {
@@ -580,9 +590,31 @@ function parseMutation(input: unknown): IncomingMutation {
   );
 
   if (mutation.entityType === 'setting') {
+    if (mutation.operation !== 'upsert') {
+      invalid('INVALID_MUTATION_OPERATION');
+    }
+    const payload = exactObject(
+      mutation.payload,
+      ['value'],
+      'INVALID_MUTATION_PAYLOAD'
+    );
+    if (!Object.hasOwn(payload, 'value')) {
+      invalid('INVALID_MUTATION_PAYLOAD');
+    }
     return {
       mutationId,
-      entityType: 'setting'
+      entityType: 'setting',
+      entityId,
+      operation: 'upsert',
+      payload: {
+        value: payload.value
+      },
+      createdAt: integerValue(
+        mutation.createdAt,
+        0,
+        Number.MAX_SAFE_INTEGER,
+        'INVALID_MUTATION_TIMESTAMP'
+      )
     };
   }
   if (mutation.entityType === 'comment_delete') {
@@ -655,8 +687,11 @@ function sourceRank(source: CommentRecord['source']): number {
 function mutationBatchStatementCount(
   mutation: ApplicableMutation
 ): number {
-  return mutation.entityType === 'comment'
-    ? COMMENT_FIXED_BATCH_STATEMENTS + mutation.payload.anchors.length
+  if (mutation.entityType === 'comment') {
+    return COMMENT_FIXED_BATCH_STATEMENTS + mutation.payload.anchors.length;
+  }
+  return mutation.entityType === 'setting'
+    ? SETTING_BATCH_STATEMENTS
     : COMMENT_DELETE_BATCH_STATEMENTS;
 }
 
@@ -1301,6 +1336,194 @@ export async function applyCommentDeleteMutation(
   return mutationReceipt(mutation.mutationId, stored, inserted);
 }
 
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') {
+    const serialized = JSON.stringify(value);
+    if (serialized === undefined) fail('INTERNAL_ERROR', 500, true);
+    return serialized;
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(',')}]`;
+  }
+  const object = value as Record<string, unknown>;
+  return `{${Object.keys(object)
+    .sort()
+    .map(
+      (key) =>
+        `${JSON.stringify(key)}:${canonicalJson(object[key])}`
+    )
+    .join(',')}}`;
+}
+
+function upsertSettingStatement(
+  env: Env,
+  vaultId: string,
+  mutation: SettingMutation,
+  now: number
+): D1PreparedStatement {
+  return env.DB.prepare(
+    `INSERT INTO synced_settings (
+       vault_id, setting_key, value_json, accepted_mutation_id,
+       server_updated_at, server_seq
+     )
+     SELECT active_vault.vault_id, ?, ?, ?, ?, NULL
+     FROM sync_vaults AS active_vault
+     WHERE active_vault.vault_id = ?
+       AND active_vault.deleted_at IS NULL
+       AND NOT EXISTS (
+         SELECT 1 FROM sync_mutations
+         WHERE vault_id = active_vault.vault_id AND mutation_id = ?
+       )
+     ON CONFLICT(vault_id, setting_key) DO UPDATE SET
+       value_json = excluded.value_json,
+       accepted_mutation_id = excluded.accepted_mutation_id,
+       server_updated_at = excluded.server_updated_at,
+       server_seq = NULL
+     WHERE NOT EXISTS (
+       SELECT 1 FROM sync_mutations
+       WHERE vault_id = excluded.vault_id AND mutation_id = ?
+     )`
+  ).bind(
+    mutation.entityId,
+    canonicalJson(mutation.payload.value),
+    mutation.mutationId,
+    now,
+    vaultId,
+    mutation.mutationId,
+    mutation.mutationId
+  );
+}
+
+function insertSettingChangeStatement(
+  env: Env,
+  vaultId: string,
+  mutation: SettingMutation,
+  now: number
+): D1PreparedStatement {
+  return env.DB.prepare(
+    `INSERT INTO sync_changes (
+       vault_id, mutation_id, entity_type, entity_id, operation, created_at
+     )
+     SELECT active_vault.vault_id, ?, 'setting', ?, 'upsert', ?
+     FROM sync_vaults AS active_vault
+     JOIN synced_settings AS accepted_setting
+       ON accepted_setting.vault_id = active_vault.vault_id
+      AND accepted_setting.setting_key = ?
+      AND accepted_setting.accepted_mutation_id = ?
+     WHERE active_vault.vault_id = ?
+       AND active_vault.deleted_at IS NULL
+       AND NOT EXISTS (
+         SELECT 1 FROM sync_mutations
+         WHERE vault_id = active_vault.vault_id AND mutation_id = ?
+       )`
+  ).bind(
+    mutation.mutationId,
+    mutation.entityId,
+    now,
+    mutation.entityId,
+    mutation.mutationId,
+    vaultId,
+    mutation.mutationId
+  );
+}
+
+function updateSettingSequenceStatement(
+  env: Env,
+  vaultId: string,
+  mutation: SettingMutation
+): D1PreparedStatement {
+  return env.DB.prepare(
+    `UPDATE synced_settings
+     SET server_seq = (
+       SELECT accepted_change.server_seq
+       FROM sync_changes AS accepted_change
+       WHERE accepted_change.vault_id = ?
+         AND accepted_change.mutation_id = ?
+     )
+     WHERE vault_id = ? AND setting_key = ?
+       AND accepted_mutation_id = ?
+       AND EXISTS (
+         SELECT 1 FROM sync_vaults AS active_vault
+         WHERE active_vault.vault_id = ?
+           AND active_vault.deleted_at IS NULL
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM sync_mutations
+         WHERE vault_id = ? AND mutation_id = ?
+       )`
+  ).bind(
+    vaultId,
+    mutation.mutationId,
+    vaultId,
+    mutation.entityId,
+    mutation.mutationId,
+    vaultId,
+    vaultId,
+    mutation.mutationId
+  );
+}
+
+function insertSettingReceiptStatement(
+  env: Env,
+  vaultId: string,
+  mutation: SettingMutation,
+  now: number
+): D1PreparedStatement {
+  return env.DB.prepare(
+    `INSERT INTO sync_mutations (
+       vault_id, mutation_id, entity_type, entity_id, result_status,
+       server_seq, processed_at
+     )
+     SELECT active_vault.vault_id, ?, 'setting', ?, 'applied',
+       accepted_change.server_seq, ?
+     FROM sync_vaults AS active_vault
+     JOIN sync_changes AS accepted_change
+       ON accepted_change.vault_id = active_vault.vault_id
+      AND accepted_change.mutation_id = ?
+     WHERE active_vault.vault_id = ?
+       AND active_vault.deleted_at IS NULL
+       AND NOT EXISTS (
+         SELECT 1 FROM sync_mutations
+         WHERE vault_id = active_vault.vault_id AND mutation_id = ?
+       )`
+  ).bind(
+    mutation.mutationId,
+    mutation.entityId,
+    now,
+    mutation.mutationId,
+    vaultId,
+    mutation.mutationId
+  );
+}
+
+export async function applySettingMutation(
+  env: Env,
+  vaultId: string,
+  mutation: SettingMutation,
+  now: number
+): Promise<MutationReceipt> {
+  const statements = [
+    upsertSettingStatement(env, vaultId, mutation, now),
+    insertSettingChangeStatement(env, vaultId, mutation, now),
+    updateSettingSequenceStatement(env, vaultId, mutation)
+  ];
+  const receiptIndex = statements.length;
+  statements.push(
+    insertSettingReceiptStatement(env, vaultId, mutation, now)
+  );
+  assertBatchStatementCount(mutation, statements);
+
+  const batch = await env.DB.batch(statements);
+  const inserted = batch[receiptIndex]?.meta.changes === 1;
+  const stored = await readStoredReceipt(
+    env,
+    vaultId,
+    mutation.mutationId
+  );
+  if (!stored) return failForMissingReceipt(env, vaultId);
+  return mutationReceipt(mutation.mutationId, stored, inserted);
+}
+
 function rejectedMutationId(input: unknown): string {
   if (
     isJsonObject(input) &&
@@ -1314,16 +1537,6 @@ function rejectedMutationId(input: unknown): string {
 function prepareMutation(input: unknown): PreparedMutation {
   try {
     const mutation = parseMutation(input);
-    if (mutation.entityType === 'setting') {
-      return {
-        kind: 'rejected',
-        receipt: {
-          mutationId: mutation.mutationId,
-          status: 'rejected',
-          errorCode: 'UNSUPPORTED_ENTITY_TYPE'
-        }
-      };
-    }
     return {
       kind: 'apply',
       mutation
@@ -1429,6 +1642,15 @@ export async function pushMutations(
     } else if (item.mutation.entityType === 'comment_delete') {
       results.push(
         await applyCommentDeleteMutation(
+          env,
+          vault.vaultId,
+          item.mutation,
+          Date.now()
+        )
+      );
+    } else if (item.mutation.entityType === 'setting') {
+      results.push(
+        await applySettingMutation(
           env,
           vault.vaultId,
           item.mutation,
