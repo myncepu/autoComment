@@ -89,6 +89,47 @@ test('rejects recursively nested sensitive mutation fields', () => {
   );
 });
 
+test('rejects protected aliases nested in otherwise valid comment payloads', () => {
+  for (const field of [
+    'auto_fill_user_password',
+    'api_key',
+    'cookieValue',
+    'page_credentials',
+    'recovery_checkpoint',
+    'batch_url_queue',
+    'cloud_sync_secret'
+  ]) {
+    assert.throws(
+      () => normalizeSyncMutation({
+        mutationId: `mutation-${field}`,
+        entityType: 'comment',
+        entityId: 'batch-a:1',
+        operation: 'upsert',
+        payload: {
+          comment: { id: 'batch-a:1', [field]: 'must-not-leave' },
+          anchors: []
+        },
+        createdAt: 1721000000000
+      }),
+      /SENSITIVE_FIELD_NOT_SYNCABLE/
+    );
+  }
+});
+
+test('rejects payload properties outside the supported mutation variant', () => {
+  assert.throws(
+    () => normalizeSyncMutation({
+      mutationId: 'setting-extra-payload',
+      entityType: 'setting',
+      entityId: 'batch_concurrency',
+      operation: 'upsert',
+      payload: { value: 3, wrapper: {} },
+      createdAt: 1721000000000
+    }),
+    /UNKNOWN_MUTATION_PAYLOAD_KEY/
+  );
+});
+
 test('normalizes only complete supported mutation variants', () => {
   const normalized = normalizeSyncMutation({
     mutationId: 'delete-a',
