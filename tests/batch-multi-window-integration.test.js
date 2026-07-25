@@ -8,15 +8,19 @@ const read = (file) => fs.readFileSync(path.resolve(__dirname, '..', file), 'utf
 
 function createBatchHarness(overrides = {}) {
   const elements = new Map();
+  const alerts = [];
+  const runtimeListeners = [];
   const makeElement = () => {
     const classes = new Set();
     const attributes = new Map();
+    const listeners = new Map();
     return {
       checked: false,
       value: '',
       textContent: '',
       innerHTML: '',
       disabled: false,
+      hidden: false,
       dataset: {},
       style: {},
       classList: {
@@ -35,32 +39,57 @@ function createBatchHarness(overrides = {}) {
       setAttribute(name, value) { attributes.set(name, String(value)); },
       removeAttribute(name) { attributes.delete(name); },
       getAttribute(name) { return attributes.get(name) || null; },
-      addEventListener() {},
+      addEventListener(type, listener) { listeners.set(type, listener); },
+      click() { listeners.get('click')?.({ target: this }); },
       appendChild() {},
       removeChild() {},
       querySelectorAll() { return []; }
     };
   };
   const intervalCalls = [];
+  const sendRuntimeMessage = overrides.runtimeSendMessage || ((message) => Promise.resolve(
+    message.type === 'BATCH_RECOVER_SUBMIT_CONTEXT'
+      ? { ok: true, sealed: true, recovered: false }
+      : message.type === 'BATCH_SESSION_START'
+        ? { ok: true, checkpoint: { status: 'running' } }
+        : { ok: true, checkpoint: null }
+  ));
   const chrome = {
     runtime: {
       lastError: null,
-      sendMessage: overrides.runtimeSendMessage || ((message) => Promise.resolve(
-        message.type === 'BATCH_RECOVER_SUBMIT_CONTEXT'
-          ? { ok: true, sealed: true, recovered: false }
-          : { ok: true }
-      ))
+      sendMessage(message, callback) {
+        const response = Promise.resolve().then(() => sendRuntimeMessage(message));
+        if (callback) response.then(callback);
+        return response;
+      },
+      onMessage: {
+        addListener(listener) {
+          runtimeListeners.push(listener);
+        }
+      }
     },
     storage: {
       local: {
         set(_values, callback) { callback?.(); },
         remove(_keys, callback) { callback?.(); }
       },
-      sync: {}
+      sync: {
+        get(_keys, callback) {
+          const result = {};
+          callback?.(result);
+          return Promise.resolve(result);
+        },
+        set(_values, callback) {
+          callback?.();
+          return Promise.resolve();
+        }
+      }
     },
     tabs: {
-      sendMessage() { return Promise.resolve({ ok: true }); }
-    }
+      sendMessage() { return Promise.resolve({ ok: true }); },
+      create() { return Promise.resolve({ id: 99 }); }
+    },
+    windows: {}
   };
   class FakeScheduler {
     constructor({ totalCount, concurrency, processedIndices = [] }) {
@@ -91,6 +120,14 @@ function createBatchHarness(overrides = {}) {
     chrome,
     BatchScheduler: overrides.BatchScheduler || FakeScheduler,
     BatchWindowManager: overrides.BatchWindowManager || FakeWindowManager,
+    normalizeBatchConcurrency:
+      overrides.normalizeBatchConcurrency ||
+      ((value, fallback = 3) => {
+        const parsed = Number.parseInt(value, 10);
+        return Number.isInteger(parsed) && parsed >= 1 && parsed <= 10
+          ? parsed
+          : fallback;
+      }),
     isDurableBatchConfirmation: overrides.isDurableBatchConfirmation || ((message) => {
       const result = message?.result ?? 'success';
       return result !== 'success' || ['saved', 'queued', 'not_applicable']
@@ -117,7 +154,7 @@ function createBatchHarness(overrides = {}) {
       warn() {},
       error() {}
     },
-    alert() {},
+    alert(message) { alerts.push(String(message)); },
     setInterval(callback, delay) {
       intervalCalls.push({ callback, delay });
       return intervalCalls.length;
@@ -143,6 +180,11 @@ function createBatchHarness(overrides = {}) {
         stopBatch,
         resumeBatch,
         clearBatch,
+        init,
+        hydrateBatchFromCheckpoint:
+          typeof hydrateBatchFromCheckpoint === 'undefined'
+            ? undefined
+            : hydrateBatchFromCheckpoint,
         checkTimeouts,
         resetFile,
         parseCSV,
@@ -177,6 +219,12 @@ function createBatchHarness(overrides = {}) {
           if ('pendingCount' in next) pendingCount = next.pendingCount;
           if ('timeoutSeconds' in next) timeoutSeconds = next.timeoutSeconds;
           if ('timeoutCheckTimer' in next) timeoutCheckTimer = next.timeoutCheckTimer;
+          if ('batchSourceFileName' in next && typeof batchSourceFileName !== 'undefined') {
+            batchSourceFileName = next.batchSourceFileName;
+          }
+          if ('batchSourceHeaders' in next && typeof batchSourceHeaders !== 'undefined') {
+            batchSourceHeaders = next.batchSourceHeaders;
+          }
         },
         getState() {
           return {
@@ -189,7 +237,15 @@ function createBatchHarness(overrides = {}) {
             isTerminated,
             successCount,
             failCount,
-            pendingCount
+            pendingCount,
+            batchSourceFileName:
+              typeof batchSourceFileName === 'undefined'
+                ? ''
+                : batchSourceFileName,
+            batchSourceHeaders:
+              typeof batchSourceHeaders === 'undefined'
+                ? []
+                : batchSourceHeaders
           };
         }
       };
@@ -199,6 +255,8 @@ function createBatchHarness(overrides = {}) {
     api: context.__batchTest,
     chrome,
     elements,
+    alerts,
+    runtimeListeners,
     intervalCalls,
     FakeScheduler,
     FakeWindowManager
@@ -218,6 +276,14 @@ test('batch UI exposes the supported persisted concurrency control', () => {
   assert.match(html, /value="3"/);
   assert.match(script, /batch_concurrency/);
   assert.match(script, /normalizeBatchConcurrency/);
+});
+
+test('batch UI exposes paused recovery and wakefulness status', () => {
+  const html = read('batch.html');
+
+  assert.match(html, /id="recoveryBanner"/);
+  assert.match(html, /id="recoveryMessage"/);
+  assert.match(html, /id="wakeStatus"/);
 });
 
 test('background confirmations preserve batch identity', () => {
@@ -273,7 +339,7 @@ test('running batch rejects preview replacement and removal and records from its
   assert.equal(elements.get('fileRemove').getAttribute('aria-disabled'), 'true');
 });
 
-test('terminated batch retains its start snapshot through rejected replacement and Resume', async () => {
+test('terminated batch retains its start snapshot and cannot resume', async () => {
   const { api, elements, FakeWindowManager } = createBatchHarness();
   const oldItem = {
     originalIndex: 0,
@@ -289,16 +355,16 @@ test('terminated batch retains its start snapshot through rejected replacement a
 
   await api.startBatch();
   await api.stopBatch();
-  assert.equal(elements.get('startBtn').disabled, false);
+  assert.equal(elements.get('startBtn').disabled, true);
+  assert.equal(elements.get('startBtn').textContent, '■ 已终止');
   api.parseCSV(csvBuffer('https://replacement.test'), 'replacement.csv');
   api.resetFile();
   await api.resumeBatch();
-  api.recordTaskResult(0, 'success', 'saved', null, 0);
 
   const state = api.getState();
-  assert.equal(state.status, 'running');
+  assert.equal(state.status, 'terminated');
   assert.equal(state.parsedUrls[0], oldItem);
-  assert.equal(state.localResults[0].url, 'https://resume.test');
+  assert.equal(state.localResults.length, 0);
 });
 
 test('Start claims synchronously and ignores a second Start while config is pending', async () => {
@@ -330,6 +396,283 @@ test('Start claims synchronously and ignores a second Start while config is pend
 
   assert.equal(api.getState().status, 'running');
   assert.equal(FakeScheduler.instances.length, 1);
+});
+
+test('Start durably creates the complete runtime session before scheduling', async () => {
+  const runtimeMessages = [];
+  let resolveRuntimeStart;
+  const runtimeStart = new Promise((resolve) => {
+    resolveRuntimeStart = resolve;
+  });
+  const { api, FakeScheduler, FakeWindowManager } = createBatchHarness({
+    runtimeSendMessage(message) {
+      runtimeMessages.push(JSON.parse(JSON.stringify(message)));
+      if (message.type === 'BATCH_SESSION_START') return runtimeStart;
+      return Promise.resolve({ ok: true });
+    }
+  });
+  const items = [
+    {
+      originalIndex: 0,
+      url: 'https://first.test',
+      sourceDomain: 'first.test',
+      originalRow: ['1', 'https://first.test']
+    },
+    {
+      originalIndex: 1,
+      url: 'https://second.test',
+      sourceDomain: 'second.test',
+      originalRow: ['2', 'https://second.test']
+    }
+  ];
+  api.setState({
+    parsedUrls: items,
+    batchSourceFileName: 'source.csv',
+    batchSourceHeaders: ['id', 'URL'],
+    status: 'idle',
+    windowManager: new FakeWindowManager()
+  });
+
+  const starting = api.startBatch();
+  for (let attempt = 0; attempt < 10 && runtimeMessages.length === 0; attempt += 1) {
+    await Promise.resolve();
+  }
+
+  assert.equal(runtimeMessages[0].type, 'BATCH_SESSION_START');
+  assert.equal(runtimeMessages[0].source.fileName, 'source.csv');
+  assert.deepEqual(runtimeMessages[0].source.headers, ['id', 'URL']);
+  assert.deepEqual(runtimeMessages[0].source.rows, [
+    ['1', 'https://first.test'],
+    ['2', 'https://second.test']
+  ]);
+  assert.equal(runtimeMessages[0].source.parsedUrls.length, 2);
+  assert.equal(runtimeMessages[0].settings.timeoutSeconds, 60);
+  assert.equal(runtimeMessages[0].settings.concurrency, 3);
+  assert.equal(FakeScheduler.instances.length, 0);
+
+  resolveRuntimeStart({ ok: true, checkpoint: { status: 'running' } });
+  await starting;
+  assert.equal(FakeScheduler.instances.length, 1);
+  assert.equal(api.getState().status, 'running');
+});
+
+test('a keep-awake failure preserves the uploaded dataset and stays idle', async () => {
+  const { api, alerts, FakeScheduler, FakeWindowManager } = createBatchHarness({
+    runtimeSendMessage(message) {
+      if (message.type === 'BATCH_SESSION_START') {
+        return Promise.resolve({
+          ok: false,
+          error: 'power_request_failed'
+        });
+      }
+      return Promise.resolve({ ok: true });
+    }
+  });
+  const item = {
+    originalIndex: 0,
+    url: 'https://power.test',
+    sourceDomain: 'power.test',
+    originalRow: ['https://power.test']
+  };
+  api.setState({
+    parsedUrls: [item],
+    batchSourceFileName: 'power.csv',
+    batchSourceHeaders: ['URL'],
+    status: 'idle',
+    windowManager: new FakeWindowManager()
+  });
+
+  await api.startBatch();
+
+  const state = api.getState();
+  assert.equal(state.status, 'idle');
+  assert.equal(state.parsedUrls[0], item);
+  assert.equal(state.batchSourceFileName, 'power.csv');
+  assert.equal(FakeScheduler.instances.length, 0);
+  assert.match(alerts[0], /无法阻止系统休眠/);
+});
+
+test('worker activity is checkpointed before the content task is sent', async () => {
+  const order = [];
+  let activity;
+  const { api, chrome } = createBatchHarness({
+    runtimeSendMessage(message) {
+      if (message.type === 'BATCH_TASK_ACTIVE') {
+        order.push(['runtime', JSON.parse(JSON.stringify(message))]);
+      }
+      return Promise.resolve({ ok: true });
+    }
+  });
+  chrome.tabs.sendMessage = async (_tabId, message) => {
+    order.push(['tab', message.type]);
+    return { ok: true };
+  };
+  const manager = {
+    async create({ batchId, urlIndex, url }) {
+      activity = {
+        batchId,
+        urlIndex,
+        url,
+        tabId: 41,
+        windowId: 51,
+        startTime: 1000
+      };
+      return activity;
+    },
+    getByIndex() {
+      return activity;
+    },
+    async closeByIndex() {}
+  };
+  api.setState({
+    batchId: 'batch-active',
+    parsedUrls: [{
+      originalIndex: 0,
+      url: 'https://active.test',
+      sourceDomain: 'active.test',
+      originalRow: ['https://active.test']
+    }],
+    status: 'running',
+    scheduler: {
+      get activeIndices() { return [0]; },
+      takeAvailable() { return []; },
+      settle() {}
+    },
+    windowManager: manager,
+    openingActivities: new Map(),
+    isTerminated: false,
+    localResults: [],
+    totalCount: 2,
+    pendingCount: 2
+  });
+
+  await api.openWorkerWindow(0);
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.deepEqual(order[0], ['runtime', {
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-active',
+    urlIndex: 0,
+    tabId: 41,
+    windowId: 51,
+    startedAt: 1000
+  }]);
+  assert.deepEqual(order[1], ['tab', 'PING']);
+});
+
+test('a paused checkpoint hydrates the complete page and resumes only on click', async () => {
+  const runtimeMessages = [];
+  const items = [
+    {
+      originalIndex: 0,
+      url: 'https://done.test',
+      sourceDomain: 'done.test',
+      originalRow: ['1', 'https://done.test']
+    },
+    {
+      originalIndex: 1,
+      url: 'https://queued.test',
+      sourceDomain: 'queued.test',
+      originalRow: ['2', 'https://queued.test']
+    }
+  ];
+  const checkpoint = {
+    version: 1,
+    batchId: 'batch-recovered',
+    status: 'paused_recovery',
+    createdAt: 1000,
+    updatedAt: 2000,
+    source: {
+      fileName: 'recovered.csv',
+      headers: ['id', 'URL'],
+      rows: items.map((item) => item.originalRow),
+      parsedUrls: items
+    },
+    settings: {
+      autoOpenPanel: true,
+      autoGenerate: true,
+      autoSubmit: true,
+      timeoutSeconds: 90,
+      concurrency: 2
+    },
+    cursor: { nextIndex: 1 },
+    tasks: {
+      0: {
+        urlIndex: 0,
+        state: 'terminal',
+        phase: null,
+        tabId: null,
+        windowId: null,
+        startedAt: null,
+        updatedAt: 1500
+      },
+      1: {
+        urlIndex: 1,
+        state: 'queued',
+        phase: null,
+        tabId: null,
+        windowId: null,
+        startedAt: null,
+        updatedAt: 1500
+      }
+    },
+    results: [{
+      originalIndex: 0,
+      url: 'https://done.test',
+      sourceDomain: 'done.test',
+      result: 'success',
+      aiContent: 'done',
+      errorMessage: null,
+      timestamp: 1500,
+      elapsed: 1,
+      originalRow: ['1', 'https://done.test']
+    }]
+  };
+  const { api, elements, FakeScheduler } = createBatchHarness({
+    runtimeSendMessage(message) {
+      runtimeMessages.push(JSON.parse(JSON.stringify(message)));
+      if (message.type === 'BATCH_SESSION_LOAD_FOR_PAGE') {
+        return Promise.resolve({ ok: true, checkpoint });
+      }
+      if (message.type === 'BATCH_SESSION_RESUME') {
+        return Promise.resolve({
+          ok: true,
+          checkpoint: { ...checkpoint, status: 'running' }
+        });
+      }
+      return Promise.resolve({ ok: true });
+    }
+  });
+
+  await api.init();
+
+  let state = api.getState();
+  assert.equal(state.status, 'paused_recovery');
+  assert.equal(state.batchId, 'batch-recovered');
+  assert.equal(state.parsedUrls.length, 2);
+  assert.equal(state.localResults.length, 1);
+  assert.equal(state.successCount, 1);
+  assert.equal(state.pendingCount, 1);
+  assert.equal(state.batchSourceFileName, 'recovered.csv');
+  assert.deepEqual(Array.from(state.batchSourceHeaders), ['id', 'URL']);
+  assert.equal(elements.get('statusBadge').textContent, '已暂停');
+  assert.equal(elements.get('startBtn').textContent, '▶ 继续处理');
+  assert.equal(elements.get('recoveryBanner').hidden, false);
+  assert.equal(elements.get('wakeStatus').textContent, '系统保活已暂停');
+  assert.equal(FakeScheduler.instances.length, 1);
+  assert.equal(FakeScheduler.instances[0].started, undefined);
+
+  await api.resumeBatch();
+
+  state = api.getState();
+  assert.equal(state.status, 'running');
+  assert.equal(FakeScheduler.instances.at(-1).started, true);
+  const resumeIndex = runtimeMessages.findIndex(
+    (message) => message.type === 'BATCH_SESSION_RESUME'
+  );
+  assert.ok(resumeIndex >= 0);
+  assert.equal(elements.get('wakeStatus').textContent, '系统保持唤醒中');
 });
 
 test('Clear during deferred Start invalidates the old continuation', async () => {
@@ -444,9 +787,7 @@ test('opening reservations time out and release capacity before window creation 
   assert.equal(intervalCalls.length, 1);
 
   intervalCalls[0].callback();
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
+  await new Promise(setImmediate);
 
   const state = api.getState();
   assert.equal(state.localResults.length, 1);
@@ -507,6 +848,7 @@ test('deferred timeout scan cannot continue into a replacement lifecycle', async
   });
 
   const scanning = api.checkTimeouts();
+  await new Promise(setImmediate);
 
   let replacementCloseCount = 0;
   let replacementSettleCount = 0;
@@ -556,7 +898,9 @@ test('timeout seals and recovers a worker context before closing its window', as
   let recoveryMessage;
   const { api } = createBatchHarness({
     runtimeSendMessage(message) {
-      recoveryMessage = JSON.parse(JSON.stringify(message));
+      if (message.type === 'BATCH_RECOVER_SUBMIT_CONTEXT') {
+        recoveryMessage = JSON.parse(JSON.stringify(message));
+      }
       return Promise.resolve({ ok: true, sealed: true, recovered: true });
     }
   });
@@ -883,6 +1227,7 @@ test('deferred finalizer cannot mutate a replacement same-index lifecycle', asyn
     null,
     'old task failed'
   );
+  await new Promise(setImmediate);
   assert.equal(oldCloseCount, 1);
 
   let replacementSettleCount = 0;
@@ -1137,7 +1482,9 @@ test('Stop recovers an unresolved submit context before closing its worker', asy
   let settleCount = 0;
   const { api } = createBatchHarness({
     runtimeSendMessage(message) {
-      recoveryMessage = JSON.parse(JSON.stringify(message));
+      if (message.type === 'BATCH_RECOVER_SUBMIT_CONTEXT') {
+        recoveryMessage = JSON.parse(JSON.stringify(message));
+      }
       return Promise.resolve({ ok: true, sealed: true, recovered: true });
     }
   });
@@ -1279,7 +1626,7 @@ test('deferred completion cannot stop or clear a replacement lifecycle', async (
   assert.equal(stopButton.style.display, 'inline-flex');
   assert.equal(completionDisabledStopImmediately, true);
   assert.equal(completionHidStopImmediately, true);
-  assert.equal(statusAfterStopAttempt, 'completed');
+  assert.equal(statusAfterStopAttempt, 'completing');
   assert.equal(oldStopCount, 1);
   assert.equal(oldCloseAllCount, 1);
 });

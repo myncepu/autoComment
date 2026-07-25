@@ -246,6 +246,27 @@ test('terminal session states cannot be restarted', () => {
   }
 });
 
+test('a queued task can terminate locally before a worker window opens', () => {
+  const initial = createCheckpoint(1);
+  const started = applyBatchRuntimeEvent(initial, {
+    type: 'session_started',
+    batchId: 'batch-1'
+  }, 1100);
+  const terminal = applyBatchRuntimeEvent(started.checkpoint, {
+    type: 'task_terminal',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    result: {
+      result: 'blocked_illegal',
+      errorMessage: 'blocked before opening'
+    }
+  }, 1200);
+
+  assert.equal(terminal.ok, true);
+  assert.equal(terminal.checkpoint.tasks['0'].state, 'terminal');
+  assert.equal(terminal.checkpoint.results[0].result, 'blocked_illegal');
+});
+
 test('normalizes active and submitting work into one safe paused checkpoint', () => {
   let checkpoint = createCheckpoint(4);
   checkpoint = applyBatchRuntimeEvent(checkpoint, {

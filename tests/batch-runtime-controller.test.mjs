@@ -189,6 +189,34 @@ test('requests system wakefulness only while a batch is running', async () => {
   ]);
 });
 
+test('a reloaded service worker reasserts wakefulness on the next running task update', async () => {
+  const { controller, chrome, powerCalls } = createHarness();
+  await controller.handleMessage(startMessage());
+
+  const reloadedController = createBatchRuntimeController({
+    storageArea: chrome.storage.local,
+    power: chrome.power,
+    tabs: chrome.tabs,
+    windows: chrome.windows,
+    runtime: chrome.runtime,
+    now: () => 5000
+  });
+  const response = await reloadedController.handleMessage({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    tabId: 1,
+    windowId: 11,
+    startedAt: 4900
+  });
+
+  assert.equal(response.ok, true);
+  assert.deepEqual(powerCalls, [
+    ['request', 'system'],
+    ['request', 'system']
+  ]);
+});
+
 test('a power acquisition failure leaves a new checkpoint safely paused', async () => {
   const { controller, data, powerCalls } = createHarness({
     failPower: true

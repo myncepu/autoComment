@@ -19,10 +19,12 @@ const BATCH_CONCURRENCY_KEY = 'batch_concurrency';
 // ==================== 状态 ====================
 let batchId = null;
 let parsedUrls = [];                // [{originalIndex, url}]
+let batchSourceFileName = '';
+let batchSourceHeaders = [];
 let batchItems = null;              // immutable snapshot owned by the current lifecycle
 let lifecycleToken = null;
 let lifecycleConcurrency = null;
-let status = 'idle';                // idle | starting | running | completed | terminated
+let status = 'idle';                // idle | starting | running | completing | paused_recovery | completed | terminated
 let scheduler = null;
 let windowManager = null;
 let openingActivities = new Map();
@@ -100,6 +102,9 @@ const openHistoryBtn = document.getElementById('openHistoryBtn');
 const historyRetentionBanner = document.getElementById('historyRetentionBanner');
 const historyRetentionText = document.getElementById('historyRetentionText');
 const historyRetentionLink = document.getElementById('historyRetentionLink');
+const recoveryBanner = document.getElementById('recoveryBanner');
+const recoveryMessage = document.getElementById('recoveryMessage');
+const wakeStatus = document.getElementById('wakeStatus');
 
 // 批量任务设置勾选框
 const batchAutoOpenPanel = document.getElementById('batchAutoOpenPanel');
@@ -159,10 +164,37 @@ async function init() {
   await loadTimeoutSetting();
   await loadBatchCheckboxSettings(); // 全局记忆的勾选框设置
   bindEvents();
+  await loadRuntimeCheckpoint();
   loadHistoryRetentionStatus();
   retryPendingHistoryWrites();
 
   updateUI();
+}
+
+async function sendBatchRuntimeMessage(type, payload = {}) {
+  const response = await chrome.runtime.sendMessage({
+    type,
+    ...payload
+  });
+  if (!response?.ok) {
+    const error = new Error(response?.error || '批次状态保存失败');
+    error.code = response?.error || 'batch_runtime_failed';
+    throw error;
+  }
+  return response;
+}
+
+async function loadRuntimeCheckpoint() {
+  try {
+    const response = await sendBatchRuntimeMessage(
+      'BATCH_SESSION_LOAD_FOR_PAGE'
+    );
+    if (response.checkpoint) {
+      hydrateBatchFromCheckpoint(response.checkpoint);
+    }
+  } catch (error) {
+    console.warn('[batch] 批次恢复失败:', error?.code || 'unknown');
+  }
 }
 
 function loadHistoryRetentionStatus() {
@@ -317,7 +349,7 @@ function bindEvents() {
 
   // 操作按钮
   startBtn.addEventListener('click', () => {
-    if (status === 'terminated') {
+    if (status === 'paused_recovery') {
       resumeBatch();
     } else {
       startBatch();
@@ -489,6 +521,8 @@ function parseCSV(raw, fileNameParam) {
     return;
   }
 
+  batchSourceFileName = fileNameParam || '已上传文件';
+  batchSourceHeaders = [...header];
   let validCount = 0;
   let invalidCount = 0;
   let illegalCount = 0;
@@ -571,6 +605,127 @@ function parseCSV(raw, fileNameParam) {
   startBtn.disabled = validCount === 0;
 }
 
+function renderHydratedBatchPreview(items) {
+  urlPreviewBody.innerHTML = '';
+  const seenUrls = new Set();
+  let duplicateCount = 0;
+
+  for (const item of items) {
+    const tr = document.createElement('tr');
+    tr.dataset.url = item.url;
+    if (item.illegalCheck?.blocked) {
+      tr.classList.add('illegal');
+      tr.title = getIllegalSiteBlockMessage(item.illegalCheck);
+    }
+    if (seenUrls.has(item.url)) {
+      tr.classList.add('duplicate');
+      duplicateCount += 1;
+    }
+    seenUrls.add(item.url);
+    tr.innerHTML = `<td>${item.originalIndex + 1}</td><td>${escapeHtml(item.sourceDomain || item.url)}</td><td>${escapeHtml(item.url)}</td>`;
+    urlPreviewBody.appendChild(tr);
+  }
+
+  urlPreview.classList.add('visible');
+  fileInfo.classList.add('visible');
+  uploadZone.classList.add('has-file');
+  fileName.textContent = batchSourceFileName || '已恢复批次';
+  fileCount.textContent = `共 ${items.length} 条 URL`;
+  document.getElementById('duplicateCount').textContent = duplicateCount > 0
+    ? `⚠️ ${duplicateCount} 条重复`
+    : '';
+}
+
+function recalculateCountsFromResults() {
+  successCount = 0;
+  failCount = 0;
+  skippedCount = 0;
+  noCommentBoxCount = 0;
+  manualRequiredCount = 0;
+  blockedIllegalCount = 0;
+  skippedIndices.clear();
+
+  for (const entry of localResults) {
+    if (entry.result === 'success') {
+      successCount += 1;
+    } else if (entry.result === 'skipped') {
+      skippedCount += 1;
+      skippedIndices.add(entry.originalIndex);
+    } else if (entry.result === 'no_comment_box') {
+      noCommentBoxCount += 1;
+    } else if (entry.result === 'manual_required') {
+      manualRequiredCount += 1;
+    } else if (entry.result === 'blocked_illegal') {
+      blockedIllegalCount += 1;
+    } else {
+      failCount += 1;
+    }
+  }
+  pendingCount = Math.max(0, totalCount - getProcessedCount());
+}
+
+function hydrateBatchFromCheckpoint(checkpoint) {
+  if (
+    !checkpoint ||
+    checkpoint.status !== 'paused_recovery' ||
+    !Array.isArray(checkpoint.source?.parsedUrls) ||
+    !Array.isArray(checkpoint.results)
+  ) {
+    return false;
+  }
+
+  batchId = checkpoint.batchId;
+  batchSourceFileName = checkpoint.source.fileName || '已恢复批次';
+  batchSourceHeaders = Array.isArray(checkpoint.source.headers)
+    ? [...checkpoint.source.headers]
+    : [];
+  parsedUrls = checkpoint.source.parsedUrls.map((item) => ({
+    ...item,
+    originalRow: Array.isArray(item.originalRow)
+      ? [...item.originalRow]
+      : item.originalRow || null
+  }));
+  batchItems = snapshotBatchItems(parsedUrls);
+  localResults = checkpoint.results.map((entry) => ({
+    ...entry,
+    originalRow: Array.isArray(entry.originalRow)
+      ? [...entry.originalRow]
+      : entry.originalRow || null
+  }));
+  totalCount = batchItems.length;
+  timeoutSeconds = Number(checkpoint.settings?.timeoutSeconds) || 60;
+  concurrency = normalizeBatchConcurrency(
+    checkpoint.settings?.concurrency,
+    concurrency
+  );
+  lifecycleConcurrency = concurrency;
+  lifecycleToken = {};
+  isTerminated = false;
+  openingActivities.clear();
+
+  timeoutInput.value = String(timeoutSeconds);
+  concurrencyInput.value = String(concurrency);
+  batchAutoOpenPanel.checked = !!checkpoint.settings?.autoOpenPanel;
+  batchAutoGenerate.checked = !!checkpoint.settings?.autoGenerate;
+  batchAutoSubmit.checked = !!checkpoint.settings?.autoSubmit;
+
+  recalculateCountsFromResults();
+  scheduler = new BatchScheduler({
+    totalCount,
+    concurrency,
+    processedIndices: localResults.map((entry) => entry.originalIndex)
+  });
+  renderHydratedBatchPreview(parsedUrls);
+  setStatus('paused_recovery');
+  updateStatsUI();
+  updateUI();
+
+  for (const entry of localResults) {
+    highlightPreviewRow(entry.originalIndex, entry.result);
+  }
+  return true;
+}
+
 function parseCSVLine(line) {
   const result = [];
   let current = '';
@@ -608,6 +763,8 @@ function resetFile({ force = false } = {}) {
   urlPreview.classList.remove('visible');
   urlPreviewBody.innerHTML = '';
   parsedUrls = [];
+  batchSourceFileName = '';
+  batchSourceHeaders = [];
   startBtn.disabled = true;
   fileCount.textContent = '';
   document.getElementById('duplicateCount').textContent = '';
@@ -657,11 +814,42 @@ async function startBatch() {
       urls: startingItems.map((item) => item.url)
     });
     if (!ownsStartingLifecycle()) return;
+
+    const sessionResponse = await sendBatchRuntimeMessage(
+      'BATCH_SESSION_START',
+      {
+        batchId: startingBatchId,
+        source: {
+          fileName: batchSourceFileName || '已上传文件',
+          headers: [...batchSourceHeaders],
+          rows: startingItems.map((item) => (
+            Array.isArray(item.originalRow) ? [...item.originalRow] : []
+          )),
+          parsedUrls: startingItems.map((item) => ({
+            ...item,
+            illegalCheck: item.illegalCheck
+              ? { ...item.illegalCheck }
+              : null,
+            originalRow: Array.isArray(item.originalRow)
+              ? [...item.originalRow]
+              : item.originalRow || null
+          }))
+        },
+        settings: {
+          ...startingSettings,
+          timeoutSeconds,
+          concurrency: startingConcurrency
+        }
+      }
+    );
+    if (!sessionResponse.checkpoint || !ownsStartingLifecycle()) return;
   } catch (error) {
     if (!ownsStartingLifecycle()) return;
     console.warn('[batch] 批处理启动失败:', error);
     restoreFailedStart(startingToken);
-    alert(`批处理启动失败：${error.message || error}`);
+    alert(error?.code === 'power_request_failed'
+      ? '无法阻止系统休眠，批处理尚未开始。请重新加载扩展后重试。'
+      : `批处理启动失败：${error.message || error}`);
     return;
   }
 
@@ -759,7 +947,7 @@ async function clearBatchTaskSettings() {
 }
 
 async function stopBatch() {
-  if (status !== 'running') return;
+  if (status !== 'running' || isTerminated) return;
 
   const stoppingLifecycle = {
     batchId,
@@ -825,13 +1013,20 @@ async function stopBatch() {
     windowManager === stoppingLifecycle.windowManager;
   if (!ownsStoppingLifecycle) return;
 
+  try {
+    await sendBatchRuntimeMessage('BATCH_SESSION_STOP', {
+      batchId: stoppingLifecycle.batchId
+    });
+  } catch (error) {
+    console.warn('[batch] 终止状态保存失败:', error?.code || 'unknown');
+  }
   updateStatsUI();
   updateUI();
 
   console.log(`[batch] 已手动终止。共保留 ${localResults.length} 条结果（成功 ${successCount}，失败 ${failCount}），跳过 ${terminatedCount} 条未处理`);
 }
 
-// 恢复处理（从终止状态继续）
+// 恢复处理（仅用于可恢复的暂停状态）
 async function resumeBatch() {
   console.log('[resumeBatch] 开始恢复处理', {
     status,
@@ -840,8 +1035,17 @@ async function resumeBatch() {
     failCount
   });
 
-  if (status !== 'terminated') {
-    console.log('[resumeBatch] 状态不是 terminated，不执行');
+  if (status !== 'paused_recovery') {
+    console.log('[resumeBatch] 状态不可恢复，不执行');
+    return;
+  }
+
+  try {
+    await sendBatchRuntimeMessage('BATCH_SESSION_RESUME', { batchId });
+  } catch (error) {
+    alert(error?.code === 'power_request_failed'
+      ? '无法阻止系统休眠，任务仍保持暂停。'
+      : `无法继续批处理：${error.message || error}`);
     return;
   }
 
@@ -869,6 +1073,29 @@ function fillAvailableWindows() {
     void openWorkerWindow(urlIndex);
   }
   checkAllCompleted();
+}
+
+async function pauseForRuntimeFailure(error) {
+  scheduler?.stop();
+  stopTimeoutChecker();
+  try {
+    await sendBatchRuntimeMessage('BATCH_SESSION_PAUSE', { batchId });
+  } catch (_) {}
+  try {
+    const response = await sendBatchRuntimeMessage(
+      'BATCH_SESSION_LOAD_FOR_PAGE'
+    );
+    if (response.checkpoint) {
+      hydrateBatchFromCheckpoint(response.checkpoint);
+    } else {
+      setStatus('paused_recovery');
+      updateUI();
+    }
+  } catch (_) {
+    setStatus('paused_recovery');
+    updateUI();
+  }
+  alert(`批次状态保存失败，任务已暂停：${error?.message || error}`);
 }
 
 async function openWorkerWindow(urlIndex) {
@@ -933,6 +1160,27 @@ async function openWorkerWindow(urlIndex) {
     }
     if (openingActivities.get(urlIndex) === opening) {
       openingActivities.delete(urlIndex);
+    }
+    try {
+      await sendBatchRuntimeMessage('BATCH_TASK_ACTIVE', {
+        batchId: activityBatchId,
+        urlIndex,
+        tabId: activity.tabId,
+        windowId: activity.windowId,
+        startedAt: activity.startTime
+      });
+    } catch (error) {
+      await activityWindowManager.closeByIndex(urlIndex);
+      activityScheduler?.settle(urlIndex);
+      if (ownsActivityLifecycle()) {
+        await pauseForRuntimeFailure(error);
+      }
+      return;
+    }
+    if (!ownsActivityLifecycle() || status !== 'running') {
+      await activityWindowManager.closeByIndex(urlIndex);
+      activityScheduler?.settle(urlIndex);
+      return;
     }
     highlightPreviewRow(urlIndex, 'processing');
     updateStatsUI();
@@ -1155,6 +1403,14 @@ async function finalizeTask(
   const taskOpening = ownership?.openings?.get(urlIndex) ??
     openingActivities.get(urlIndex);
   const activity = taskWindowManager?.getByIndex(urlIndex);
+  if (
+    batchId !== taskBatchId ||
+    lifecycleToken !== taskLifecycleToken ||
+    scheduler !== taskScheduler ||
+    windowManager !== taskWindowManager
+  ) {
+    return false;
+  }
   const startTime = activity?.startTime || taskOpening?.startTime;
   const elapsed = forcedElapsed !== undefined
     ? forcedElapsed
@@ -1162,15 +1418,42 @@ async function finalizeTask(
       ? Math.round((Date.now() - startTime) / 1000)
       : null;
 
-  recordTaskResult(
-    urlIndex,
-    result,
-    aiContent,
-    errorMessage,
-    elapsed,
-    taskItems,
-    historySaveStatus
-  );
+  try {
+    await sendBatchRuntimeMessage('BATCH_TASK_TERMINAL', {
+      batchId: taskBatchId,
+      urlIndex,
+      result: {
+        result,
+        aiContent: aiContent || null,
+        errorMessage: errorMessage || null
+      }
+    });
+  } catch (error) {
+    const stillOwnsLifecycle = batchId === taskBatchId &&
+      lifecycleToken === taskLifecycleToken &&
+      scheduler === taskScheduler &&
+      windowManager === taskWindowManager;
+    if (stillOwnsLifecycle) {
+      await pauseForRuntimeFailure(error);
+    }
+    return false;
+  }
+
+  const stillOwnsLifecycle = batchId === taskBatchId &&
+    lifecycleToken === taskLifecycleToken &&
+    scheduler === taskScheduler &&
+    windowManager === taskWindowManager;
+  if (stillOwnsLifecycle) {
+    recordTaskResult(
+      urlIndex,
+      result,
+      aiContent,
+      errorMessage,
+      elapsed,
+      taskItems,
+      historySaveStatus
+    );
+  }
   if (closeWindow && taskWindowManager) {
     await taskWindowManager.closeByIndex(urlIndex);
   }
@@ -1294,6 +1577,31 @@ async function onAllCompleted() {
 
   isTerminated = true;
   completingScheduler?.stop();
+  setStatus('completing');
+  updateUI();
+  try {
+    await sendBatchRuntimeMessage('BATCH_SESSION_COMPLETE', {
+      batchId: completingBatchId
+    });
+  } catch (error) {
+    const stillOwnsLifecycle = batchId === completingBatchId &&
+      lifecycleToken === completingLifecycleToken &&
+      scheduler === completingScheduler &&
+      windowManager === completingWindowManager;
+    if (stillOwnsLifecycle) {
+      isTerminated = false;
+      await pauseForRuntimeFailure(error);
+    }
+    return;
+  }
+  const ownsCompletingLifecycleBeforeClose = batchId === completingBatchId &&
+    lifecycleToken === completingLifecycleToken &&
+    scheduler === completingScheduler &&
+    windowManager === completingWindowManager;
+  if (!ownsCompletingLifecycleBeforeClose) {
+    await completingWindowManager?.closeAll();
+    return;
+  }
   setStatus('completed');
   stopTimeoutChecker();
   if (pollTimer) {
@@ -1443,6 +1751,8 @@ function setStatus(s) {
     idle: '空闲',
     starting: '启动中',
     running: '运行中',
+    completing: '完成中',
+    paused_recovery: '已暂停',
     completed: '已完成',
     terminated: '已终止'
   }[s] || s;
@@ -1453,20 +1763,25 @@ function updateUI() {
   const isIdle = status === 'idle';
   const isStarting = status === 'starting';
   const isRunning = status === 'running';
+  const isCompleting = status === 'completing';
+  const isPausedRecovery = status === 'paused_recovery';
   const isCompleted = status === 'completed';
   const isTerminated = status === 'terminated';
 
   // 开始按钮：空闲时可开始，终止时可重新开始
-  startBtn.disabled = isStarting || isRunning || isCompleted ||
-    parsedUrls.length === 0;
-  // 终止状态下显示"重新开始"，正常空闲显示"开始批量处理"
-  startBtn.textContent = isTerminated ? '▶ 重新开始' : '▶ 开始批量处理';
+  startBtn.disabled = isStarting || isRunning || isCompleting || isCompleted ||
+    isTerminated || parsedUrls.length === 0;
+  startBtn.textContent = isPausedRecovery
+    ? '▶ 继续处理'
+    : isTerminated
+      ? '■ 已终止'
+      : '▶ 开始批量处理';
 
-  stopBtn.disabled = !isRunning;
-  stopBtn.style.display = isRunning ? 'inline-flex' : 'none';
+  stopBtn.disabled = !isRunning || isTerminated;
+  stopBtn.style.display = isRunning && !isTerminated ? 'inline-flex' : 'none';
 
   exportBtn.disabled = localResults.length === 0;
-  clearBtn.disabled = isRunning;
+  clearBtn.disabled = isStarting || isRunning || isCompleting;
   concurrencyInput.disabled = !isIdle;
   const datasetLocked = !isIdle;
   fileInput.disabled = datasetLocked;
@@ -1474,6 +1789,18 @@ function updateUI() {
   uploadZone.setAttribute('aria-disabled', String(datasetLocked));
   fileRemove.classList.toggle?.('disabled', datasetLocked);
   fileRemove.setAttribute('aria-disabled', String(datasetLocked));
+
+  recoveryBanner.hidden = !isPausedRecovery;
+  recoveryMessage.textContent = isPausedRecovery
+    ? '上次任务异常中断，已暂停恢复'
+    : '';
+  wakeStatus.textContent = isRunning
+    ? '系统保持唤醒中'
+    : isCompleting
+      ? '正在结束系统保活'
+    : isStarting
+      ? '正在请求系统保活'
+      : '系统保活已暂停';
 
   // 进度、实时日志、底部操作：终止状态保持显示
   progressSection.style.display = (isIdle) ? 'none' : 'block';
@@ -1590,6 +1917,9 @@ function getExportRunResult(result) {
 
 function clearBatch() {
   if (status === 'running') return;
+  void sendBatchRuntimeMessage('BATCH_SESSION_CLEAR', {
+    batchId
+  }).catch(() => {});
   lifecycleToken = null;
   lifecycleConcurrency = null;
   batchItems = null;
