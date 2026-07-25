@@ -57,11 +57,12 @@ The repository currently targets:
 - D1 database: `auto-comment-sync`
 - D1 database ID: `b182a08b-84ba-49ef-9129-a0354bc7c770`
 
-Before deploying, load the extension from this repository through `chrome://extensions`, copy its
-32-letter Chrome extension ID, and validate that it contains only letters `a` through `p`. Set
-`ALLOWED_EXTENSION_ORIGINS` in `wrangler.jsonc` to exactly
-`chrome-extension://<validated-extension-id>`. Do not deploy the example or placeholder value and
-do not add a generated `key` to `manifest.json`.
+Before deploying, load the extension from this repository through `chrome://extensions`, copy each
+32-letter Chrome extension ID that must sync, and validate that every ID contains only letters `a`
+through `p`. Set `ALLOWED_EXTENSION_ORIGINS` in `wrangler.jsonc` to the corresponding exact
+`chrome-extension://<validated-extension-id>` origins, separated by commas when more than one
+profile has a different unpacked-extension ID. Do not use a wildcard, deploy an example or
+placeholder value, or add a generated `key` to `manifest.json`.
 
 Regenerate binding types whenever `wrangler.jsonc` changes:
 
