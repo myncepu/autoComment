@@ -68,6 +68,39 @@ function openDatabase(indexedDBImpl, dbName) {
   });
 }
 
+function createVersion1Database(indexedDBImpl, dbName) {
+  return new Promise((resolve, reject) => {
+    const request = indexedDBImpl.open(dbName, 1);
+    request.onerror = () => reject(request.error);
+    request.onupgradeneeded = () => {
+      const database = request.result;
+      const comments = database.createObjectStore('comment_records', { keyPath: 'id' });
+      comments.createIndex('by_submitted_at', 'submittedAt');
+      comments.createIndex('by_archive_month', 'archiveMonth');
+      comments.createIndex('by_target_domain', 'targetDomain');
+      comments.createIndex('by_promoted_domain', 'promotedDomain');
+      comments.createIndex('by_batch_task', ['batchId', 'urlIndex'], { unique: true });
+      comments.createIndex('by_submitted_at_id', ['submittedAt', 'id']);
+      comments.createIndex(
+        'by_target_domain_submitted_at',
+        ['targetDomain', 'submittedAt', 'id']
+      );
+      comments.createIndex(
+        'by_promoted_domain_submitted_at',
+        ['promotedDomain', 'submittedAt', 'id']
+      );
+
+      const anchors = database.createObjectStore('comment_anchors', { keyPath: 'id' });
+      anchors.createIndex('by_comment_id', 'commentId');
+      anchors.createIndex('by_anchor_text', 'anchorTextNormalized');
+      anchors.createIndex('by_href_domain', 'hrefDomain');
+      database.createObjectStore('archive_events', { keyPath: 'id' });
+      database.createObjectStore('history_meta', { keyPath: 'key' });
+    };
+    request.onsuccess = () => resolve(request.result);
+  });
+}
+
 async function storeFinalizedExportSession(repo, {
   exportSessionId = 'export-session-a',
   criteria = {},
@@ -88,18 +121,62 @@ async function storeFinalizedExportSession(repo, {
   return descriptor;
 }
 
-test('creates the version 1 stores and indexes exactly as designed', async (t) => {
+test('upgrades version 1 without recreating stores or losing records', async (t) => {
+  const indexedDBImpl = new IDBFactory();
+  const dbName = `comment-history-test-${databaseSequence += 1}`;
+  const original = makeBundle({
+    id: 'batch-upgrade:1',
+    anchors: [{ anchorText: 'Preserved', hrefDomain: 'preserved.test' }]
+  });
+  original.comment.commentText = 'preserved';
+
+  const version1 = await createVersion1Database(indexedDBImpl, dbName);
+  const seedTransaction = version1.transaction(
+    ['comment_records', 'comment_anchors'],
+    'readwrite'
+  );
+  seedTransaction.objectStore('comment_records').add(original.comment);
+  seedTransaction.objectStore('comment_anchors').add(original.anchors[0]);
+  await new Promise((resolve, reject) => {
+    seedTransaction.oncomplete = resolve;
+    seedTransaction.onabort = () => reject(seedTransaction.error);
+    seedTransaction.onerror = () => {};
+  });
+  version1.close();
+
+  const repo = await openCommentHistoryDb({ indexedDBImpl, dbName });
+  t.after(() => repo.close());
+  const database = await openDatabase(indexedDBImpl, dbName);
+  t.after(() => database.close());
+
+  assert.equal(database.version, 2);
+  assert.deepEqual([...database.objectStoreNames], [
+    'archive_events',
+    'comment_anchors',
+    'comment_records',
+    'history_meta',
+    'sync_entities',
+    'sync_meta',
+    'sync_outbox'
+  ]);
+  assert.equal((await repo.getRecord('batch-upgrade:1')).comment.commentText, 'preserved');
+});
+
+test('creates the version 2 stores while preserving version 1 indexes', async (t) => {
   const { repo, indexedDBImpl, dbName } = await openRepo(t);
   repo.close();
 
   const db = await openDatabase(indexedDBImpl, dbName);
   t.after(() => db.close());
-  assert.equal(db.version, 1);
+  assert.equal(db.version, 2);
   assert.deepEqual([...db.objectStoreNames], [
     'archive_events',
     'comment_anchors',
     'comment_records',
-    'history_meta'
+    'history_meta',
+    'sync_entities',
+    'sync_meta',
+    'sync_outbox'
   ]);
 
   const transaction = db.transaction(['comment_records', 'comment_anchors'], 'readonly');
@@ -121,6 +198,512 @@ test('creates the version 1 stores and indexes exactly as designed', async (t) =
     'by_href_domain'
   ]);
   assert.equal(comments.index('by_batch_task').unique, true);
+});
+
+test('sync outbox schedules due mutations per vault and completes acknowledgements', async (t) => {
+  const { repo } = await openRepo(t);
+  await repo.enqueueSyncMutation({
+    mutationId: 'm-late',
+    vaultId: 'vault-a',
+    entityType: 'comment',
+    entityId: 'batch-a:1',
+    operation: 'upsert',
+    payload: { comment: { id: 'batch-a:1' }, anchors: [] },
+    createdAt: 100,
+    attemptCount: 1,
+    nextAttemptAt: 500,
+    lastErrorCode: null,
+    state: 'pending'
+  });
+  await repo.enqueueSyncMutation({
+    mutationId: 'm-due',
+    vaultId: 'vault-a',
+    entityType: 'comment',
+    entityId: 'batch-a:2',
+    operation: 'upsert',
+    payload: { comment: { id: 'batch-a:2' }, anchors: [] },
+    createdAt: 101,
+    attemptCount: 0,
+    nextAttemptAt: 200,
+    lastErrorCode: null,
+    state: 'pending'
+  });
+  await repo.enqueueSyncMutation({
+    mutationId: 'm-other-vault',
+    vaultId: 'vault-b',
+    entityType: 'comment',
+    entityId: 'batch-b:1',
+    operation: 'upsert',
+    payload: { comment: { id: 'batch-b:1' }, anchors: [] },
+    createdAt: 99,
+    attemptCount: 0,
+    nextAttemptAt: 100,
+    lastErrorCode: null,
+    state: 'pending'
+  });
+
+  assert.deepEqual(
+    (await repo.listDueSyncMutations({
+      vaultId: 'vault-a',
+      now: 300,
+      limit: 100
+    })).map((item) => item.mutationId),
+    ['m-due']
+  );
+  await repo.completeSyncMutations([{
+    mutationId: 'm-due',
+    vaultId: 'vault-a',
+    entityKey: 'vault-a:comment:batch-a:2',
+    revisionId: 'revision-2',
+    serverSeq: 7
+  }]);
+  assert.deepEqual(await repo.listDueSyncMutations({
+    vaultId: 'vault-a',
+    now: 1000,
+    limit: 100
+  }), [
+    {
+      mutationId: 'm-late',
+      vaultId: 'vault-a',
+      entityType: 'comment',
+      entityId: 'batch-a:1',
+      operation: 'upsert',
+      payload: { comment: { id: 'batch-a:1' }, anchors: [] },
+      createdAt: 100,
+      attemptCount: 1,
+      nextAttemptAt: 500,
+      lastErrorCode: null,
+      state: 'pending'
+    }
+  ]);
+  assert.deepEqual(
+    (await repo.listDueSyncMutations({
+      vaultId: 'vault-b',
+      now: 1000,
+      limit: 100
+    })).map((item) => item.mutationId),
+    ['m-other-vault']
+  );
+});
+
+test('sync outbox attempt state and sync metadata persist independently', async (t) => {
+  const { repo } = await openRepo(t);
+  const mutation = {
+    mutationId: 'm-retry',
+    vaultId: 'vault-a',
+    entityType: 'setting',
+    entityId: 'batch_concurrency',
+    operation: 'upsert',
+    payload: { value: 4 },
+    createdAt: 100,
+    attemptCount: 0,
+    nextAttemptAt: 100,
+    lastErrorCode: null,
+    state: 'pending'
+  };
+  await repo.enqueueSyncMutation(mutation);
+  await repo.markSyncMutationAttempt({
+    mutationId: 'm-retry',
+    attemptCount: 1,
+    nextAttemptAt: 500,
+    lastErrorCode: 'NETWORK_ERROR',
+    state: 'pending'
+  });
+  assert.deepEqual(await repo.listDueSyncMutations({
+    vaultId: 'vault-a',
+    now: 500,
+    limit: 1
+  }), [{
+    ...mutation,
+    attemptCount: 1,
+    nextAttemptAt: 500,
+    lastErrorCode: 'NETWORK_ERROR'
+  }]);
+
+  assert.equal(await repo.getSyncMeta('serverCursor:vault-a'), undefined);
+  await repo.setSyncMeta('serverCursor:vault-a', 12);
+  assert.equal(await repo.getSyncMeta('serverCursor:vault-a'), 12);
+  assert.equal(await repo.getSyncMeta('serverCursor:vault-b'), undefined);
+});
+
+test('sync outbox write failure rolls freshness changes back with a stable code', async (t) => {
+  const { repo } = await openRepo(t);
+  const original = makeBundle({
+    id: 'batch-sync-atomic:1',
+    submittedAt: 100,
+    anchors: [{ anchorText: 'Original', hrefDomain: 'original.test' }]
+  });
+  original.comment.historyRevision = {
+    capturedAt: 100,
+    recordedAt: 101,
+    sequence: 0,
+    id: 'revision-1'
+  };
+  const originalMutation = {
+    mutationId: 'm-duplicate',
+    vaultId: 'vault-a',
+    entityType: 'comment',
+    entityId: original.comment.id,
+    operation: 'upsert',
+    payload: original,
+    createdAt: 100,
+    attemptCount: 0,
+    nextAttemptAt: 100,
+    lastErrorCode: null,
+    state: 'pending'
+  };
+  assert.equal(await repo.upsertIfFresher(original, {
+    syncMutation: originalMutation
+  }), true);
+
+  const replacement = makeBundle({
+    id: original.comment.id,
+    submittedAt: 200,
+    anchors: [{ anchorText: 'Replacement', hrefDomain: 'replacement.test' }]
+  });
+  replacement.comment.historyRevision = {
+    capturedAt: 200,
+    recordedAt: 201,
+    sequence: 0,
+    id: 'revision-2'
+  };
+  await assert.rejects(
+    repo.upsertIfFresher(replacement, {
+      syncMutation: {
+        ...originalMutation,
+        payload: replacement,
+        createdAt: 200
+      }
+    }),
+    (error) => error.code === 'SYNC_OUTBOX_WRITE_FAILED'
+  );
+  assert.deepEqual(await repo.getRecord(original.comment.id), original);
+  assert.deepEqual(await repo.listDueSyncMutations({
+    vaultId: 'vault-a',
+    now: 1000,
+    limit: 100
+  }), [originalMutation]);
+});
+
+test('sync outbox rejects missing vaults and does not mislabel comment write failures', async (t) => {
+  const { repo } = await openRepo(t);
+  await assert.rejects(repo.enqueueSyncMutation({
+    mutationId: 'missing-vault',
+    entityType: 'comment',
+    entityId: 'batch-missing-vault:1',
+    operation: 'upsert',
+    payload: { comment: { id: 'batch-missing-vault:1' }, anchors: [] },
+    createdAt: 100,
+    attemptCount: 0,
+    nextAttemptAt: 100,
+    lastErrorCode: null,
+    state: 'pending'
+  }));
+
+  const missingVaultBundle = makeBundle({
+    id: 'batch-missing-vault:1',
+    submittedAt: 50
+  });
+  await assert.rejects(
+    repo.upsertIfFresher(missingVaultBundle, {
+      syncMutation: {
+        mutationId: 'missing-vault-atomic',
+        entityType: 'comment',
+        entityId: missingVaultBundle.comment.id,
+        operation: 'upsert',
+        payload: missingVaultBundle,
+        createdAt: 50,
+        attemptCount: 0,
+        nextAttemptAt: 50,
+        lastErrorCode: null,
+        state: 'pending'
+      }
+    }),
+    (error) => error.code === 'SYNC_OUTBOX_WRITE_FAILED'
+  );
+  assert.equal(await repo.getRecord(missingVaultBundle.comment.id), null);
+
+  const original = makeBundle({
+    id: 'batch-invalid-anchor:1',
+    submittedAt: 100,
+    anchors: [{ anchorText: 'Original', hrefDomain: 'original.test' }]
+  });
+  await repo.upsertRecord(original);
+  const invalid = makeBundle({
+    id: original.comment.id,
+    submittedAt: 200,
+    anchors: [{ anchorText: 'Invalid', hrefDomain: 'invalid.test' }]
+  });
+  delete invalid.anchors[0].id;
+  await assert.rejects(
+    repo.upsertIfFresher(invalid, {
+      syncMutation: {
+        mutationId: 'valid-outbox-row',
+        vaultId: 'vault-a',
+        entityType: 'comment',
+        entityId: invalid.comment.id,
+        operation: 'upsert',
+        payload: invalid,
+        createdAt: 200,
+        attemptCount: 0,
+        nextAttemptAt: 200,
+        lastErrorCode: null,
+        state: 'pending'
+      }
+    }),
+    (error) => error.code !== 'SYNC_OUTBOX_WRITE_FAILED'
+  );
+  assert.deepEqual(await repo.getRecord(original.comment.id), original);
+  assert.deepEqual(await repo.listDueSyncMutations({
+    vaultId: 'vault-a',
+    now: 1000,
+    limit: 100
+  }), []);
+});
+
+test('sync outbox completion cannot acknowledge a mutation through another vault', async (t) => {
+  const { repo } = await openRepo(t);
+  const mutation = {
+    mutationId: 'vault-bound-mutation',
+    vaultId: 'vault-a',
+    entityType: 'comment',
+    entityId: 'batch-vault-bound:1',
+    operation: 'upsert',
+    payload: { comment: { id: 'batch-vault-bound:1' }, anchors: [] },
+    createdAt: 100,
+    attemptCount: 0,
+    nextAttemptAt: 100,
+    lastErrorCode: null,
+    state: 'pending'
+  };
+  await repo.enqueueSyncMutation(mutation);
+
+  await assert.rejects(repo.completeSyncMutations([{
+    mutationId: mutation.mutationId,
+    vaultId: 'vault-b',
+    entityKey: 'vault-b:comment:batch-vault-bound:1',
+    revisionId: 'revision-1',
+    serverSeq: 10
+  }]));
+  assert.deepEqual(await repo.listDueSyncMutations({
+    vaultId: 'vault-a',
+    now: 1000,
+    limit: 100
+  }), [mutation]);
+});
+
+test('sync outbox completion rejects entity keys outside the receipt vault', async (t) => {
+  const { repo } = await openRepo(t);
+  const receipt = {
+    mutationId: 'entity-key-mutation',
+    vaultId: 'vault-a',
+    revisionId: 'revision-1',
+    serverSeq: 10
+  };
+  await assert.rejects(repo.completeSyncMutations([{
+    ...receipt,
+    entityKey: 'vault-b:comment:batch-a:1'
+  }]));
+  await assert.rejects(repo.completeSyncMutations([{
+    ...receipt,
+    entityKey: 'vault-a:unknown:batch-a:1'
+  }]));
+  await assert.rejects(repo.completeSyncMutations([{
+    ...receipt,
+    entityKey: 'vault-a:comment:'
+  }]));
+});
+
+test('remote change page aborts every record and cursor when a later change is invalid', async (t) => {
+  const { repo } = await openRepo(t);
+  await assert.rejects(repo.applyRemoteChangesAtomic({
+    vaultId: 'vault-a',
+    changes: [
+      {
+        serverSeq: 8,
+        entityType: 'comment',
+        operation: 'upsert',
+        record: makeBundle({ id: 'remote:1', submittedAt: 100 })
+      },
+      {
+        serverSeq: 9,
+        entityType: 'comment',
+        operation: 'upsert',
+        record: { comment: { id: '' }, anchors: [] }
+      }
+    ],
+    nextCursor: 9
+  }));
+  assert.equal(await repo.getRecord('remote:1'), null);
+  assert.equal(await repo.getSyncMeta('serverCursor:vault-a'), undefined);
+});
+
+test('remote changes preserve fresher comments and apply tombstones without an outbox row', async (t) => {
+  const { repo } = await openRepo(t);
+  const local = makeBundle({
+    id: 'remote-order:1',
+    submittedAt: 300,
+    anchors: [{ anchorText: 'Local', hrefDomain: 'local.test' }]
+  });
+  local.comment.historyRevision = {
+    capturedAt: 300,
+    recordedAt: 301,
+    sequence: 0,
+    id: 'revision-local'
+  };
+  const staleRemote = makeBundle({
+    id: local.comment.id,
+    submittedAt: 100,
+    anchors: [{ anchorText: 'Remote', hrefDomain: 'remote.test' }]
+  });
+  staleRemote.comment.historyRevision = {
+    capturedAt: 100,
+    recordedAt: 101,
+    sequence: 0,
+    id: 'revision-remote'
+  };
+  await repo.upsertRecord(local);
+
+  await repo.applyRemoteChangesAtomic({
+    vaultId: 'vault-a',
+    changes: [{
+      serverSeq: 10,
+      entityType: 'comment',
+      operation: 'upsert',
+      record: staleRemote
+    }],
+    nextCursor: 10
+  });
+  assert.deepEqual(await repo.getRecord(local.comment.id), local);
+  assert.equal(await repo.getSyncMeta('serverCursor:vault-a'), 10);
+  assert.deepEqual(await repo.listDueSyncMutations({
+    vaultId: 'vault-a',
+    now: 1000,
+    limit: 100
+  }), []);
+
+  await repo.applyRemoteChangesAtomic({
+    vaultId: 'vault-a',
+    changes: [{
+      serverSeq: 11,
+      entityType: 'comment_delete',
+      entityId: local.comment.id,
+      operation: 'delete',
+      revisionId: 'delete-revision-1'
+    }],
+    nextCursor: 11
+  });
+  assert.equal(await repo.getRecord(local.comment.id), null);
+  assert.equal(await repo.getSyncMeta('serverCursor:vault-a'), 11);
+});
+
+test('synced cache eviction requires matching vault revision and no outbox mutation', async (t) => {
+  const { repo } = await openRepo(t);
+  function versionedBundle(id, submittedAt, revisionId) {
+    const bundle = makeBundle({ id, submittedAt });
+    bundle.comment.historyRevision = {
+      capturedAt: submittedAt,
+      recordedAt: submittedAt + 1,
+      sequence: 0,
+      id: revisionId
+    };
+    return bundle;
+  }
+  const eligible = versionedBundle('synced:1', 100, 'revision-1');
+  const mismatched = versionedBundle('synced:2', 100, 'revision-current');
+  const pending = versionedBundle('synced:3', 100, 'revision-3');
+  const otherVault = versionedBundle('synced:4', 100, 'revision-4');
+  const recent = versionedBundle('synced:5', 300, 'revision-5');
+  for (const bundle of [eligible, mismatched, pending, otherVault, recent]) {
+    await repo.upsertRecord(bundle);
+  }
+  await repo.completeSyncMutations([
+    {
+      mutationId: 'sync-1',
+      vaultId: 'vault-a',
+      entityKey: 'vault-a:comment:synced:1',
+      revisionId: 'revision-1',
+      serverSeq: 10
+    },
+    {
+      mutationId: 'sync-2',
+      vaultId: 'vault-a',
+      entityKey: 'vault-a:comment:synced:2',
+      revisionId: 'revision-old',
+      serverSeq: 11
+    },
+    {
+      mutationId: 'sync-3',
+      vaultId: 'vault-a',
+      entityKey: 'vault-a:comment:synced:3',
+      revisionId: 'revision-3',
+      serverSeq: 12
+    },
+    {
+      mutationId: 'sync-4',
+      vaultId: 'vault-b',
+      entityKey: 'vault-b:comment:synced:4',
+      revisionId: 'revision-4',
+      serverSeq: 13
+    },
+    {
+      mutationId: 'sync-5',
+      vaultId: 'vault-a',
+      entityKey: 'vault-a:comment:synced:5',
+      revisionId: 'revision-5',
+      serverSeq: 14
+    }
+  ]);
+  await repo.enqueueSyncMutation({
+    mutationId: 'pending-3',
+    vaultId: 'vault-a',
+    entityType: 'comment',
+    entityId: 'synced:3',
+    operation: 'upsert',
+    payload: pending,
+    createdAt: 100,
+    attemptCount: 0,
+    nextAttemptAt: 100,
+    lastErrorCode: null,
+    state: 'pending'
+  });
+
+  assert.equal(await repo.evictSyncedCacheBefore({
+    vaultId: 'vault-a',
+    cutoff: 200
+  }), 1);
+  assert.equal(await repo.getRecord('synced:1'), null);
+  assert.deepEqual(await repo.getRecord('synced:2'), mismatched);
+  assert.deepEqual(await repo.getRecord('synced:3'), pending);
+  assert.deepEqual(await repo.getRecord('synced:4'), otherVault);
+  assert.deepEqual(await repo.getRecord('synced:5'), recent);
+});
+
+test('initial sync scan resumes by primary key and returns complete bundles', async (t) => {
+  const { repo } = await openRepo(t);
+  const records = [1, 2, 3].map((index) => makeBundle({
+    id: `scan:${index}`,
+    submittedAt: 100 + index,
+    anchors: [{ anchorText: `Anchor ${index}`, hrefDomain: `${index}.test` }]
+  }));
+  for (const record of records) await repo.upsertRecord(record);
+
+  assert.deepEqual(await repo.scanRecordsForInitialSync({
+    cursor: null,
+    limit: 2
+  }), {
+    records: records.slice(0, 2),
+    cursor: 'scan:2',
+    done: false
+  });
+  assert.deepEqual(await repo.scanRecordsForInitialSync({
+    cursor: 'scan:2',
+    limit: 2
+  }), {
+    records: records.slice(2),
+    cursor: 'scan:3',
+    done: true
+  });
 });
 
 test('upsert replaces anchors and rolls back the whole transaction on an invalid anchor', async (t) => {
