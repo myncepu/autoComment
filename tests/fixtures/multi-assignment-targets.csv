@@ -1,0 +1,6 @@
+URL,来源域名,profileId,promotionSiteId
+http://127.0.0.1/MULTI_PORT/multi/1,127.0.0.1,profile-b,site-b
+http://127.0.0.1/MULTI_PORT/multi/2,127.0.0.1,,
+http://127.0.0.1/MULTI_PORT/multi/3,127.0.0.1,,
+http://127.0.0.1/MULTI_PORT/multi/4,127.0.0.1,profile-a,site-a
+http://127.0.0.1/MULTI_PORT/multi/5,127.0.0.1,,

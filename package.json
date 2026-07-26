@@ -5,7 +5,11 @@
   "main": "server.js",
   "scripts": {
     "test": "node --test tests/*.test.js tests/*.test.mjs",
+    "test:sync-worker": "npm --prefix cloudflare-sync test",
+    "typecheck:sync-worker": "npm --prefix cloudflare-sync run typecheck",
+    "verify:cloud-sync": "npm test && npm run test:sync-worker && npm run typecheck:sync-worker && npm --prefix cloudflare-sync run deploy:dry",
     "test:fixture": "node scripts/serve-extension-fixture.js",
+    "test:chrome:multi-assignment": "node scripts/run-multi-assignment-chrome-acceptance.mjs",
     "start": "node server.js",
     "dev": "node server.js",
     "csv:export": "node scripts/run-csv-export.js",

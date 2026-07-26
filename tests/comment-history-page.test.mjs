@@ -4,11 +4,18 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JSDOM } from 'jsdom';
+import { createCloudHistoryController } from '../lib/cloud-history-controller.mjs';
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(dirname, '..');
 const csvModuleUrl = pathToFileURL(
   path.join(projectRoot, 'lib/comment-history-csv.mjs')
+).href;
+const cloudDataSourceModuleUrl = pathToFileURL(
+  path.join(projectRoot, 'lib/cloud-history-data-source.mjs')
+).href;
+const cloudControllerModuleUrl = pathToFileURL(
+  path.join(projectRoot, 'lib/cloud-history-controller.mjs')
 ).href;
 const appShellModuleUrl = pathToFileURL(
   path.join(projectRoot, 'lib/app-shell.mjs')
@@ -16,6 +23,8 @@ const appShellModuleUrl = pathToFileURL(
 const historyModuleSource = fs
   .readFileSync(path.join(projectRoot, 'history.js'), 'utf8')
   .replace("'./lib/comment-history-csv.mjs'", `'${csvModuleUrl}'`)
+  .replace("'./lib/cloud-history-data-source.mjs'", `'${cloudDataSourceModuleUrl}'`)
+  .replace("'./lib/cloud-history-controller.mjs'", `'${cloudControllerModuleUrl}'`)
   .replace("'./lib/app-shell.mjs'", `'${appShellModuleUrl}'`);
 const {
   advancePagination,
@@ -70,6 +79,8 @@ test('builds an indexed history filter with local inclusive date bounds', () => 
     dateTo: '2026-07-31',
     targetDomain: ' EXAMPLE.COM ',
     promotedDomain: 'PROMO.EXAMPLE',
+    profileId: ' profile-a ',
+    promotionSiteId: ' site-a ',
     anchorTextPrefix: '  Product ',
     hrefDomain: 'LINKS.EXAMPLE',
     pageSize: '50'
@@ -78,6 +89,8 @@ test('builds an indexed history filter with local inclusive date bounds', () => 
     to: localDayEnd('2026-07-31'),
     targetDomain: 'example.com',
     promotedDomain: 'promo.example',
+    profileId: 'profile-a',
+    promotionSiteId: 'site-a',
     anchorTextPrefix: 'product',
     hrefDomain: 'links.example',
     limit: 50
@@ -105,6 +118,194 @@ test('renders stored HTML as escaped text rather than executable markup', () => 
   assert.equal(element.textContent, '<img src=x onerror="globalThis.pwned=true"><b>comment</b>');
   assert.equal(element.querySelector('img'), null);
   assert.match(element.innerHTML, /&lt;img/);
+});
+
+test('cloud controller renders status and source badges while keeping stored HTML and unsafe URLs inert', () => {
+  const document = historyDocument();
+  const controller = createCloudHistoryController({
+    document,
+    dataSource: {
+      async deleteEverywhere() {
+        throw new Error('delete must not run while rendering');
+      }
+    },
+    confirmDelete: async () => true
+  });
+
+  controller.renderStatus({
+    enabled: true,
+    state: 'idle',
+    vaultId: 'vault-a'
+  }, false);
+  controller.renderRecords([
+    {
+      comment: {
+        ...record('cloud:1', 'Cloud body'),
+        targetPageUrl: 'javascript:globalThis.pwned=true',
+        commentHtml: '<img src=x onerror="globalThis.pwned=true">'
+      },
+      anchors: [],
+      storageSource: 'cloud'
+    },
+    {
+      comment: record('local:1', 'Local body'),
+      anchors: null,
+      storageSource: 'local'
+    }
+  ]);
+
+  assert.match(document.getElementById('cloudHistoryStatus').textContent, /离线/);
+  const cloudRow = document.querySelector('[data-record-id="cloud:1"]');
+  const localRow = document.querySelector('[data-record-id="local:1"]');
+  assert.match(cloudRow.textContent, /云端/);
+  assert.match(localRow.textContent, /本机/);
+  assert.equal(
+    cloudRow.querySelector('[data-action="delete-everywhere"]').textContent,
+    '从所有设备永久删除'
+  );
+  assert.equal(
+    localRow.querySelector('[data-action="delete-everywhere"]'),
+    null
+  );
+  assert.equal(cloudRow.querySelector('a[href^="javascript:"]'), null);
+  assert.match(cloudRow.textContent, /javascript:globalThis\.pwned=true/);
+
+  cloudRow.querySelector('[data-action="expand"]').click();
+  const detail = document.querySelector(
+    '[data-detail-for="cloud:1"] .stored-html'
+  );
+  assert.equal(detail.textContent, '<img src=x onerror="globalThis.pwned=true">');
+  assert.equal(detail.querySelector('img'), null);
+});
+
+test('permanent delete cancellation makes no call and confirmed delete keeps the row busy until cloud success', async () => {
+  const document = historyDocument();
+  const deletion = deferred();
+  let confirmations = 0;
+  let deleteCalls = 0;
+  const controller = createCloudHistoryController({
+    document,
+    dataSource: {
+      async deleteEverywhere() {
+        deleteCalls += 1;
+        return deletion.promise;
+      }
+    },
+    confirmDelete: async () => {
+      confirmations += 1;
+      return confirmations > 1;
+    }
+  });
+  controller.renderStatus({ enabled: true, state: 'idle' }, true);
+  controller.renderRecords([{
+    comment: record('cloud:delete', 'Delete me'),
+    anchors: [],
+    storageSource: 'cloud'
+  }]);
+
+  assert.equal(await controller.deleteEverywhere('cloud:delete'), false);
+  assert.equal(deleteCalls, 0);
+  const pending = controller.deleteEverywhere('cloud:delete');
+  await nextTurn();
+
+  const row = document.querySelector('[data-record-id="cloud:delete"]');
+  const button = row.querySelector('[data-action="delete-everywhere"]');
+  assert.equal(deleteCalls, 1);
+  assert.equal(row.isConnected, true);
+  assert.equal(button.disabled, true);
+  assert.equal(button.getAttribute('aria-busy'), 'true');
+
+  deletion.resolve({ status: 'applied' });
+  assert.equal(await pending, true);
+  assert.equal(
+    document.querySelector('[data-record-id="cloud:delete"]'),
+    null
+  );
+});
+
+test('failed and concurrent permanent deletes keep the newest row and expose only a safe error', async () => {
+  const document = historyDocument();
+  const deletion = deferred();
+  let deleteCalls = 0;
+  const controller = createCloudHistoryController({
+    document,
+    dataSource: {
+      async deleteEverywhere() {
+        deleteCalls += 1;
+        return deletion.promise;
+      }
+    },
+    confirmDelete: async () => true
+  });
+  controller.renderStatus({ enabled: true, state: 'idle' }, true);
+  const bundle = {
+    comment: record('cloud:race', 'First render'),
+    anchors: [],
+    storageSource: 'cloud'
+  };
+  controller.renderRecords([bundle]);
+
+  const first = controller.deleteEverywhere('cloud:race');
+  const second = controller.deleteEverywhere('cloud:race');
+  await nextTurn();
+  assert.equal(deleteCalls, 1);
+
+  controller.renderRecords([{
+    ...bundle,
+    comment: record('cloud:race', 'Newer page render')
+  }]);
+  deletion.reject(new Error('secret backend diagnostics'));
+  assert.equal(await first, false);
+  assert.equal(await second, false);
+  assert.match(
+    document.querySelector('[data-record-id="cloud:race"]').textContent,
+    /Newer page render/
+  );
+  assert.match(document.getElementById('pageStatus').textContent, /删除失败/);
+  assert.doesNotMatch(
+    document.getElementById('pageStatus').textContent,
+    /secret|backend|diagnostics/
+  );
+  assert.equal(
+    document.querySelector(
+      '[data-record-id="cloud:race"] [data-action="delete-everywhere"]'
+    ).disabled,
+    false
+  );
+});
+
+test('a successful delete cannot be resurrected by a stale page render', async () => {
+  const document = historyDocument();
+  const deletion = deferred();
+  const controller = createCloudHistoryController({
+    document,
+    dataSource: {
+      async deleteEverywhere() {
+        return deletion.promise;
+      }
+    },
+    confirmDelete: async () => true
+  });
+  controller.renderStatus({ enabled: true, state: 'idle' }, true);
+  const bundle = {
+    comment: record('cloud:tombstone', 'Before delete'),
+    anchors: [],
+    storageSource: 'cloud'
+  };
+  controller.renderRecords([bundle]);
+  const pending = controller.deleteEverywhere('cloud:tombstone');
+  await nextTurn();
+  deletion.resolve({ status: 'applied' });
+  assert.equal(await pending, true);
+
+  controller.renderRecords([{
+    ...bundle,
+    comment: record('cloud:tombstone', 'Stale page')
+  }]);
+  assert.equal(
+    document.querySelector('[data-record-id="cloud:tombstone"]'),
+    null
+  );
 });
 
 test('builds one-cursor list requests and tracks next and previous page cursors', () => {
@@ -738,6 +939,168 @@ test('a stale page completion cannot render rows or replace the newer cursor', a
   await nextTurn();
 });
 
+test('history page preserves an opaque source cursor identity across local-to-cloud pagination', async () => {
+  const document = historyDocument();
+  const opaqueCursor = Object.freeze({
+    phase: 'cloud',
+    localCursor: null,
+    cloudCursor: null,
+    cutoff: 123
+  });
+  const listCalls = [];
+  const dataSource = {
+    async status() {
+      return { enabled: true, state: 'idle', pendingCount: 0 };
+    },
+    async list(filter, cursor) {
+      listCalls.push({ filter, cursor });
+      return listCalls.length === 1
+        ? {
+            records: [{
+              comment: record('local:cursor', 'Local first page'),
+              anchors: null,
+              storageSource: 'local'
+            }],
+            nextCursor: opaqueCursor
+          }
+        : { records: [], nextCursor: null };
+    },
+    async deleteEverywhere() {
+      throw new Error('delete not expected');
+    }
+  };
+  const requestMessage = async (message) => {
+    if (message.type === 'HISTORY_RETRY_PENDING') return { pending: 0 };
+    if (message.type === 'HISTORY_SUMMARY') return {};
+    if (message.type === 'HISTORY_ARCHIVE_EVENTS') return [];
+    if (message.type === 'HISTORY_ANCHORS') return [];
+    throw new Error(`Unexpected request: ${message.type}`);
+  };
+
+  bootHistoryPage(document, {
+    requestMessage,
+    dataSource,
+    isOnline: () => true,
+    search: '',
+    estimateStorage: async () => 0
+  });
+  await nextTurn();
+  await nextTurn();
+  document.getElementById('nextPageBtn').click();
+  await nextTurn();
+
+  assert.equal(listCalls.length, 2);
+  assert.strictEqual(listCalls[1].cursor, opaqueCursor);
+  assert.equal(listCalls[1].filter.syncEnabled, true);
+  assert.equal(listCalls[1].filter.online, true);
+});
+
+test('offline cloud-required failure keeps the currently rendered rows and reports availability safely', async () => {
+  const document = historyDocument();
+  const listCalls = [];
+  const dataSource = {
+    async status() {
+      return { enabled: true, state: 'idle', pendingCount: 0 };
+    },
+    async list(filter, cursor) {
+      listCalls.push({ filter, cursor });
+      if (filter.targetDomain) {
+        const error = new Error('当前离线，无法读取所需的云端评论历史。');
+        error.code = 'CLOUD_HISTORY_UNAVAILABLE_OFFLINE';
+        throw error;
+      }
+      return {
+        records: [{
+          comment: record('local:preserved', 'Keep this row'),
+          anchors: null,
+          storageSource: 'local'
+        }],
+        nextCursor: null
+      };
+    },
+    async deleteEverywhere() {
+      throw new Error('delete not expected');
+    }
+  };
+  const requestMessage = async (message) => {
+    if (message.type === 'HISTORY_RETRY_PENDING') return { pending: 0 };
+    if (message.type === 'HISTORY_SUMMARY') return {};
+    if (message.type === 'HISTORY_ARCHIVE_EVENTS') return [];
+    if (message.type === 'HISTORY_ANCHORS') return [];
+    throw new Error(`Unexpected request: ${message.type}`);
+  };
+
+  bootHistoryPage(document, {
+    requestMessage,
+    dataSource,
+    isOnline: () => false,
+    search: '',
+    estimateStorage: async () => 0
+  });
+  await nextTurn();
+  await nextTurn();
+  assert.match(document.getElementById('historyTableBody').textContent, /Keep this row/);
+
+  document.getElementById('targetDomain').value = 'target.test';
+  document.getElementById('historyFilterForm').dispatchEvent(
+    new document.defaultView.Event('submit', {
+      bubbles: true,
+      cancelable: true
+    })
+  );
+  await nextTurn();
+
+  assert.match(document.getElementById('historyTableBody').textContent, /Keep this row/);
+  assert.match(document.getElementById('pageStatus').textContent, /当前离线/);
+  assert.equal(listCalls[1].filter.targetDomain, 'target.test');
+  assert.equal(listCalls[1].filter.online, false);
+});
+
+test('enabled sync explains that only repository-approved old rows are automatic local cache eviction candidates', async () => {
+  const document = historyDocument();
+  const dataSource = {
+    async status() {
+      return { enabled: true, state: 'idle', pendingCount: 0 };
+    },
+    async list() {
+      return { records: [], nextCursor: null };
+    },
+    async deleteEverywhere() {
+      throw new Error('delete not expected');
+    }
+  };
+  const requestMessage = async (message) => {
+    if (message.type === 'HISTORY_RETRY_PENDING') return { pending: 0 };
+    if (message.type === 'HISTORY_SUMMARY') {
+      return {
+        expiredCount: 2,
+        dueSoonCount: 0
+      };
+    }
+    if (message.type === 'HISTORY_ARCHIVE_EVENTS') return [];
+    throw new Error(`Unexpected request: ${message.type}`);
+  };
+
+  bootHistoryPage(document, {
+    requestMessage,
+    dataSource,
+    isOnline: () => true,
+    search: '',
+    estimateStorage: async () => 0
+  });
+  await nextTurn();
+  await nextTurn();
+
+  assert.match(
+    document.getElementById('retentionBanner').textContent,
+    /已确认同步.*本机缓存.*自动清理/
+  );
+  assert.doesNotMatch(
+    document.getElementById('retentionBanner').textContent,
+    /直到.*明确确认删除/
+  );
+});
+
 test('history layout includes summaries, indexed filters, pagination, archive and lifecycle controls', () => {
   const html = fs.readFileSync(path.join(projectRoot, 'history.html'), 'utf8');
   for (const id of [
@@ -746,12 +1109,15 @@ test('history layout includes summaries, indexed filters, pagination, archive an
     'summaryDueSoon',
     'summaryExpired',
     'summaryStorage',
+    'cloudHistoryStatus',
     'retentionBanner',
     'historyPendingBanner',
     'dateFrom',
     'dateTo',
     'targetDomain',
     'promotedDomain',
+    'profileId',
+    'promotionSiteId',
     'anchorTextPrefix',
     'hrefDomain',
     'pageSize',

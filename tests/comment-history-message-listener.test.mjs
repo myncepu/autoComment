@@ -139,6 +139,8 @@ test('normalizes list filters, cursor, and limit before calling the service', as
       dateTo: 200,
       targetDomain: ' Target.Test ',
       promotedDomain: 'PROMO.TEST',
+      profileId: ' profile-a ',
+      promotionSiteId: ' site-a ',
       anchorTextPrefix: '  Alpha ',
       hrefDomain: ' LINKS.TEST ',
       ignored: 'do not forward'
@@ -154,6 +156,8 @@ test('normalizes list filters, cursor, and limit before calling the service', as
     to: 200,
     targetDomain: 'target.test',
     promotedDomain: 'promo.test',
+    profileId: 'profile-a',
+    promotionSiteId: 'site-a',
     anchorTextPrefix: 'alpha',
     hrefDomain: 'links.test',
     cursor: { submittedAt: 123, id: 'batch-a:7' },
@@ -183,6 +187,29 @@ test('accepts the history page filter fields at the message top level', async ()
     to: 200,
     targetDomain: 'target.test',
     limit: 25
+  });
+});
+
+test('routes a finite recent-success cutoff without page truncation', async () => {
+  let received;
+  const { dispatch } = createFixture({
+    async listRecentSuccessfulTargetUrls(payload) {
+      received = payload;
+      return ['https://target.test/one'];
+    }
+  });
+
+  const result = await dispatch({
+    type: 'HISTORY_RECENT_SUCCESS_URLS',
+    since: 1234,
+    limit: 1,
+    cursor: { submittedAt: 2, id: 'ignored' }
+  });
+
+  assert.deepEqual(received, { since: 1234 });
+  assert.deepEqual(result.response, {
+    ok: true,
+    data: ['https://target.test/one']
   });
 });
 
@@ -303,6 +330,13 @@ test('background migrates an old record before its startup retention check and c
   const notificationClickListeners = [];
   const startupListeners = [];
   const powerCalls = [];
+  const syncStorageData = {
+    auto_fill_user_name: 'Legacy Alice',
+    auto_fill_user_email: 'alice@example.test',
+    auto_fill_user_password: 'legacy-runtime-secret',
+    promotion_website_url: 'https://promo.test',
+    promotion_website_content: 'Legacy promotion content'
+  };
   const tabRemoveFailures = [];
   const tabGetFailures = [];
   const storageData = {
@@ -338,6 +372,22 @@ test('background migrates an old record before its startup retention check and c
       }
     },
     storage: {
+      sync: {
+        async get(keys) {
+          const requested = Array.isArray(keys) ? keys : [keys];
+          return Object.fromEntries(
+            requested
+              .filter((key) => Object.hasOwn(syncStorageData, key))
+              .map((key) => [key, structuredClone(syncStorageData[key])])
+          );
+        },
+        async set(values) {
+          Object.assign(syncStorageData, structuredClone(values));
+        },
+        async remove(keys) {
+          for (const key of Array.isArray(keys) ? keys : [keys]) delete syncStorageData[key];
+        }
+      },
       local: {
         async get(keys) {
           if (keys == null) return structuredClone(storageData);
@@ -459,7 +509,19 @@ test('background migrates an old record before its startup retention check and c
   });
 
   await import(`../background.js?history-integration=${Date.now()}`);
+  for (
+    let attempt = 0;
+    attempt < 100 && storageData.domainConfigMigrationVersion !== 2;
+    attempt += 1
+  ) {
+    await new Promise(setImmediate);
+  }
   assert.equal(alarmListeners.length, 1);
+  assert.equal(storageData.domainConfigMigrationVersion, 2);
+  assert.equal(storageData.autoCommentDomainConfig.profiles[0].id, 'default-profile');
+  assert.equal(storageData.autoCommentProfileSecrets.passwordsByProfileId['default-profile'],
+    'legacy-runtime-secret');
+  assert.equal(Object.hasOwn(syncStorageData, 'auto_fill_user_password'), false);
   assert.equal(notificationClickListeners.length, 1);
   for (let attempt = 0; attempt < 100 && startupNotifications.length === 0; attempt += 1) {
     await new Promise(setImmediate);

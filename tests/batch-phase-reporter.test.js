@@ -27,14 +27,20 @@ test('reports only controlled phases with complete task identity', async () => {
     }
   }, {
     batchId: 'batch-1',
+    taskId: 'batch-1:2',
     urlIndex: 2,
+    profileId: 'profile-a',
+    promotionSiteId: 'site-a',
     attempt: 3
   }, 'generating');
 
   assert.deepEqual(JSON.parse(JSON.stringify(sent)), [{
     type: 'BATCH_TASK_PHASE',
     batchId: 'batch-1',
+    taskId: 'batch-1:2',
     urlIndex: 2,
+    profileId: 'profile-a',
+    promotionSiteId: 'site-a',
     attempt: 3,
     phase: 'generating'
   }]);

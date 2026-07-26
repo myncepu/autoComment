@@ -126,6 +126,65 @@ test('serves exactly five deterministic local target pages', async (t) => {
   });
 });
 
+test('serves five isolated assignment targets and records only safe task fields locally', async (t) => {
+  await withFixtureServer(t, async (origin) => {
+    const pages = await Promise.all(
+      [1, 2, 3, 4, 5].map(async (id) => {
+        const response = await fetch(`${origin}/multi/${id}`);
+        assert.equal(response.status, 200);
+        return response.text();
+      })
+    );
+    pages.forEach((html, index) => {
+      assert.match(html, new RegExp(`data-fixture-target="${index + 1}"`));
+      assert.match(html, /type="password"/);
+      assert.doesNotMatch(html, /https?:\/\/(?!127\\.0\\.0\\.1)/);
+    });
+    assert.deepEqual(
+      await fetch(`${origin}/__fixture/submissions`).then((response) => response.json()),
+      []
+    );
+
+    const response = await fetch(`${origin}/__fixture/submissions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        targetId: 2,
+        taskId: 'plan:3',
+        profileId: 'profile-a',
+        promotionSiteId: 'site-a',
+        name: 'Alice',
+        email: 'alice@example.test',
+        passwordPresent: true,
+        password: 'must-not-store',
+        websiteUrl: 'https://promo-a.test/',
+        comment: 'Local generated comment'
+      })
+    });
+    assert.equal(response.status, 201);
+    const records = await fetch(`${origin}/__fixture/submissions`)
+      .then((result) => result.json());
+    assert.deepEqual(records, [{
+      targetId: 2,
+      taskId: 'plan:3',
+      profileId: 'profile-a',
+      promotionSiteId: 'site-a',
+      name: 'Alice',
+      email: 'alice@example.test',
+      passwordPresent: true,
+      websiteUrl: 'https://promo-a.test/',
+      comment: 'Local generated comment'
+    }]);
+    assert.doesNotMatch(JSON.stringify(records), /must-not-store|password":/);
+
+    await fetch(`${origin}/__fixture/reset`, { method: 'POST' });
+    assert.deepEqual(
+      await fetch(`${origin}/__fixture/submissions`).then((result) => result.json()),
+      []
+    );
+  });
+});
+
 test('returns an OpenAI-compatible deterministic local model response', async (t) => {
   await withFixtureServer(t, async (origin) => {
     const response = await fetch(`${origin}/v1/chat/completions`, {

@@ -1164,6 +1164,61 @@ test('sanitizes BATCH_HANDLE URLs and diagnostic Chrome errors', async () => {
   assert.match(serializedError, /view=full/);
 });
 
+test('BATCH_HANDLE carries only the frozen non-sensitive task assignment', async () => {
+  const harness = createWorkerHarness({ concurrency: 1, taskCount: 1 });
+  Object.assign(harness.checkpoint, {
+    version: 3,
+    configRevision: 7,
+    profiles: {
+      'profile-a': {
+        id: 'profile-a',
+        displayName: '作者 A',
+        name: 'Alice',
+        email: 'alice@example.test'
+      }
+    },
+    promotionSites: {
+      'site-a': {
+        id: 'site-a',
+        name: '站点 A',
+        url: 'https://promo-a.test/',
+        content: 'Promotion A'
+      }
+    }
+  });
+  Object.assign(harness.checkpoint.tasks['0'], {
+    taskId: 'batch-1:1',
+    profileId: 'profile-a',
+    promotionSiteId: 'site-a',
+    assignmentPairId: 'pair-a',
+    assignmentSource: 'weighted'
+  });
+  delete harness.dependencies.sendHandle;
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+
+  await runtime.start(harness.checkpoint);
+
+  const [, message] = harness.tabsApi.sendMessageCalls.find(
+    ([, candidate]) => candidate.type === 'BATCH_HANDLE'
+  );
+  assert.deepEqual(message, {
+    type: 'BATCH_HANDLE',
+    batchId: 'batch-1',
+    taskId: 'batch-1:1',
+    urlIndex: 0,
+    attempt: 1,
+    url: 'https://target.test/0',
+    profileId: 'profile-a',
+    promotionSiteId: 'site-a',
+    assignmentPairId: 'pair-a',
+    assignmentSource: 'weighted',
+    configRevision: 7,
+    profile: harness.checkpoint.profiles['profile-a'],
+    promotionSite: harness.checkpoint.promotionSites['site-a']
+  });
+  assert.doesNotMatch(JSON.stringify(message), /password|secret/i);
+});
+
 test('ACTIVE persistence failure emits runtime-error, closes the tab, and pauses recovery', async () => {
   const harness = createWorkerHarness({ concurrency: 1, taskCount: 1 });
   const events = [];

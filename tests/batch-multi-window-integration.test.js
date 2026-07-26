@@ -276,6 +276,8 @@ async function createProductionHarness(options = {}) {
   const navigateCalls = [];
   let nextManualWindowId = 700;
   let nextOwnershipEpoch = 0;
+  let currentTime = 3000;
+  const runtimeNow = () => ++currentTime;
   const runtimeController = createBatchRuntimeController({
     storageArea: storageLocal,
     sessionJournal: createBatchSessionJournal(storageSession),
@@ -294,11 +296,12 @@ async function createProductionHarness(options = {}) {
         return `chrome-extension://extension-id/${file}`;
       }
     },
-    now: (() => {
-      let now = 3000;
-      return () => ++now;
-    })(),
+    now: runtimeNow,
     generateOwnershipEpoch: () => `test-epoch-${++nextOwnershipEpoch}`,
+    loadDomainConfig: async () => (
+      options.domainConfig || { revision: 0 }
+    ),
+    loadRecentSuccessUrls: async () => [],
     logger: { warn() {} }
   });
   const dom = new JSDOM(`<!doctype html>
@@ -397,6 +400,16 @@ async function createProductionHarness(options = {}) {
         timeoutSeconds: 60
       };
     },
+    ...(options.domainConfig
+      ? {
+          async loadDomainConfig() {
+            return clone(options.domainConfig);
+          },
+          async loadRecentSuccessUrls() {
+            return clone(options.recentSuccessUrls || []);
+          }
+        }
+      : {}),
     async loadLlmConfig() {
       return {
         apiBaseUrl: 'https://openrouter.ai/api/v1',
@@ -431,6 +444,7 @@ async function createProductionHarness(options = {}) {
     evaluateUrl() {
       return { blocked: false };
     },
+    clock: runtimeNow,
     onlineTarget: dom.window,
     isOnline: () => options.online !== false,
     navigate(href) {
@@ -950,7 +964,7 @@ test('history retry and retention status remain visible in the composed console'
   );
 });
 
-test('empty production boot composes profile-ready preflight wizard into a v2 start', async (t) => {
+test('empty production boot composes profile-ready preflight wizard into a v3 start', async (t) => {
   const harness = await createProductionHarness({
     checkpoint: null,
     createBatchId: () => 'batch-from-wizard'
@@ -969,7 +983,7 @@ test('empty production boot composes profile-ready preflight wizard into a v2 st
   );
 
   const current = harness.storageLocal.data.batchRuntimeCheckpoint;
-  assert.equal(current.version, 2);
+  assert.equal(current.version, 3);
   assert.equal(current.settings.assignment.identityId, 'default-identity');
   assert.equal(
     current.settings.assignment.promotionSiteId,
@@ -978,6 +992,238 @@ test('empty production boot composes profile-ready preflight wizard into a v2 st
   assert.equal(current.source.parsedUrls.length, 3);
   assert.equal(JSON.stringify(current).includes('test-only-key'), false);
   assert.ok(harness.draftWrites.length > 0);
+});
+
+test('dispatches five rows with frozen two-Profile two-Site combinations across three slots', async (t) => {
+  const domainConfig = {
+    version: 2,
+    revision: 12,
+    profiles: [
+      {
+        id: 'profile-a',
+        displayName: '作者 A',
+        name: 'Alice',
+        email: 'alice@example.test',
+        createdAt: 1,
+        updatedAt: 1
+      },
+      {
+        id: 'profile-b',
+        displayName: '作者 B',
+        name: 'Bob',
+        email: 'bob@example.test',
+        createdAt: 1,
+        updatedAt: 1
+      }
+    ],
+    promotionSites: [
+      {
+        id: 'site-a',
+        name: '产品 A',
+        url: 'https://promo-a.test/',
+        content: '介绍 A',
+        enabled: true,
+        createdAt: 1,
+        updatedAt: 1
+      },
+      {
+        id: 'site-b',
+        name: '产品 B',
+        url: 'https://promo-b.test/',
+        content: '介绍 B',
+        enabled: true,
+        createdAt: 1,
+        updatedAt: 1
+      }
+    ],
+    assignmentPolicy: {
+      defaultPairId: 'pair-a',
+      pairs: [
+        {
+          id: 'pair-a',
+          profileId: 'profile-a',
+          promotionSiteId: 'site-a',
+          weight: 1,
+          enabled: true
+        },
+        {
+          id: 'pair-b',
+          profileId: 'profile-b',
+          promotionSiteId: 'site-b',
+          weight: 1,
+          enabled: true
+        }
+      ],
+      quotas: {
+        batch: 100,
+        perProfile: 50,
+        perPromotionSite: 50,
+        perTargetDomain: 3
+      }
+    }
+  };
+  const harness = await createProductionHarness({
+    checkpoint: null,
+    domainConfig,
+    createBatchId: () => 'multi-plan'
+  });
+  t.after(() => harness.page.destroy());
+
+  click(harness.document, '[data-action="new-batch"]');
+  click(harness.document, '[data-action="wizard-next"]');
+  const csv = [
+    'URL,来源域名,profileId,promotionSiteId',
+    'https://one.test/post,one.test,profile-b,site-b',
+    'https://two.test/post,two.test,,',
+    'https://three.test/post,three.test,,',
+    'https://four.test/post,four.test,profile-a,site-a',
+    'https://five.test/post,five.test,,'
+  ].join('\n');
+  const fileInput = harness.document.querySelector('input[type="file"]');
+  Object.defineProperty(fileInput, 'files', {
+    configurable: true,
+    value: [{
+      name: 'five-targets.csv',
+      async arrayBuffer() {
+        return new TextEncoder().encode(csv).buffer;
+      }
+    }]
+  });
+  fileInput.dispatchEvent(new harness.dom.window.Event('change', { bubbles: true }));
+  await waitFor(
+    () => harness.document.querySelectorAll('[data-plan-row]').length === 5,
+    'five assignment preview rows'
+  );
+  click(harness.document, '[data-action="wizard-next"]');
+  click(harness.document, '[data-action="wizard-next"]');
+
+  for (const name of ['normalConfirmed', 'highRiskConfirmed']) {
+    const input = harness.document.querySelector(`[name="${name}"]`);
+    input.checked = true;
+    input.dispatchEvent(new harness.dom.window.Event('change', { bubbles: true }));
+    await waitFor(
+      () => harness.document.querySelector(`[name="${name}"]`)?.checked === true,
+      `${name} applied`
+    );
+  }
+  await waitFor(
+    () => harness.document.querySelector('[data-action="wizard-start"]').disabled === false,
+    'assignment plan confirmed'
+  );
+  click(harness.document, '[data-action="wizard-start"]');
+
+  await waitFor(
+    () => harness.runtimeMessages.some(
+      (message) => message.type === 'BATCH_SESSION_START'
+    ),
+    'assignment start request'
+  );
+  assert.doesNotMatch(
+    harness.document.body.textContent,
+    /confirmation_from_future|confirmation_expired|invalid_checkpoint/
+  );
+  await waitFor(
+    () => harness.tabsApi.sendCalls.filter(
+      ([, message]) => message.type === 'BATCH_HANDLE'
+    ).length === 3,
+    'three initial handles'
+  );
+  const handleCalls = harness.tabsApi.sendCalls.filter(
+    ([, message]) => message.type === 'BATCH_HANDLE'
+  );
+  const checkpoint = harness.storageLocal.data.batchRuntimeCheckpoint;
+  assert.equal(checkpoint.version, 3);
+  assert.equal(checkpoint.configRevision, 12);
+  assert.deepEqual(
+    Object.values(checkpoint.tasks).map((task) => [
+      task.profileId,
+      task.promotionSiteId,
+      task.assignmentSource
+    ]),
+    [
+      ['profile-b', 'site-b', 'explicit'],
+      ['profile-a', 'site-a', 'weighted'],
+      ['profile-b', 'site-b', 'weighted'],
+      ['profile-a', 'site-a', 'explicit'],
+      ['profile-a', 'site-a', 'weighted']
+    ]
+  );
+  assert.deepEqual(
+    handleCalls.map(([, message]) => [
+      message.profileId,
+      message.promotionSiteId,
+      message.profile.displayName,
+      message.promotionSite.name
+    ]),
+    [
+      ['profile-b', 'site-b', '作者 B', '产品 B'],
+      ['profile-a', 'site-a', '作者 A', '产品 A'],
+      ['profile-b', 'site-b', '作者 B', '产品 B']
+    ]
+  );
+  assert.doesNotMatch(
+    JSON.stringify({
+      checkpoint,
+      messages: handleCalls
+    }),
+    /password|secret/i
+  );
+
+  for (const urlIndex of [2, 0, 1, 4, 3]) {
+    await waitFor(
+      () => Number.isInteger(
+        harness.storageLocal.data.batchRuntimeCheckpoint.tasks[String(urlIndex)]
+          ?.tabId
+      ),
+      `task ${urlIndex} active`
+    );
+    const task = harness.storageLocal.data.batchRuntimeCheckpoint
+      .tasks[String(urlIndex)];
+    harness.emitRuntime({
+      type: 'BATCH_CONFIRMED',
+      batchId: 'multi-plan',
+      urlIndex,
+      attempt: task.attempt,
+      sourceTabId: task.tabId,
+      result: 'success',
+      aiContent: `result-${urlIndex}`,
+      historySaveStatus: 'saved',
+      historyPendingCount: 0
+    });
+    await waitFor(
+      () => harness.storageLocal.data.batchRuntimeCheckpoint
+        .tasks[String(urlIndex)].state === 'terminal',
+      `task ${urlIndex} terminal`
+    );
+  }
+
+  await waitFor(
+    () => harness.storageLocal.data.batchRuntimeCheckpoint.status === 'completed',
+    'multi-assignment completion'
+  );
+  assert.equal(
+    harness.tabsApi.sendCalls.filter(
+      ([, message]) => message.type === 'BATCH_HANDLE'
+    ).length,
+    5
+  );
+  const finished = harness.storageLocal.data.batchRuntimeCheckpoint;
+  assert.deepEqual(
+    [...finished.results]
+      .sort((left, right) => left.originalIndex - right.originalIndex)
+      .map((result) => [
+        result.profileId,
+        result.promotionSiteId,
+        result.aiContent
+      ]),
+    [
+      ['profile-b', 'site-b', 'result-0'],
+      ['profile-a', 'site-a', 'result-1'],
+      ['profile-b', 'site-b', 'result-2'],
+      ['profile-a', 'site-a', 'result-3'],
+      ['profile-a', 'site-a', 'result-4']
+    ]
+  );
 });
 
 test('an open wizard disables readiness and start when connectivity drops', async (t) => {

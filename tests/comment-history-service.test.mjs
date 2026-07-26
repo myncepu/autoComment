@@ -112,6 +112,162 @@ test('stores exactly one normalized bundle for a confirmed success', async () =>
   assert.equal(writes[0].anchors[0].hrefRaw, '/go');
 });
 
+test('cloud-enabled comment saves atomically enqueue without touching the network', async () => {
+  const outbox = [];
+  let transportCalls = 0;
+  const repository = {
+    async upsertIfFresher(bundle, options = {}) {
+      if (options.syncMutation) outbox.push(options.syncMutation);
+      return true;
+    }
+  };
+  const service = createCommentHistoryService({
+    repository,
+    storageLocal: createStorage(),
+    cloudSync: {
+      async isEnabled() {
+        return true;
+      },
+      buildCommentMutation(bundle) {
+        return {
+          mutationId: 'comment-mutation-1',
+          vaultId: 'vault-a',
+          entityType: 'comment',
+          entityId: bundle.comment.id,
+          operation: 'upsert',
+          payload: structuredClone(bundle),
+          createdAt: 1721000000100
+        };
+      }
+    },
+    transport: {
+      async push() {
+        transportCalls += 1;
+        throw new Error('comment save must not call cloud transport');
+      }
+    },
+    now: () => 1721000000100
+  });
+
+  assert.deepEqual(await service.saveConfirmedSuccess(makeMessage()), {
+    historySaveStatus: 'saved',
+    cloudQueueStatus: 'queued',
+    pendingCount: 0
+  });
+  assert.equal(outbox.length, 1);
+  assert.equal(outbox[0].entityId, 'batch-a:7');
+  assert.equal(transportCalls, 0);
+});
+
+test('cloud outbox failure retries only the local comment and reports queue recovery', async () => {
+  const calls = [];
+  const repository = {
+    async upsertIfFresher(bundle, options = {}) {
+      calls.push({
+        commentId: bundle.comment.id,
+        hasSyncMutation: Boolean(options.syncMutation),
+        syncRepairMarker: structuredClone(options.syncRepairMarker)
+      });
+      if (options.syncMutation) {
+        const error = new Error('outbox unavailable');
+        error.code = 'SYNC_OUTBOX_WRITE_FAILED';
+        throw error;
+      }
+      return true;
+    }
+  };
+  const storageLocal = createStorage();
+  const service = createCommentHistoryService({
+    repository,
+    storageLocal,
+    cloudSync: {
+      async isEnabled() {
+        return true;
+      },
+      buildCommentMutation(bundle) {
+        return {
+          mutationId: 'comment-mutation-1',
+          vaultId: 'vault-a',
+          entityType: 'comment',
+          entityId: bundle.comment.id,
+          operation: 'upsert',
+          payload: structuredClone(bundle),
+          createdAt: 1721000000100
+        };
+      }
+    },
+    now: () => 1721000000100
+  });
+
+  assert.deepEqual(await service.saveConfirmedSuccess(makeMessage()), {
+    historySaveStatus: 'saved',
+    cloudQueueStatus: 'failed',
+    pendingCount: 0
+  });
+  assert.deepEqual(calls, [
+    {
+      commentId: 'batch-a:7',
+      hasSyncMutation: true,
+      syncRepairMarker: undefined
+    },
+    {
+      commentId: 'batch-a:7',
+      hasSyncMutation: false,
+      syncRepairMarker: {
+        vaultId: 'vault-a',
+        markerId: 'comment-mutation-1'
+      }
+    }
+  ]);
+  assert.deepEqual(storageLocal.data, {});
+});
+
+test('cannot report a saved fallback when its durable sync repair marker fails', async () => {
+  const repository = {
+    async upsertIfFresher(_bundle, options = {}) {
+      const error = new Error(
+        options.syncMutation ? 'outbox unavailable' : 'repair marker unavailable'
+      );
+      error.code = options.syncMutation
+        ? 'SYNC_OUTBOX_WRITE_FAILED'
+        : 'SYNC_REPAIR_MARKER_FAILED';
+      throw error;
+    }
+  };
+  const storageLocal = createStorage();
+  const service = createCommentHistoryService({
+    repository,
+    storageLocal,
+    cloudSync: {
+      async isEnabled() {
+        return true;
+      },
+      buildCommentMutation(bundle) {
+        return {
+          mutationId: 'comment-mutation-repair-failure',
+          vaultId: 'vault-a',
+          entityType: 'comment',
+          entityId: bundle.comment.id,
+          operation: 'upsert',
+          payload: structuredClone(bundle),
+          createdAt: 1721000000100
+        };
+      }
+    },
+    now: () => 1721000000100,
+    createPendingEntryId: () => 'repair-failure'
+  });
+
+  assert.deepEqual(await service.saveConfirmedSuccess(makeMessage()), {
+    historySaveStatus: 'queued',
+    pendingCount: 1
+  });
+  assert.equal(
+    storageLocal.data['historyPending:v2:repair-failure'].commentId,
+    'batch-a:7'
+  );
+});
+
 test('skips history writes for every non-success result', async () => {
   let writeCount = 0;
   const service = createCommentHistoryService({
@@ -1455,4 +1611,22 @@ test('delegates confirmed cleanup to one atomic repository operation without ser
     exportSessionId: 'export-session-a',
     confirmedAt: EXPORT_NOW
   }]);
+});
+
+test('delegates the recent successful target URL cutoff to the repository', async () => {
+  const calls = [];
+  const service = createCommentHistoryService({
+    repository: {
+      async listRecentSuccessfulTargetUrls(input) {
+        calls.push(input);
+        return ['https://target.test/post'];
+      }
+    },
+    storageLocal: createStorage()
+  });
+
+  assert.deepEqual(await service.listRecentSuccessfulTargetUrls({ since: 123 }), [
+    'https://target.test/post'
+  ]);
+  assert.deepEqual(calls, [{ since: 123 }]);
 });

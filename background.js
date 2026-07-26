@@ -4,11 +4,34 @@ import { openCommentHistoryDb } from './lib/comment-history-db.mjs';
 import { createCommentHistoryService } from './lib/comment-history-service.mjs';
 import { installCommentHistoryMessageListener } from './lib/comment-history-message-listener.mjs';
 import { installCommentHistoryRetention } from './lib/comment-history-retention.mjs';
+import { installCloudSyncMessageListener } from './lib/cloud-sync-message-listener.mjs';
+import {
+  createCloudRetentionService,
+  createCloudSyncRuntime,
+  createLazyCloudSyncRepository,
+  installCloudSyncBackground
+} from './lib/cloud-sync-background.mjs';
+import { migratePasswordToLocal } from './lib/cloud-sync-settings.mjs';
+import { cloudQueueStatusFields } from './lib/cloud-sync-batch-status.mjs';
 import { createBatchResultStore } from './lib/batch-result-store.mjs';
 import {
   createBatchRuntimeController,
   installBatchRuntimeController
 } from './lib/batch-runtime-controller.mjs';
+import { createDomainConfigRepository } from './lib/domain-config-repository.mjs';
+import {
+  installBatchDomainConfigListener
+} from './lib/batch-domain-config-listener.mjs';
+import { createProfileSecretRepository } from './lib/profile-secret-repository.mjs';
+import {
+  installProfileSecretMessageListener
+} from './lib/profile-secret-message-listener.mjs';
+import { migrateLegacyDomainConfig } from './lib/domain-config-migration.mjs';
+import {
+  createBatchSecretAwareRuntimeController,
+  createBatchSecretVaultStore,
+  installBatchSecretVaultListener
+} from './lib/batch-secret-vault.mjs';
 import {
   createBatchSessionJournal
 } from './lib/batch-session-journal.mjs';
@@ -21,15 +44,40 @@ import { isDurableBatchConfirmation } from './lib/batch-scheduler.mjs';
 installLlmMessageListener(chrome);
 installActionClickHandler(chrome);
 const batchResultStore = createBatchResultStore(chrome.storage.local);
+const domainConfigRepository = createDomainConfigRepository(chrome.storage.local);
+const profileSecretRepository = createProfileSecretRepository(chrome.storage.local);
+const batchSecretVaultStore = createBatchSecretVaultStore(chrome.storage.local);
 const batchRuntimeController = createBatchRuntimeController({
   storageArea: chrome.storage.local,
   sessionJournal: createBatchSessionJournal(chrome.storage.session),
   power: chrome.power,
   tabs: chrome.tabs,
   windows: chrome.windows,
-  runtime: chrome.runtime
+  runtime: chrome.runtime,
+  loadDomainConfig: () => domainConfigRepository.load(),
+  loadRecentSuccessUrls: () => (
+    commentHistoryService.listRecentSuccessfulTargetUrls({
+      since: Date.now() - (24 * 60 * 60 * 1000)
+    })
+  ),
+  prepareStartStoragePatch: async ({
+    checkpoint,
+    eligibleProfileIds
+  }) => {
+    const entry = await batchSecretVaultStore.buildPreparedEntry(
+      checkpoint.batchId,
+      eligibleProfileIds,
+      profileSecretRepository
+    );
+    return batchSecretVaultStore.buildStoragePatch(
+      checkpoint.batchId,
+      entry
+    );
+  },
+  cleanupPreparedStart: ({ batchId }) => (
+    batchSecretVaultStore.clear(batchId)
+  )
 });
-installBatchRuntimeController(chrome, batchRuntimeController);
 const batchSubmitContextStore = createBatchSubmitContextStore(
   chrome.storage.local,
   { maxAgeMs: Number.POSITIVE_INFINITY }
@@ -43,53 +91,81 @@ installBatchSubmitContextListener(chrome, batchSubmitContextStore, {
   )
 });
 
-let commentHistoryRepositoryPromise;
+const commentHistoryRepository = createLazyCloudSyncRepository(
+  () => openCommentHistoryDb()
+);
 
-function getCommentHistoryRepository() {
-  if (!commentHistoryRepositoryPromise) {
-    commentHistoryRepositoryPromise = openCommentHistoryDb();
-  }
-  return commentHistoryRepositoryPromise;
-}
-
-async function callCommentHistoryRepository(method, args) {
-  const repository = await getCommentHistoryRepository();
-  return repository[method](...args);
-}
-
-const commentHistoryRepository = {
-  upsertRecord: (...args) => callCommentHistoryRepository('upsertRecord', args),
-  upsertIfFresher: (...args) => callCommentHistoryRepository('upsertIfFresher', args),
-  insertLegacyIfAbsent: (...args) => (
-    callCommentHistoryRepository('insertLegacyIfAbsent', args)
-  ),
-  getRecord: (...args) => callCommentHistoryRepository('getRecord', args),
-  queryRecords: (...args) => callCommentHistoryRepository('queryRecords', args),
-  countRecords: (...args) => callCommentHistoryRepository('countRecords', args),
-  getRetentionSummary: (...args) => callCommentHistoryRepository('getRetentionSummary', args),
-  getExportChunk: (...args) => callCommentHistoryRepository('getExportChunk', args),
-  deleteConfirmed: (...args) => callCommentHistoryRepository('deleteConfirmed', args),
-  deleteExportSessionAtomic: (...args) => (
-    callCommentHistoryRepository('deleteExportSessionAtomic', args)
-  ),
-  listArchiveEvents: (...args) => callCommentHistoryRepository('listArchiveEvents', args),
-  getMeta: (...args) => callCommentHistoryRepository('getMeta', args),
-  setMeta: (...args) => callCommentHistoryRepository('setMeta', args)
-};
+const cloudSyncService = createCloudSyncRuntime({
+  repository: commentHistoryRepository,
+  domainConfigRepository,
+  storage: chrome.storage,
+  fetchImpl: fetch
+});
+const secretAwareBatchRuntimeController = createBatchSecretAwareRuntimeController(
+  batchRuntimeController,
+  batchSecretVaultStore
+);
+const domainConfigReady = (async () => {
+  await migratePasswordToLocal(chrome.storage);
+  return migrateLegacyDomainConfig({
+    storage: chrome.storage,
+    configRepository: domainConfigRepository,
+    secretRepository: profileSecretRepository
+  });
+})();
+installProfileSecretMessageListener(
+  chrome,
+  profileSecretRepository,
+  { ready: domainConfigReady }
+);
 
 const commentHistoryService = createCommentHistoryService({
   repository: commentHistoryRepository,
-  storageLocal: chrome.storage.local
+  storageLocal: chrome.storage.local,
+  cloudSync: cloudSyncService
 });
 
 installCommentHistoryMessageListener(chrome, commentHistoryService);
-const commentHistoryRetention = installCommentHistoryRetention(chrome, {
-  getRetentionStatus: (...args) => commentHistoryService.getRetentionStatus(...args),
-  getMeta: (...args) => commentHistoryRepository.getMeta(...args),
-  setMeta: (...args) => commentHistoryRepository.setMeta(...args)
-}, {
-  startImmediately: false
+void domainConfigReady.then(() => {
+  installBatchRuntimeController(chrome, secretAwareBatchRuntimeController);
+  installBatchDomainConfigListener(chrome, domainConfigRepository);
+  installBatchSecretVaultListener(chrome, {
+    vaultStore: batchSecretVaultStore,
+    checkpointReader: async () => {
+      const response = await batchRuntimeController.handleMessage({
+        type: 'BATCH_SESSION_GET'
+      });
+      return response.ok ? response.checkpoint : null;
+    }
+  });
+  void batchRuntimeController.handleMessage({
+    type: 'BATCH_SESSION_GET'
+  }).then((response) => {
+    if (response.ok) {
+      return batchSecretVaultStore.cleanupOrphans(response.checkpoint);
+    }
+    return undefined;
+  }).catch(() => {
+    console.warn('[background] Batch secret cleanup deferred');
+  });
+  installCloudSyncMessageListener(chrome, cloudSyncService);
+  if (typeof chrome.storage?.onChanged?.addListener === 'function') {
+    void installCloudSyncBackground(chrome, cloudSyncService);
+  }
+}).catch(() => {
+  console.warn('[background] Domain configuration migration deferred');
 });
+const commentHistoryRetention = installCommentHistoryRetention(
+  chrome,
+  createCloudRetentionService({
+    commentHistoryService,
+    cloudSyncService,
+    repository: commentHistoryRepository
+  }),
+  {
+    startImmediately: false
+  }
+);
 
 (async () => {
   try {
@@ -162,7 +238,8 @@ async function clearExactSubmitContext(message, sender) {
 async function saveDurableHistory(message, sender) {
   const {
     historySaveStatus,
-    pendingCount: historyPendingCount
+    pendingCount: historyPendingCount,
+    cloudQueueStatus
   } = await commentHistoryService.saveConfirmedSuccess({
     ...message,
     result: message.result ?? 'success'
@@ -177,6 +254,8 @@ async function saveDurableHistory(message, sender) {
   await clearExactSubmitContext(message, sender);
   return {
     historySaveStatus,
+    ...cloudQueueStatusFields(cloudQueueStatus),
+    ...(cloudQueueStatus ? { cloudQueueStatus } : {}),
     ...(Number.isInteger(historyPendingCount) ||
       historyPendingCount === null
       ? { historyPendingCount }
@@ -189,6 +268,7 @@ async function broadcastBatchConfirmed(
   {
     historySaveStatus,
     historyPendingCount,
+    cloudQueueStatus,
     sourceTabId,
     sender,
     terminalSideEffect
@@ -213,6 +293,8 @@ async function broadcastBatchConfirmed(
     Object.hasOwn(sideEffect, 'historyPendingCount')
       ? sideEffect.historyPendingCount
       : historyPendingCount;
+  const effectiveCloudQueueStatus =
+    sideEffect.cloudQueueStatus ?? cloudQueueStatus;
   if (
     checkpoint.changed === false &&
     typeof terminalSideEffect === 'function'
@@ -220,7 +302,10 @@ async function broadcastBatchConfirmed(
     return {
       checkpoint,
       historySaveStatus: effectiveHistorySaveStatus,
-      historyPendingCount: effectiveHistoryPendingCount
+      historyPendingCount: effectiveHistoryPendingCount,
+      ...(effectiveCloudQueueStatus
+        ? { cloudQueueStatus: effectiveCloudQueueStatus }
+        : {})
     };
   }
   await chrome.runtime.sendMessage({
@@ -240,6 +325,7 @@ async function broadcastBatchConfirmed(
       effectiveHistoryPendingCount === null
       ? { historyPendingCount: effectiveHistoryPendingCount }
       : {}),
+    ...cloudQueueStatusFields(effectiveCloudQueueStatus),
     ...(Number.isInteger(sourceTabId) ? { sourceTabId } : {})
   }).then(() => {
     console.log('[background] BATCH_CONFIRMED 发送成功');
@@ -253,14 +339,22 @@ async function broadcastBatchConfirmed(
   return {
     checkpoint,
     historySaveStatus: effectiveHistorySaveStatus,
-    historyPendingCount: effectiveHistoryPendingCount
+    historyPendingCount: effectiveHistoryPendingCount,
+    ...(effectiveCloudQueueStatus
+      ? { cloudQueueStatus: effectiveCloudQueueStatus }
+      : {})
   };
 }
 
 // content.js 确认评论已提交（标签页可能刷新，context 丢失，background 仍活着）
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message && message.type === 'BATCH_HANDLE_CONFIRM') {
-    console.log('[background] 收到 BATCH_HANDLE_CONFIRM >>>', { batchId: message.batchId, urlIndex: message.urlIndex, url: message.url, aiContentLen: message.aiContent ? message.aiContent.length : 0, sender: sender.tab ? sender.tab.id : 'N/A', time: new Date().toISOString() });
+    console.log('[background] 收到 BATCH_HANDLE_CONFIRM >>>', {
+      batchId: message.batchId,
+      urlIndex: message.urlIndex,
+      aiContentLength: message.aiContent ? message.aiContent.length : 0,
+      senderTabId: sender.tab?.id ?? null
+    });
     (async () => {
       try {
         const committed = await broadcastBatchConfirmed(message, {
@@ -283,12 +377,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
         const {
           historySaveStatus,
-          historyPendingCount
+          historyPendingCount,
+          cloudQueueStatus
         } = committed;
 
         sendResponse({
           ok: true,
           historySaveStatus,
+          ...cloudQueueStatusFields(cloudQueueStatus),
           ...(Number.isInteger(historyPendingCount) || historyPendingCount === null
             ? { historyPendingCount }
             : {})
@@ -326,6 +422,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({
           ok: true,
           historySaveStatus: committed.historySaveStatus,
+          ...cloudQueueStatusFields(committed.cloudQueueStatus),
           ...(Number.isInteger(committed.historyPendingCount) ||
             committed.historyPendingCount === null
             ? { historyPendingCount: committed.historyPendingCount }

@@ -34,6 +34,62 @@ test('serializes concurrent contexts by tab id without overwriting', async () =>
   assert.equal((await store.get(22)).urlIndex, 1);
 });
 
+test('persists complete assignment identity and matches every identity field', async () => {
+  const storage = createStorageArea();
+  const store = createBatchSubmitContextStore(storage, { now: () => 1000 });
+  const identity = {
+    batchId: 'batch-plan',
+    taskId: 'batch-plan:1',
+    urlIndex: 0,
+    profileId: 'profile-a',
+    promotionSiteId: 'site-a',
+    attempt: 1
+  };
+
+  await store.save(11, identity);
+
+  assert.deepEqual(await store.get(11), {
+    ...identity,
+    timestamp: 1000
+  });
+  assert.equal(await store.hasMatching(11, {
+    ...identity,
+    profileId: 'profile-b'
+  }), false);
+  assert.equal(await store.clearIfMatches(11, {
+    ...identity,
+    promotionSiteId: 'site-b'
+  }), false);
+  assert.equal(await store.clearIfMatches(11, identity), true);
+});
+
+test('normalizes an all-legacy identity but rejects partial assignment identity', async () => {
+  const storage = createStorageArea();
+  const store = createBatchSubmitContextStore(storage, { now: () => 1000 });
+
+  await store.save(11, {
+    batchId: 'batch-old',
+    urlIndex: 2,
+    attempt: 1
+  });
+
+  assert.deepEqual(await store.get(11), {
+    batchId: 'batch-old',
+    taskId: 'batch-old:legacy:2',
+    urlIndex: 2,
+    profileId: 'default-profile',
+    promotionSiteId: 'default-promotion-site',
+    attempt: 1,
+    timestamp: 1000
+  });
+  await assert.rejects(store.save(22, {
+    batchId: 'batch-plan',
+    taskId: 'batch-plan:2',
+    urlIndex: 1,
+    attempt: 1
+  }), /invalid_submit_context_identity/);
+});
+
 test('keeps contexts at ten minutes and removes contexts older than ten minutes', async () => {
   let now = 1000;
   const storage = createStorageArea();
@@ -74,6 +130,9 @@ test('can retain an exact pre-submit history context until durable acknowledgeme
   now += 30 * 24 * 60 * 60 * 1000;
   assert.deepEqual(await store.get(11), {
     ...context,
+    taskId: 'history-batch:legacy:4',
+    profileId: 'default-profile',
+    promotionSiteId: 'default-promotion-site',
     timestamp: 1000
   });
 });
@@ -169,7 +228,10 @@ test('rejects an incomplete context identity without changing the saved context'
   );
   assert.deepEqual(await store.get(11), {
     batchId: 'batch-complete',
+    taskId: 'batch-complete:legacy:3',
     urlIndex: 3,
+    profileId: 'default-profile',
+    promotionSiteId: 'default-promotion-site',
     attempt: 2,
     timestamp: 1000
   });
@@ -199,7 +261,10 @@ test('rejects a delayed older attempt without replacing the current tab context'
   );
   assert.deepEqual(await store.get(11), {
     batchId: 'batch-retry',
+    taskId: 'batch-retry:legacy:3',
     urlIndex: 3,
+    profileId: 'default-profile',
+    promotionSiteId: 'default-promotion-site',
     attempt: 2,
     timestamp: 1000
   });
@@ -240,6 +305,9 @@ test('sealAndRecover atomically moves an unresolved context into the task recove
     storage.data.batchSubmitRecoveriesByTask
   ), [{
     ...context,
+    taskId: 'batch-recovery:legacy:4',
+    profileId: 'default-profile',
+    promotionSiteId: 'default-promotion-site',
     sourceTabId: 88,
     recoveredAt: 3000,
     recoveryReason: 'timeout'
@@ -449,7 +517,14 @@ test('listener preserves unacknowledged context when its tab closes', async () =
   });
   assert.deepEqual(recovered, [{
     tabId: 77,
-    expected: { batchId: 'batch-query', urlIndex: 5, attempt: 1 },
+    expected: {
+      batchId: 'batch-query',
+      taskId: 'batch-query:legacy:5',
+      urlIndex: 5,
+      profileId: 'default-profile',
+      promotionSiteId: 'default-promotion-site',
+      attempt: 1
+    },
     reason: 'timeout'
   }]);
   assert.equal(tabRemovedListener, undefined);

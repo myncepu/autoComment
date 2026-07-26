@@ -87,6 +87,30 @@ test('clears only the submit context matching the acknowledged history revision'
   }]);
 });
 
+test('carries task, profile, and promotion site identity without sensitive fields', async () => {
+  const { client, messages } = loadClient();
+  const match = {
+    batchId: 'batch-plan',
+    taskId: 'batch-plan:1',
+    urlIndex: 0,
+    profileId: 'profile-a',
+    promotionSiteId: 'site-a',
+    attempt: 1
+  };
+
+  await client.save({ ...match, history: { commentHtml: 'body' } });
+  await client.clear(match);
+
+  assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{
+    type: 'BATCH_SAVE_SUBMIT_CONTEXT',
+    context: { ...match, history: { commentHtml: 'body' } }
+  }, {
+    type: 'BATCH_CLEAR_SUBMIT_CONTEXT',
+    match
+  }]);
+  assert.doesNotMatch(JSON.stringify(messages), /password|secret/i);
+});
+
 test('acknowledged confirmation relies on the background transaction to clear context', async () => {
   const { client, messages } = loadClient({
     BATCH_HANDLE_CONFIRM: { ok: true }

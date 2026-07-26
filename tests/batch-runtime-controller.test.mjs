@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { webcrypto } from 'node:crypto';
 import test from 'node:test';
 
 import {
@@ -14,6 +15,10 @@ import {
 import {
   validateBatchRuntimeCheckpoint
 } from '../lib/batch-runtime-checkpoint.mjs';
+import {
+  createPlanConfirmation,
+  finalizeBatchPlan
+} from '../lib/batch-plan-confirmation.mjs';
 
 function deferred() {
   let resolve;
@@ -45,7 +50,14 @@ function createItems(count) {
   }));
 }
 
-function createHarness({ failPower = false, existingTabs = [] } = {}) {
+function createHarness({
+  failPower = false,
+  existingTabs = [],
+  prepareStartStoragePatch,
+  cleanupPreparedStart,
+  currentConfigRevision = 7,
+  loadRecentSuccessUrls = async () => []
+} = {}) {
   const data = {};
   const setCalls = [];
   const powerCalls = [];
@@ -223,6 +235,10 @@ function createHarness({ failPower = false, existingTabs = [] } = {}) {
     runtime,
     sessionJournal: createBatchSessionJournal(sessionArea),
     generateOwnershipEpoch: () => 'epoch-test',
+    loadDomainConfig: async () => ({ revision: currentConfigRevision }),
+    loadRecentSuccessUrls,
+    prepareStartStoragePatch,
+    cleanupPreparedStart,
     now: () => {
       clock += 100;
       return clock;
@@ -327,6 +343,74 @@ function startMessage(count = 2) {
   };
 }
 
+async function assignmentStartMessage() {
+  const plan = await finalizeBatchPlan({
+    version: 2,
+    planId: 'batch-plan',
+    planFingerprint: null,
+    configRevision: 7,
+    createdAt: 900,
+    illegalSiteRulesVersion: 'fixture-v1',
+    quotas: {
+      batch: 100,
+      perProfile: 50,
+      perPromotionSite: 50,
+      perTargetDomain: 3
+    },
+    repeatOverrides: [],
+    profiles: {
+      'profile-a': {
+        id: 'profile-a',
+        displayName: '作者 A',
+        name: 'Alice',
+        email: 'alice@example.test'
+      }
+    },
+    promotionSites: {
+      'site-a': {
+        id: 'site-a',
+        name: '站点 A',
+        url: 'https://promo-a.test/',
+        content: 'Promotion A'
+      }
+    },
+    tasks: [{
+      taskId: 'batch-plan:1',
+      urlIndex: 0,
+      rowNumber: 1,
+      targetUrl: 'https://target.test/one',
+      canonicalTargetUrl: 'https://target.test/one',
+      targetDomain: 'target.test',
+      sourceDomain: 'target.test',
+      profileId: 'profile-a',
+      promotionSiteId: 'site-a',
+      assignmentPairId: 'pair-a',
+      assignmentSource: 'weighted',
+      state: 'eligible',
+      blockReason: null,
+      recentSuccessOverride: false
+    }],
+    warnings: [],
+    confirmationRequirements: []
+  }, webcrypto);
+  return {
+    type: 'BATCH_SESSION_START',
+    batchId: 'batch-plan',
+    plan,
+    confirmation: createPlanConfirmation(plan, {
+      normalConfirmed: true,
+      highRiskConfirmed: false
+    }, () => 1_000),
+    settings: {
+      autoOpenPanel: true,
+      autoGenerate: true,
+      autoSubmit: true,
+      timeoutSeconds: 60,
+      concurrency: 2
+    }
+  };
+}
+
 function batchPageSender(overrides = {}) {
   return {
     id: 'extension-id',
@@ -407,14 +491,184 @@ test('migrates version 1 exactly once before returning it to the page', async ()
     type: 'BATCH_SESSION_GET'
   });
 
-  assert.equal(first.checkpoint.version, 2);
-  assert.equal(second.checkpoint.version, 2);
+  assert.equal(first.checkpoint.version, 3);
+  assert.equal(second.checkpoint.version, 3);
   assert.equal(
     harness.setCalls.filter(
-      (call) => call.batchRuntimeCheckpoint?.version === 2
+      (call) => call.batchRuntimeCheckpoint?.version === 3
     ).length,
     1
   );
+});
+
+test('rejects a plan changed after confirmation before persistence or power', async () => {
+  const harness = createHarness();
+  const message = await assignmentStartMessage();
+  message.plan = structuredClone(message.plan);
+  message.plan.tasks[0].profileId = 'profile-tampered';
+
+  const response = await harness.controller.handleMessage(message);
+
+  assert.deepEqual(response, {
+    ok: false,
+    error: 'plan_fingerprint_changed'
+  });
+  assert.deepEqual(harness.setCalls, []);
+  assert.deepEqual(harness.powerCalls, []);
+});
+
+test('rejects a confirmed plan after domain config changes with zero start effects', async () => {
+  const preparedCalls = [];
+  const harness = createHarness({
+    currentConfigRevision: 8,
+    prepareStartStoragePatch: async (input) => {
+      preparedCalls.push(input);
+      return {};
+    }
+  });
+
+  const response = await harness.controller.handleMessage(
+    await assignmentStartMessage()
+  );
+
+  assert.deepEqual(response, {
+    ok: false,
+    error: 'domain_config_changed'
+  });
+  assert.deepEqual(preparedCalls, []);
+  assert.deepEqual(harness.setCalls, []);
+  assert.deepEqual(harness.powerCalls, []);
+  assert.deepEqual(harness.createdTabs, []);
+});
+
+test('fails closed when recent-success history changes or is unavailable', async () => {
+  const message = await assignmentStartMessage();
+  const changed = createHarness({
+    loadRecentSuccessUrls: async () => [message.plan.tasks[0].targetUrl]
+  });
+  const changedResponse = await changed.controller.handleMessage(message);
+  assert.deepEqual(changedResponse, {
+    ok: false,
+    error: 'recent_success_history_changed'
+  });
+  assert.deepEqual(changed.setCalls, []);
+  assert.deepEqual(changed.powerCalls, []);
+
+  const unavailable = createHarness({
+    loadRecentSuccessUrls: async () => {
+      throw new Error('database unavailable');
+    }
+  });
+  const unavailableResponse = await unavailable.controller.handleMessage(
+    await assignmentStartMessage()
+  );
+  assert.deepEqual(unavailableResponse, {
+    ok: false,
+    error: 'recent_success_history_unavailable'
+  });
+  assert.deepEqual(unavailable.setCalls, []);
+  assert.deepEqual(unavailable.powerCalls, []);
+});
+
+test('reports batch ownership only to the exact active content tab', async () => {
+  const harness = createHarness();
+  const started = await harness.controller.handleMessage(
+    await assignmentStartMessage()
+  );
+  assert.equal(started.ok, true);
+  const active = await harness.controller.handleMessage({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-plan',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 501,
+    windowId: 42
+  });
+  assert.equal(active.ok, true);
+
+  assert.deepEqual(await harness.controller.handleMessage(
+    { type: 'BATCH_GET_TAB_MODE' },
+    { id: 'extension-id', tab: { id: 501, windowId: 42 } }
+  ), {
+    ok: true,
+    batchOwned: true
+  });
+  assert.deepEqual(await harness.controller.handleMessage(
+    { type: 'BATCH_GET_TAB_MODE' },
+    { id: 'extension-id', tab: { id: 502, windowId: 42 } }
+  ), {
+    ok: true,
+    batchOwned: false
+  });
+});
+
+test('atomically persists a confirmed v3 checkpoint with its prepared secret patch', async () => {
+  const preparedCalls = [];
+  const secretPatch = {
+    autoCommentBatchSecretVaults: {
+      'batch-plan': {
+        version: 1,
+        createdAt: 1_000,
+        passwordsByProfileId: { 'profile-a': 'test-secret' }
+      }
+    }
+  };
+  const harness = createHarness({
+    prepareStartStoragePatch: async (input) => {
+      preparedCalls.push(structuredClone(input));
+      return secretPatch;
+    }
+  });
+
+  const response = await harness.controller.handleMessage(
+    await assignmentStartMessage()
+  );
+
+  assert.equal(response.ok, true);
+  assert.equal(preparedCalls.length, 1);
+  assert.equal(preparedCalls[0].checkpoint.version, 3);
+  assert.deepEqual(preparedCalls[0].eligibleProfileIds, ['profile-a']);
+  assert.equal(harness.setCalls[0].batchRuntimeCheckpoint.version, 3);
+  assert.deepEqual(
+    harness.setCalls[0].autoCommentBatchSecretVaults,
+    secretPatch.autoCommentBatchSecretVaults
+  );
+  assert.equal(
+    JSON.stringify(harness.setCalls[0].batchRuntimeCheckpoint)
+      .includes('test-secret'),
+    false
+  );
+});
+
+test('power failure removes the unstarted checkpoint and prepared vault', async () => {
+  const cleanupCalls = [];
+  const harness = createHarness({
+    failPower: true,
+    prepareStartStoragePatch: async () => ({
+      autoCommentBatchSecretVaults: {
+        'batch-plan': {
+          version: 1,
+          createdAt: 1_000,
+          passwordsByProfileId: {}
+        }
+      }
+    }),
+    cleanupPreparedStart: async ({ batchId }) => {
+      cleanupCalls.push(batchId);
+      delete harness.data.autoCommentBatchSecretVaults;
+    }
+  });
+
+  const response = await harness.controller.handleMessage(
+    await assignmentStartMessage()
+  );
+
+  assert.equal(response.ok, false);
+  assert.equal(response.error, 'power_request_failed');
+  assert.deepEqual(cleanupCalls, ['batch-plan']);
+  assert.equal(harness.data.batchRuntimeCheckpoint, undefined);
+  assert.equal(harness.data.autoCommentBatchSecretVaults, undefined);
+  assert.equal(harness.createdTabs.length, 0);
 });
 
 test('returns the checkpoint updated by a task phase command', async () => {

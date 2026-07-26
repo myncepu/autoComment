@@ -38,7 +38,8 @@ function renderFixturePage({ requestedPath, targetId = '', delayMs = 0 }) {
 function writeJson(response, statusCode, body) {
   response.writeHead(statusCode, {
     ...CORS_HEADERS,
-    'Content-Type': 'application/json; charset=utf-8'
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store'
   });
   response.end(JSON.stringify(body));
 }
@@ -87,6 +88,8 @@ function getPromptText(body) {
 function getTargetId(prompt) {
   const pathMatch = prompt.match(/\/target\/([1-5])\b/i);
   if (pathMatch) return Number(pathMatch[1]);
+  const multiMatch = prompt.match(/\/multi\/([1-5])\b/i);
+  if (multiMatch) return Number(multiMatch[1]);
   const textMatch = prompt.match(/\btarget\s+([1-5])\b/i);
   return textMatch ? Number(textMatch[1]) : 1;
 }
@@ -97,13 +100,60 @@ function getClampedDelay(prompt) {
   return Math.max(0, Math.min(5000, Number(match[1])));
 }
 
+function safeSubmission(input) {
+  const text = (value, maximum = 10_000) => (
+    typeof value === 'string' ? value.slice(0, maximum) : ''
+  );
+  return {
+    targetId: Number.isInteger(input?.targetId) ? input.targetId : null,
+    taskId: text(input?.taskId, 200),
+    profileId: text(input?.profileId, 200),
+    promotionSiteId: text(input?.promotionSiteId, 200),
+    name: text(input?.name, 500),
+    email: text(input?.email, 500),
+    passwordPresent: input?.passwordPresent === true,
+    websiteUrl: text(input?.websiteUrl, 2_000),
+    comment: text(input?.comment, 20_000)
+  };
+}
+
 function createFixtureServer(options = {}) {
   const wait = typeof options.wait === 'function'
     ? options.wait
     : (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+  const submissions = [];
 
   return http.createServer(async (request, response) => {
     const requestUrl = new URL(request.url, 'http://127.0.0.1');
+
+    if (
+      request.method === 'GET'
+      && requestUrl.pathname === '/__fixture/submissions'
+    ) {
+      writeJson(response, 200, submissions);
+      return;
+    }
+    if (
+      request.method === 'POST'
+      && requestUrl.pathname === '/__fixture/reset'
+    ) {
+      submissions.length = 0;
+      writeJson(response, 200, { ok: true });
+      return;
+    }
+    if (
+      request.method === 'POST'
+      && requestUrl.pathname === '/__fixture/submissions'
+    ) {
+      try {
+        const submission = safeSubmission(await readBoundedJson(request));
+        submissions.push(submission);
+        writeJson(response, 201, submission);
+      } catch (_) {
+        writeJson(response, 400, { error: 'invalid_fixture_submission' });
+      }
+      return;
+    }
 
     if (requestUrl.pathname === MODEL_PATH) {
       if (request.method === 'OPTIONS') {
@@ -144,8 +194,9 @@ function createFixtureServer(options = {}) {
     }
 
     const targetMatch = requestUrl.pathname.match(/^\/target\/([1-5])$/);
+    const multiMatch = requestUrl.pathname.match(/^\/multi\/([1-5])$/);
     const isBasicFixture = requestUrl.pathname === '/' || requestUrl.pathname === '/comment-page.html';
-    if (!targetMatch && !isBasicFixture) {
+    if (request.method !== 'GET' || (!targetMatch && !multiMatch && !isBasicFixture)) {
       response.writeHead(404).end('Not Found');
       return;
     }
@@ -153,7 +204,7 @@ function createFixtureServer(options = {}) {
     response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     response.end(renderFixturePage({
       requestedPath: `${requestUrl.pathname}${requestUrl.search}`,
-      targetId: targetMatch?.[1] || '',
+      targetId: targetMatch?.[1] || multiMatch?.[1] || '',
       delayMs: getClampedDelay(requestUrl.search)
     }));
   });

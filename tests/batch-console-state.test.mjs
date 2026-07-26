@@ -101,6 +101,70 @@ test('filters by URL, stored error message, and AI content', () => {
   }).map((row) => row.urlIndex), [3]);
 });
 
+test('projects frozen Profile and Promotion Site labels and filters by stable IDs', () => {
+  const checkpoint = createConsoleCheckpointFixture();
+  checkpoint.version = 3;
+  checkpoint.profiles = {
+    'profile-a': {
+      id: 'profile-a',
+      displayName: '作者 A',
+      name: 'Private Alice',
+      email: 'private@example.test'
+    },
+    'profile-b': {
+      id: 'profile-b',
+      displayName: '作者 B',
+      name: 'Private Bob',
+      email: 'private-b@example.test'
+    }
+  };
+  checkpoint.promotionSites = {
+    'site-a': {
+      id: 'site-a',
+      name: '产品 A',
+      url: 'https://promo-a.test/',
+      content: 'A'
+    },
+    'site-b': {
+      id: 'site-b',
+      name: '产品 B',
+      url: 'https://promo-b.test/',
+      content: 'B'
+    }
+  };
+  checkpoint.tasks['0'].profileId = 'profile-a';
+  checkpoint.tasks['0'].promotionSiteId = 'site-a';
+  checkpoint.tasks['0'].assignmentPairId = 'pair-a';
+  checkpoint.tasks['0'].assignmentSource = 'explicit';
+  checkpoint.tasks['1'].profileId = 'profile-b';
+  checkpoint.tasks['1'].promotionSiteId = 'site-b';
+  checkpoint.tasks['1'].assignmentPairId = 'pair-b';
+  checkpoint.tasks['1'].assignmentSource = 'weighted';
+
+  const snapshot = createBatchConsoleSnapshot(checkpoint, {
+    filters: {
+      status: 'all',
+      domain: 'all',
+      profile: 'profile-b',
+      promotionSite: 'site-b',
+      timeRange: 'all',
+      keyword: ''
+    },
+    now: 5_000
+  });
+
+  assert.equal(snapshot.assignment.identityLabel, '2 个身份');
+  assert.equal(snapshot.assignment.promotionSiteLabel, '2 个推广网站');
+  assert.deepEqual(
+    snapshot.filteredRows.map(({ profileLabel, promotionSiteLabel }) => [
+      profileLabel,
+      promotionSiteLabel
+    ]),
+    [['作者 B', '产品 B']]
+  );
+  assert.doesNotMatch(JSON.stringify(snapshot.filteredRows), /Private|private@/);
+});
+
 test('exposes selected console fields without checkpoint passwords', () => {
   const checkpoint = createConsoleCheckpointFixture();
   checkpoint.settings.assignment.identitySnapshot = {

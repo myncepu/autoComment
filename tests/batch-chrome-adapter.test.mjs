@@ -472,3 +472,48 @@ test('keeps local history retry and retention compatibility behind runtime adapt
     { type: 'HISTORY_RETENTION_STATUS' }
   ]);
 });
+
+test('loads all recent successful URLs through the bounded 24-hour history query', async () => {
+  const harness = createChromeHarness();
+  harness.chromeApi.runtime.sendMessage = async (message) => {
+    harness.runtimeMessages.push(structuredClone(message));
+    if (message.type === 'HISTORY_RECENT_SUCCESS_URLS') {
+      return {
+        ok: true,
+        data: [
+          'https://target.test/one',
+          'https://target.test/two',
+          'https://target.test/one'
+        ]
+      };
+    }
+    return { ok: true };
+  };
+  const dependencies = createChromeBatchDependencies(
+    harness.chromeApi,
+    { now: () => 200_000_000 }
+  );
+
+  assert.deepEqual(await dependencies.loadRecentSuccessUrls(), [
+    'https://target.test/one',
+    'https://target.test/two'
+  ]);
+  assert.deepEqual(harness.runtimeMessages, [{
+    type: 'HISTORY_RECENT_SUCCESS_URLS',
+    since: 200_000_000 - (24 * 60 * 60 * 1000)
+  }]);
+});
+
+test('fails closed when recent-success history cannot be read', async () => {
+  const harness = createChromeHarness();
+  harness.chromeApi.runtime.sendMessage = async () => ({
+    ok: false,
+    error: { code: 'HISTORY_REQUEST_FAILED' }
+  });
+  const dependencies = createChromeBatchDependencies(harness.chromeApi);
+
+  await assert.rejects(
+    dependencies.loadRecentSuccessUrls(),
+    (error) => error.code === 'recent_success_history_unavailable'
+  );
+});

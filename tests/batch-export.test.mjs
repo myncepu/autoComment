@@ -95,6 +95,47 @@ test('checkpoint export redacts sensitive original-row columns', async () => {
   assert.equal(csv.includes('token-must-not-export'), false);
 });
 
+test('v3 export attributes every result to frozen Profile and Promotion Site labels', async () => {
+  const harness = createExportHarness();
+  const checkpoint = {
+    version: 3,
+    batchId: 'batch-v3',
+    profiles: {
+      'profile-a': {
+        id: 'profile-a',
+        displayName: '作者 A',
+        name: 'Private Name',
+        email: 'private@example.test'
+      }
+    },
+    promotionSites: {
+      'site-a': {
+        id: 'site-a',
+        name: '产品 A',
+        url: 'https://promo.test/',
+        content: 'Private configuration content'
+      }
+    },
+    source: { headers: ['URL'] },
+    results: [{
+      originalIndex: 0,
+      originalRow: ['https://target.test/'],
+      profileId: 'profile-a',
+      promotionSiteId: 'site-a',
+      result: 'success'
+    }]
+  };
+
+  exportBatchResultsCsv(harness.document, checkpoint, null);
+  const csv = await harness.blobs[0].text();
+  assert.equal(
+    csv,
+    'URL,Profile ID,Profile,Promotion Site ID,Promotion Site,运行结果\n'
+      + 'https://target.test/,profile-a,作者 A,site-a,产品 A,√'
+  );
+  assert.doesNotMatch(csv, /Private|private@/);
+});
+
 test('batch export neutralizes spreadsheet formulas in headers and cells', async () => {
   const harness = createExportHarness();
   const checkpoint = {

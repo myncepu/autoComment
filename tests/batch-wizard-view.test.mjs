@@ -156,6 +156,146 @@ test('moves through labelled steps and allows start when invalid rows stay exclu
   assert.equal(events.at(-1)[1].preflight.summary.included, 5);
 });
 
+test('renders column mapping, assignment preview, quotas, and risk-bound confirmations', () => {
+  const document = wizardDocument();
+  const changes = [];
+  const plan = {
+    planFingerprint: 'a'.repeat(64),
+    quotas: {
+      batch: 120,
+      perProfile: 50,
+      perPromotionSite: 50,
+      perTargetDomain: 3
+    },
+    confirmationRequirements: [
+      'multiple_assignments',
+      'raised_quota',
+      'recent_success_override'
+    ],
+    tasks: [
+      {
+        rowNumber: 2,
+        targetUrl: 'https://one.test/',
+        profileId: 'profile-a',
+        promotionSiteId: 'site-a',
+        assignmentSource: 'explicit',
+        state: 'eligible',
+        blockReason: null,
+        recentSuccessOverride: false
+      },
+      {
+        rowNumber: 3,
+        targetUrl: 'https://one.test/',
+        profileId: 'profile-b',
+        promotionSiteId: 'site-b',
+        assignmentSource: 'default_blocked',
+        state: 'blocked',
+        blockReason: 'duplicate_in_batch',
+        recentSuccessOverride: false
+      },
+      {
+        rowNumber: 4,
+        targetUrl: 'https://recent.test/',
+        profileId: 'profile-b',
+        promotionSiteId: 'site-b',
+        assignmentSource: 'weighted',
+        state: 'blocked',
+        blockReason: 'recent_success',
+        recentSuccessOverride: false
+      }
+    ]
+  };
+  const view = createBatchWizardView(document, {
+    onDraftChange(draft) {
+      changes.push(draft);
+    }
+  });
+
+  const domainDraft = {
+    ...validDraftFixture(),
+    step: 2,
+    domainConfig: {
+      profiles: [
+        { id: 'profile-a', displayName: '作者 A' },
+        { id: 'profile-b', displayName: '作者 B' }
+      ],
+      promotionSites: [
+        { id: 'site-a', name: '产品 A' },
+        { id: 'site-b', name: '产品 B' }
+      ],
+      assignmentPolicy: {
+        pairs: [
+          {
+            id: 'pair-a',
+            profileId: 'profile-a',
+            promotionSiteId: 'site-a',
+            weight: 2,
+            enabled: true
+          },
+          {
+            id: 'pair-b',
+            profileId: 'profile-b',
+            promotionSiteId: 'site-b',
+            weight: 1,
+            enabled: true
+          }
+        ],
+        quotas: plan.quotas
+      }
+    },
+    parsedCsv: {
+      headers: ['目标', '来源', '身份', '推广网站'],
+      rows: []
+    },
+    mapping: {
+      targetUrl: 0,
+      sourceDomain: 1,
+      profileRef: 2,
+      promotionSiteRef: 3
+    },
+    plan,
+    planSummary: {
+      status: { eligible: 1, blocked: 2 },
+      byBlockReason: {
+        duplicate_in_batch: 1,
+        recent_success: 1
+      },
+      byProfile: { 'profile-a': 1 },
+      byPromotionSite: { 'site-a': 1 }
+    },
+    confirmation: null
+  };
+  view.open(domainDraft);
+
+  assert.equal(document.querySelector('[name="mappingTargetUrl"]').value, '0');
+  assert.equal(document.querySelector('[name="mappingProfileRef"]').value, '2');
+  assert.match(document.querySelector('[data-plan-summary]').textContent, /可执行 1/);
+  assert.match(document.querySelector('[data-quota-summary]').textContent, /批次 120/);
+  assert.match(
+    document.querySelector('[data-plan-row="2"]').textContent,
+    /作者 A.*产品 A.*显式/
+  );
+  assert.equal(
+    document.querySelector('[data-plan-row="3"] [data-action="toggle-repeat-override"]'),
+    null
+  );
+  assert.ok(
+    document.querySelector('[data-plan-row="4"] [data-action="toggle-repeat-override"]')
+  );
+
+  view.render({
+    ...domainDraft,
+    step: 4,
+    confirmation: null
+  });
+  assert.ok(document.querySelector('[name="normalConfirmed"]'));
+  assert.ok(document.querySelector('[name="highRiskConfirmed"]'));
+  assert.match(document.querySelector('[data-confirmation-risks]').textContent, /多身份或多推广网站/);
+  assert.match(document.querySelector('[data-confirmation-risks]').textContent, /提高了配额/);
+  assert.match(document.querySelector('[data-confirmation-risks]').textContent, /近期成功目标/);
+  assert.equal(document.querySelector('[data-action="wizard-start"]').disabled, true);
+});
+
 test('requires assignment snapshots and keeps credentials out of emitted drafts', () => {
   const document = wizardDocument();
   const drafts = [];

@@ -18,9 +18,15 @@
 
       <section id="identity" class="settings-section" aria-labelledby="identity-heading">
         <h2 id="identity-heading" data-section-heading tabindex="-1">身份配置</h2>
-        <div class="hint">这些信息会用于注册和评论表单。</div>
+        <div class="hint">每个 Profile 独立保存姓名和邮箱；密码只保存在本机，不会导出或同步。</div>
+        <div class="row settings-selector-row">
+          <label for="profileSelect" class="inline-control-label">Profile</label>
+          <select id="profileSelect" class="settings-selector"></select>
+          <button id="newProfileBtn" class="btn btn-secondary" type="button">新建</button>
+        </div>
         <div class="identity-fields">
-          <label class="required-label required-label-compact">自动填表的个人信息（注册 / 评论表单）</label>
+          <label for="profileDisplayName">显示名</label>
+          <input type="text" id="profileDisplayName" class="required-field" placeholder="例如：作者 A" autocomplete="off" required />
           <div class="identity-fields-row">
             <div class="identity-field identity-field-name">
               <input type="text" id="userName" class="required-field" placeholder="姓名 / 昵称，例如：CloudHu" autocomplete="off" required />
@@ -32,14 +38,29 @@
             </div>
             <div class="identity-field">
               <input type="password" id="userPassword" placeholder="登录/注册时常用的密码（可选）" autocomplete="new-password" />
+              <div id="passwordConfiguredStatus" class="hint">未配置密码</div>
             </div>
           </div>
+        </div>
+        <div class="row">
+          <button id="saveProfileBtn" class="btn btn-primary" type="button">保存 Profile</button>
+          <button id="clearPasswordBtn" class="btn btn-secondary" type="button">清除密码</button>
+          <button id="deleteProfileBtn" class="btn btn-secondary danger" type="button">删除</button>
         </div>
       </section>
 
       <section id="promotion" class="settings-section" aria-labelledby="promotion-heading">
         <h2 id="promotion-heading" data-section-heading tabindex="-1">推广网站</h2>
-        <div class="hint">这里配置的内容会用于评论表单中的 Website / URL。</div>
+        <div class="hint">每个 Promotion Site 有独立 URL、描述和启用状态。</div>
+        <div class="row settings-selector-row">
+          <label for="promotionSiteSelect" class="inline-control-label">Promotion Site</label>
+          <select id="promotionSiteSelect" class="settings-selector"></select>
+          <button id="newPromotionSiteBtn" class="btn btn-secondary" type="button">新建</button>
+        </div>
+        <div class="field-block">
+          <label for="promotionSiteName">网站名称</label>
+          <input type="text" id="promotionSiteName" class="required-field" placeholder="例如：产品官网" required />
+        </div>
         <div class="field-block">
           <label for="websiteUrl" class="required-label required-label-compact">你的网站链接</label>
           <input
@@ -64,6 +85,46 @@
           ></textarea>
           <div class="required-hint">请填写你的网站内容，这会用于生成评论文案。</div>
         </div>
+        <label class="row checkbox-row">
+          <input id="promotionSiteEnabled" type="checkbox" checked />
+          启用此 Promotion Site
+        </label>
+        <div class="row">
+          <button id="savePromotionSiteBtn" class="btn btn-primary" type="button">保存网站</button>
+          <button id="deletePromotionSiteBtn" class="btn btn-secondary danger" type="button">删除</button>
+        </div>
+      </section>
+
+      <section id="assignment" class="settings-section" aria-labelledby="assignment-heading">
+        <h2 id="assignment-heading" data-section-heading tabindex="-1">批次分配策略</h2>
+        <div class="hint">Pair 是不可拆分的 Profile + Promotion Site 组合；权重用于未显式分配的 CSV 行。</div>
+        <div class="row settings-selector-row">
+          <label for="pairSelect" class="inline-control-label">Pair</label>
+          <select id="pairSelect" class="settings-selector"></select>
+          <button id="newPairBtn" class="btn btn-secondary" type="button">新建</button>
+        </div>
+        <div class="row assignment-pair-row">
+          <select id="pairProfileSelect" aria-label="Pair Profile" class="settings-selector"></select>
+          <select id="pairPromotionSiteSelect" aria-label="Pair Promotion Site" class="settings-selector"></select>
+          <label for="pairWeight" class="inline-control-label">权重</label>
+          <input id="pairWeight" class="weight-input" type="number" min="1" max="100" value="1" />
+          <label class="inline-checkbox"><input id="pairEnabled" type="checkbox" checked /> 启用</label>
+        </div>
+        <div class="row">
+          <button id="savePairBtn" class="btn btn-primary" type="button">保存 Pair</button>
+          <button id="deletePairBtn" class="btn btn-secondary danger" type="button">删除 Pair</button>
+        </div>
+        <div class="field-block">
+          <label for="defaultPairSelect">默认 Pair</label>
+          <select id="defaultPairSelect"></select>
+        </div>
+        <div class="row quota-row">
+          <label>批次上限<input id="quotaBatch" type="number" min="1" /></label>
+          <label>每 Profile<input id="quotaProfile" type="number" min="1" /></label>
+          <label>每网站<input id="quotaPromotionSite" type="number" min="1" /></label>
+          <label>每目标域名<input id="quotaTargetDomain" type="number" min="1" /></label>
+          <button id="savePolicyBtn" class="btn btn-primary" type="button">保存策略</button>
+        </div>
       </section>
 
       <section id="settings" class="settings-section" aria-labelledby="settings-heading">
@@ -85,9 +146,54 @@
         </div>
 
         <div class="row">
-          <button id="saveSettingsBtn" class="btn btn-primary">保存身份与推广网站</button>
           <span id="settingsStatus" class="status">已保存</span>
         </div>
+
+        <section
+          id="cloudSyncSection"
+          class="cloud-sync-section"
+          aria-labelledby="cloudSyncHeading"
+        >
+          <h2 id="cloudSyncHeading">Cloudflare 云同步</h2>
+          <div
+            id="cloudSyncStatus"
+            class="cloud-sync-status"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >正在读取状态…</div>
+          <label for="cloudSyncImportInput">同步密钥</label>
+          <input
+            id="cloudSyncImportInput"
+            type="password"
+            autocomplete="off"
+            spellcheck="false"
+            aria-describedby="cloudSyncKeyHint"
+            placeholder="acsync_…"
+          />
+          <div id="cloudSyncKeyHint" class="hint">
+            密钥只会在创建、导入或复制操作期间短暂读取，不会显示在页面中。
+          </div>
+          <div class="row" aria-label="云同步操作">
+            <button id="cloudSyncCreateBtn" class="btn btn-primary" type="button">创建同步密钥</button>
+            <button id="cloudSyncImportBtn" class="btn btn-secondary" type="button">导入同步密钥</button>
+            <button id="cloudSyncCopyBtn" class="btn btn-secondary" type="button">复制同步密钥</button>
+            <button id="cloudSyncRunBtn" class="btn btn-secondary" type="button">立即同步</button>
+          </div>
+          <div class="row">
+            <button id="cloudSyncDisconnectBtn" class="btn btn-secondary" type="button">断开此设备</button>
+            <button
+              id="cloudSyncDeleteBtn"
+              class="btn btn-secondary cloud-sync-danger"
+              type="button"
+            >删除全部云端数据</button>
+          </div>
+          <div class="cloud-sync-metadata" aria-label="云同步状态详情">
+            <div>最后同步：<span id="cloudSyncLastSuccess">—</span></div>
+            <div>等待上传：<span id="cloudSyncPendingCount">0</span></div>
+            <div>设备 ID：<span id="cloudSyncDeviceId">—</span></div>
+          </div>
+        </section>
 
         <div class="settings-card settings-card-neutral">
           <div class="settings-card-row">
@@ -128,6 +234,7 @@
             <button id="exportConfigBtn" class="btn btn-secondary">导出配置</button>
             <button id="importConfigBtn" class="btn btn-secondary">导入配置</button>
             <input type="file" id="importConfigFileInput" class="visually-hidden-file" accept=".json" />
+            <button id="applyImportConfigBtn" class="btn btn-primary" type="button" hidden>确认应用导入</button>
             <span id="importExportStatus" class="status status-warning"></span>
           </div>
         </div>
