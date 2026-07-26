@@ -90,6 +90,48 @@ test('creates background tabs in one configured window and indexes each by tab i
   assert.equal(manager.getByIndex(3), second);
 });
 
+test('propagates background checkpoint ownership with the task identity', async () => {
+  const tabsApi = createFakeTabsApi();
+  const runtimeCheckpoint = {
+    version: 2,
+    batchId: 'batch-a',
+    status: 'running'
+  };
+  let receivedIdentity = null;
+  tabsApi.create = async (details, identity) => {
+    tabsApi.createCalls.push(details);
+    receivedIdentity = identity;
+    return {
+      id: 210,
+      windowId: details.windowId,
+      url: 'https://checkpoint.test/comments',
+      backgroundCheckpointed: true,
+      runtimeCheckpoint
+    };
+  };
+  const manager = new BatchTabManager({
+    tabsApi,
+    windowId: 10,
+    now: () => 1234
+  });
+
+  const activity = await manager.create({
+    batchId: 'batch-a',
+    urlIndex: 2,
+    attempt: 3,
+    url: 'https://untrusted-page-value.test/comments'
+  });
+
+  assert.deepEqual(receivedIdentity, {
+    batchId: 'batch-a',
+    urlIndex: 2,
+    attempt: 3
+  });
+  assert.equal(activity.backgroundCheckpointed, true);
+  assert.equal(activity.runtimeCheckpoint, runtimeCheckpoint);
+  assert.equal(activity.url, 'https://checkpoint.test/comments');
+});
+
 test('expected close removes one tab without disturbing another worker in the shared window', async () => {
   const tabsApi = createFakeTabsApi();
   const unexpected = [];

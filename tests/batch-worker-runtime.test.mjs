@@ -27,6 +27,54 @@ test('opens no more than three attempt-aware background worker tabs in the conso
   ]);
 });
 
+test('uses a background-checkpointed create without a duplicate ACTIVE continuation', async () => {
+  let harness;
+  harness = createWorkerHarness({
+    concurrency: 1,
+    taskCount: 1,
+    tabsOptions: {
+      create(details) {
+        const checkpoint = structuredClone(harness.checkpoint);
+        Object.assign(checkpoint.tasks['0'], {
+          state: 'active',
+          tabId: 100,
+          windowId: 42,
+          startedAt: 1000
+        });
+        return {
+          id: 100,
+          windowId: 42,
+          url: 'https://target.test/0',
+          pendingUrl: null,
+          status: 'complete',
+          discarded: false,
+          backgroundCheckpointed: true,
+          runtimeCheckpoint: checkpoint
+        };
+      }
+    }
+  });
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+
+  await runtime.start(harness.checkpoint);
+
+  assert.equal(
+    harness.calls.some(
+      ([kind, type]) => kind === 'runtime' && type === 'BATCH_TASK_ACTIVE'
+    ),
+    false
+  );
+  assert.deepEqual(
+    harness.sentHandles.map(({ urlIndex, attempt, tabId, windowId }) => ({
+      urlIndex,
+      attempt,
+      tabId,
+      windowId
+    })),
+    [{ urlIndex: 0, attempt: 1, tabId: 100, windowId: 42 }]
+  );
+});
+
 test('confirmation seals and closes its tab before replenishing one worker slot', async () => {
   const harness = createWorkerHarness({ concurrency: 3, taskCount: 5 });
   const runtime = createBatchWorkerRuntime(harness.dependencies);

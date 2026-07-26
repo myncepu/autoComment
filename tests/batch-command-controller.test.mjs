@@ -1206,6 +1206,41 @@ test('offline cancels an in-flight persisted start before worker creation', asyn
   );
 });
 
+test('beginTeardown cancels a deferred persisted START without a page-owned pause', async () => {
+  const startGate = deferred();
+  const harness = createCommandHarness({
+    checkpoint: createCheckpoint({
+      status: 'paused_recovery',
+      taskState: 'queued'
+    }),
+    runtimeGates: { BATCH_SESSION_START: startGate }
+  });
+
+  const starting = harness.controller.start(startDraft());
+  await waitForCall(
+    harness.calls,
+    ([name, type]) => name === 'runtime' && type === 'BATCH_SESSION_START',
+    'persisted start'
+  );
+  harness.controller.beginTeardown('pagehide');
+  startGate.resolve();
+  const started = await starting;
+
+  assert.equal(started.status, 'running');
+  assert.equal(
+    harness.calls.some(([name]) => name === 'worker.start'),
+    false
+  );
+  assert.equal(
+    harness.calls.some(([name]) => name === 'draft.remove'),
+    false
+  );
+  assert.deepEqual(
+    harness.calls.filter(([name]) => name === 'runtime').map((call) => call[1]),
+    ['BATCH_SESSION_START']
+  );
+});
+
 test('teardown pause persistence failure publishes a local recovery checkpoint', async () => {
   const harness = createCommandHarness({
     runtimeFailures: {

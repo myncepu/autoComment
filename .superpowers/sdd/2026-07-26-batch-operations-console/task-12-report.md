@@ -13,11 +13,14 @@
   runtime, storage, tabs, and manual-window Chrome APIs. The production entry
   module imports without `document` or `chrome` globals and exposes no test
   hook.
-- Automatic workers are background tabs in the existing console window:
-  `tabs.create({ windowId, url, active: false })`. Normal windows are created
-  only by the explicit manual-work adapter and are returned with
-  `automation: false`; they do not receive `BATCH_HANDLE` and do not occupy
-  worker slots.
+- Automatic workers are background-owned tabs in the existing console
+  window. The page sends only batch/task identity; the serialized background
+  controller derives the checkpoint URL and the real batch-page
+  `sender.tab.windowId`, calls
+  `tabs.create({ windowId, url, active: false })`, and persists ACTIVE before
+  responding. Normal windows are created only by the explicit manual-work
+  adapter and are returned with `automation: false`; they do not receive
+  `BATCH_HANDLE` and do not occupy worker slots.
 - A restored paused checkpoint performs no automatic resume. Explicit resume
   first persists `BATCH_SESSION_RESUME`, then fills the configured three tab
   slots. Returning online never resumes work automatically.
@@ -168,6 +171,47 @@ explicit draft-write, immutable snapshot, old queued-row reconciliation, and
 deferred-completion tests document invariants that already belonged to their
 new modules and therefore passed without a production change.
 
+## Round 3 Trusted Sender and Atomic Worker Creation
+
+- `BATCH_PAGE_TEARDOWN` and `BATCH_CREATE_WORKER_TAB` accept only a real batch
+  page `MessageSender`: the extension ID must match, the sender URL must
+  resolve to this extension's exact `batch.html` resource path, and
+  `sender.tab.id` plus `sender.tab.windowId` must be integers. Content/http,
+  options-page, external-extension, and tabless forged senders are rejected.
+  Startup/recovery remain direct controller methods rather than a forged
+  service-worker message path.
+- Worker creation is a background-owned serialized operation shared with page
+  teardown. It validates the batch, URL index, attempt, queued task, and
+  running checkpoint; ignores page-provided URL/window values; creates an
+  inactive tab in the real console window; and persists the ACTIVE tab
+  identity before responding. If ACTIVE persistence fails, background closes
+  the newly created tab and leaves the task queued.
+- The page Chrome adapter exposes the same tab-manager contract but sends only
+  `{ batchId, urlIndex, attempt }`. The returned durable checkpoint is
+  propagated through `BatchTabManager`; worker runtime consumes it without a
+  duplicate `BATCH_TASK_ACTIVE` continuation. Background creation also
+  reasserts wakefulness after a service-worker restart.
+- Creation and teardown have no unowned interval. If creation enters the
+  background queue first, ACTIVE is persisted before teardown observes and
+  closes the tab. If teardown enters first, it persists `paused_recovery` and
+  the later create is rejected with `batch_teardown_cancelled`. Both tested
+  orderings finish with zero orphan IDs, including simulated page unload with
+  no page-side ACTIVE continuation.
+- A running console disables the new-batch/preview entry and clicking cannot
+  open the wizard. A separately deferred START observes `beginTeardown`
+  before worker startup; it creates zero tabs and issues no competing
+  page-owned pause, after which background teardown durably persists
+  `paused_recovery` with an empty orphan list.
+
+Round-3 RED evidence was observed for the real batch-page sender being
+rejected, the tabless forged sender being accepted, all five initial
+background-create contracts being unrouted, the page adapter still calling
+raw `tabs.create`, the tab manager dropping durable creation identity, the
+worker issuing duplicate ACTIVE, and restarted background creation failing to
+reassert wakefulness. Each production correction followed its focused
+failure. The running-entry and deferred-START tests document already-correct
+state/command barriers and passed without an additional production change.
+
 ## Legacy Race Coverage Map
 
 The removed monolith fixture is not retained. Each former integration
@@ -206,16 +250,17 @@ guarantee is owned and tested by the production module that now implements it:
     runtime-controller “a power acquisition failure leaves a new checkpoint
     safely paused”.
 12. `worker activity is checkpointed before the content task is sent` →
-    worker-runtime ACTIVE-before-handle call-order tests.
+    runtime-controller background create/ACTIVE persistence tests plus
+    worker-runtime background-checkpoint-before-handle coverage.
 13. `a paused checkpoint hydrates the complete page and resumes only on click`
     → composition paused boot/resume test.
 14. `paused checkpoint hydration rejects a task without an attempt identity` →
     checkpoint malformed-version-2 validation tests.
 15. `Clear during deferred Start invalidates the old continuation` → the old
     page-local Clear command no longer exists. Its cancellation invariant is
-    covered by composition “page teardown preempts an in-flight resume before
-    worker creation” and runtime-controller “late activation after page
-    teardown is cancelled and cleaned without restart”.
+    covered by command-controller `beginTeardown` versus deferred START,
+    composition durable deferred-START teardown, and runtime-controller
+    create/teardown serialization in both orderings.
 16. `settings persistence failure restores the claimed Start lifecycle to
     safe idle state` → command-controller “draft storage failure leaves Start
     safely unclaimed with no runtime side effects”.
@@ -259,8 +304,8 @@ guarantee is owned and tested by the production module that now implements it:
 
 - Affected composition/runtime/history command:
   `node --test tests/batch-multi-window-integration.test.js tests/batch-runtime-controller.test.mjs tests/batch-runtime-checkpoint.test.mjs tests/batch-command-controller.test.mjs tests/batch-worker-runtime.test.mjs tests/batch-window-manager.test.mjs tests/batch-chrome-adapter.test.mjs tests/batch-export.test.mjs tests/comment-history-page.test.mjs`
-  passed 189/189 with zero failures.
-- Full repository: `npm test` passed 446/446 with zero failures.
+  passed 202/202 with zero failures.
+- Full repository: `npm test` passed 459/459 with zero failures.
 - `node --check` passed for every changed JavaScript module and test.
 - `manifest.json` parsed successfully.
 - `batch.js` dynamically imported without DOM or Chrome globals.
@@ -291,5 +336,7 @@ guarantee is owned and tested by the production module that now implements it:
   `fix: harden batch console teardown and races`.
 - Round-2 hardening commit subject:
   `fix: move batch teardown ownership to background`.
+- Round-3 hardening commit subject:
+  `fix: atomically create background-owned batch tabs`.
 - The final commit SHA is reported in the task `DONE` handoff because a file
   cannot contain the hash of the commit that contains itself.

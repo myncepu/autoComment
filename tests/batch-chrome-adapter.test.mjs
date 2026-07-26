@@ -71,6 +71,22 @@ function createChromeHarness() {
         if (message.type === 'BATCH_RECOVER_SUBMIT_CONTEXT') {
           return { ok: true, sealed: true, recovered: false };
         }
+        if (message.type === 'BATCH_CREATE_WORKER_TAB') {
+          return {
+            ok: true,
+            checkpoint: {
+              version: 2,
+              batchId: message.batchId,
+              status: 'running'
+            },
+            tab: {
+              id: 501,
+              windowId: 42,
+              url: 'https://checkpoint.test/worker',
+              active: false
+            }
+          };
+        }
         return { ok: true, checkpoint: null };
       }
     },
@@ -217,6 +233,40 @@ test('routes runtime requests and accepts only own-extension page events', async
   ]);
   unsubscribe();
   assert.equal(harness.runtimeOnMessage.listeners.size, 0);
+});
+
+test('worker tab adapter requests an already-checkpointed background tab without trusting page details', async () => {
+  const harness = createChromeHarness();
+  const dependencies = createChromeBatchDependencies(harness.chromeApi);
+
+  const created = await dependencies.tabsApi.create({
+    windowId: 999,
+    url: 'https://attacker.test/ignored',
+    active: true
+  }, {
+    batchId: 'batch-1',
+    urlIndex: 3,
+    attempt: 2
+  });
+
+  assert.deepEqual(harness.runtimeMessages, [{
+    type: 'BATCH_CREATE_WORKER_TAB',
+    batchId: 'batch-1',
+    urlIndex: 3,
+    attempt: 2
+  }]);
+  assert.deepEqual(created, {
+    id: 501,
+    windowId: 42,
+    url: 'https://checkpoint.test/worker',
+    active: false,
+    backgroundCheckpointed: true,
+    runtimeCheckpoint: {
+      version: 2,
+      batchId: 'batch-1',
+      status: 'running'
+    }
+  });
 });
 
 test('loads only whitelisted profile and automation settings', async () => {

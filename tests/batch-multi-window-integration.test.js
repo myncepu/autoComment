@@ -630,6 +630,26 @@ test('paused production boot creates no tabs and explicit resume creates three s
   assert.match(harness.document.querySelector('[data-task-row="4"]').textContent, /排队/);
 });
 
+test('running console disables the new-batch preview entry and cannot open its wizard', async (t) => {
+  const harness = await createProductionHarness();
+  t.after(() => harness.page.destroy());
+  click(harness.document, '[data-action="resume"]');
+  await waitFor(
+    () => harness.storageLocal.data.batchRuntimeCheckpoint.status === 'running',
+    'running checkpoint'
+  );
+
+  const createButton = harness.document.querySelector(
+    '[data-action="new-batch"]'
+  );
+  assert.equal(createButton.disabled, true);
+  click(harness.document, '[data-action="new-batch"]');
+  assert.equal(
+    harness.document.querySelector('[data-batch-wizard]').hasAttribute('open'),
+    false
+  );
+});
+
 test('retry advances to attempt 2 and ignores an old attempt confirmation', async (t) => {
   const harness = await createProductionHarness({
     checkpoint: pausedCheckpoint({ manualFirst: true })
@@ -1054,6 +1074,57 @@ test('page teardown preempts an in-flight resume before worker creation', async 
       (message) => message.type === 'BATCH_PAGE_TEARDOWN'
     )?.reason,
     'pagehide'
+  );
+});
+
+test('page teardown durably cleans a deferred START cancelled by beginTeardown', async () => {
+  const startGate = deferred();
+  const harness = await createProductionHarness({
+    checkpoint: null,
+    createBatchId: () => 'deferred-start-batch',
+    runtimeGates: { BATCH_SESSION_START: startGate }
+  });
+  await prepareWizardForStart(harness);
+  click(harness.document, '[data-action="wizard-start"]');
+  await waitFor(
+    () => harness.runtimeMessages.some(
+      (message) => message.type === 'BATCH_SESSION_START'
+    ),
+    'deferred START'
+  );
+
+  const destroying = harness.page.destroy({ reason: 'pagehide' });
+  startGate.resolve();
+  await destroying;
+
+  assert.equal(
+    harness.storageLocal.data.batchRuntimeCheckpoint.status,
+    'paused_recovery'
+  );
+  assert.deepEqual(
+    harness.storageLocal.data.batchRuntimeCheckpoint
+      .recoveryCleanup.orphanTabIds,
+    []
+  );
+  assert.equal(harness.tabsApi.createCalls.length, 0);
+  assert.equal(harness.tabsApi.tabs.size, 0);
+  assert.equal(
+    harness.runtimeMessages.some(
+      (message) => message.type === 'BATCH_TASK_ACTIVE'
+    ),
+    false
+  );
+  assert.equal(
+    harness.runtimeMessages.some(
+      (message) => message.type === 'BATCH_SESSION_PAUSE'
+    ),
+    false
+  );
+  assert.equal(
+    harness.runtimeMessages.findLast(
+      (message) => message.type === 'BATCH_PAGE_TEARDOWN'
+    )?.batchId,
+    'deferred-start-batch'
   );
 });
 

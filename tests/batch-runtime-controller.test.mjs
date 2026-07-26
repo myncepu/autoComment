@@ -9,6 +9,24 @@ import {
   createChromeBatchDependencies
 } from '../lib/batch-chrome-adapter.mjs';
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+async function waitFor(predicate, label) {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.fail(`Timed out waiting for ${label}`);
+}
+
 function createItems(count) {
   return Array.from({ length: count }, (_, originalIndex) => ({
     originalIndex,
@@ -34,6 +52,7 @@ function createHarness({ failPower = false, existingTabs = [] } = {}) {
     messages: [],
     startup: []
   };
+  let nextCreatedTabId = 91;
   let clock = 1000;
   const storageArea = {
     async get(keys) {
@@ -79,7 +98,15 @@ function createHarness({ failPower = false, existingTabs = [] } = {}) {
     },
     async create(details) {
       createdTabs.push(structuredClone(details));
-      return { id: 91, ...details };
+      operationLog.push([
+        'tabs-create',
+        details.windowId ?? null,
+        details.url,
+        details.active ?? null
+      ]);
+      if (tabs.createGate) await tabs.createGate.promise;
+      if (tabs.createFailure) throw tabs.createFailure;
+      return { id: nextCreatedTabId++, ...details };
     },
     async remove(tabIds) {
       const ids = Array.isArray(tabIds) ? tabIds : [tabIds];
@@ -161,6 +188,38 @@ function startMessage(count = 2) {
       concurrency: 2
     }
   };
+}
+
+function batchPageSender(overrides = {}) {
+  return {
+    id: 'extension-id',
+    url: 'chrome-extension://extension-id/batch.html',
+    origin: 'chrome-extension://extension-id',
+    frameId: 0,
+    documentId: 'batch-document-id',
+    documentLifecycle: 'active',
+    tab: {
+      id: 70,
+      index: 0,
+      windowId: 42,
+      highlighted: true,
+      active: true,
+      pinned: false,
+      incognito: false,
+      url: 'chrome-extension://extension-id/batch.html',
+      title: '批量评论'
+    },
+    ...overrides
+  };
+}
+
+function sendInstalledMessage(listener, message, sender) {
+  return new Promise((resolve) => {
+    const accepted = listener(message, sender, resolve);
+    if (accepted !== true) {
+      resolve({ ok: false, error: 'listener_rejected_message' });
+    }
+  });
 }
 
 function createVersion1ControllerFixture() {
@@ -429,7 +488,7 @@ test('content phase flows through background persistence into the trusted page a
   unsubscribe();
 });
 
-test('installed teardown listener accepts only the extension batch page', async () => {
+test('installed teardown listener accepts only a real own-extension batch-page sender', async () => {
   const harness = createHarness();
   installBatchRuntimeController(harness.chrome, harness.controller);
   await harness.controller.handleMessage(startMessage(1));
@@ -453,19 +512,307 @@ test('installed teardown listener accepts only the extension batch page', async 
   assert.equal(contentResponse.error, 'forbidden_sender');
   assert.equal(harness.data.batchRuntimeCheckpoint.status, 'running');
 
+  for (const sender of [
+    batchPageSender({
+      id: 'other-extension',
+      url: 'chrome-extension://other-extension/batch.html'
+    }),
+    batchPageSender({
+      url: 'chrome-extension://extension-id/options.html',
+      tab: {
+        ...batchPageSender().tab,
+        url: 'chrome-extension://extension-id/options.html'
+      }
+    }),
+    batchPageSender({
+      url: 'https://attacker.test/batch.html',
+      origin: 'https://attacker.test',
+      tab: {
+        ...batchPageSender().tab,
+        url: 'https://attacker.test/batch.html'
+      }
+    }),
+    {
+      id: 'extension-id',
+      url: 'chrome-extension://extension-id/batch.html',
+      origin: 'chrome-extension://extension-id',
+      frameId: 0
+    }
+  ]) {
+    const forgedResponse = await new Promise((resolve) => {
+      harness.listeners.messages[0](message, sender, resolve);
+    });
+    assert.equal(forgedResponse.error, 'forbidden_sender');
+    assert.equal(harness.data.batchRuntimeCheckpoint.status, 'running');
+  }
+
   const pageResponse = await new Promise((resolve) => {
     harness.listeners.messages[0](
       message,
-      {
-        id: 'extension-id',
-        url: 'chrome-extension://extension-id/batch.html'
-      },
+      batchPageSender(),
       resolve
     );
   });
   assert.equal(pageResponse.ok, true);
   assert.equal(pageResponse.cleanupComplete, true);
   assert.equal(harness.data.batchRuntimeCheckpoint.status, 'paused_recovery');
+});
+
+test('background creates and checkpoints a worker tab from trusted sender identity', async () => {
+  const harness = createHarness();
+  installBatchRuntimeController(harness.chrome, harness.controller);
+  const start = startMessage(1);
+  start.settings.concurrency = 1;
+  await harness.controller.handleMessage(start);
+
+  const response = await sendInstalledMessage(
+    harness.listeners.messages[0],
+      {
+        type: 'BATCH_CREATE_WORKER_TAB',
+        batchId: 'batch-1',
+        urlIndex: 0,
+        attempt: 1,
+        url: 'https://attacker.test/ignored',
+        windowId: 999
+      },
+      batchPageSender()
+  );
+
+  assert.equal(response.ok, true);
+  assert.deepEqual(response.tab, {
+    id: 91,
+    windowId: 42,
+    url: 'https://example.test/0',
+    active: false
+  });
+  assert.equal(response.checkpoint.tasks['0'].state, 'active');
+  assert.equal(response.checkpoint.tasks['0'].tabId, 91);
+  assert.equal(response.checkpoint.tasks['0'].windowId, 42);
+  assert.deepEqual(harness.createdTabs, [{
+    windowId: 42,
+    url: 'https://example.test/0',
+    active: false
+  }]);
+  assert.equal(harness.data.batchRuntimeCheckpoint.tasks['0'].state, 'active');
+});
+
+test('worker-tab creation rejects non-batch page senders before creating a tab', async () => {
+  const harness = createHarness();
+  installBatchRuntimeController(harness.chrome, harness.controller);
+  await harness.controller.handleMessage(startMessage(1));
+  const message = {
+    type: 'BATCH_CREATE_WORKER_TAB',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1
+  };
+
+  for (const sender of [
+    {
+      id: 'extension-id',
+      url: 'https://target.test/post',
+      origin: 'https://target.test',
+      frameId: 0,
+      tab: {
+        ...batchPageSender().tab,
+        url: 'https://target.test/post'
+      }
+    },
+    batchPageSender({
+      url: 'chrome-extension://extension-id/options.html'
+    }),
+    batchPageSender({ id: 'other-extension' }),
+    {
+      id: 'extension-id',
+      url: 'chrome-extension://extension-id/batch.html',
+      origin: 'chrome-extension://extension-id',
+      frameId: 0
+    }
+  ]) {
+    const response = await sendInstalledMessage(
+      harness.listeners.messages[0],
+      message,
+      sender
+    );
+    assert.equal(response.error, 'forbidden_sender');
+  }
+  assert.deepEqual(harness.createdTabs, []);
+  assert.equal(harness.data.batchRuntimeCheckpoint.tasks['0'].state, 'queued');
+});
+
+test('a create already in background finishes checkpointing before pagehide cleanup', async () => {
+  const harness = createHarness();
+  installBatchRuntimeController(harness.chrome, harness.controller);
+  await harness.controller.handleMessage(startMessage(1));
+  const createGate = deferred();
+  harness.chrome.tabs.createGate = createGate;
+  const sender = batchPageSender();
+
+  const creating = sendInstalledMessage(
+    harness.listeners.messages[0],
+      {
+        type: 'BATCH_CREATE_WORKER_TAB',
+        batchId: 'batch-1',
+        urlIndex: 0,
+        attempt: 1
+      },
+      sender
+  );
+  await waitFor(
+    () => harness.createdTabs.length === 1,
+    'background tab creation'
+  );
+  assert.deepEqual(harness.createdTabs, [{
+    windowId: 42,
+    url: 'https://example.test/0',
+    active: false
+  }]);
+
+  const tearingDown = sendInstalledMessage(
+    harness.listeners.messages[0],
+      {
+        type: 'BATCH_PAGE_TEARDOWN',
+        batchId: 'batch-1',
+        reason: 'pagehide'
+      },
+      sender
+  );
+  createGate.resolve();
+  const [created, teardown] = await Promise.all([creating, tearingDown]);
+
+  assert.equal(created.ok, true);
+  assert.equal(created.checkpoint.tasks['0'].state, 'active');
+  assert.equal(teardown.ok, true);
+  assert.equal(teardown.checkpoint.status, 'paused_recovery');
+  assert.deepEqual(teardown.checkpoint.recoveryCleanup.orphanTabIds, []);
+  assert.deepEqual(harness.removedTabs, [91]);
+  assert.equal(harness.data.batchRuntimeCheckpoint.tasks['0'].state, 'queued');
+});
+
+test('pagehide serialized before create rejects the create with zero orphan tabs', async () => {
+  const harness = createHarness();
+  installBatchRuntimeController(harness.chrome, harness.controller);
+  await harness.controller.handleMessage(startMessage(1));
+  const sender = batchPageSender();
+
+  const tearingDown = sendInstalledMessage(
+    harness.listeners.messages[0],
+      {
+        type: 'BATCH_PAGE_TEARDOWN',
+        batchId: 'batch-1',
+        reason: 'pagehide'
+      },
+      sender
+  );
+  const creating = sendInstalledMessage(
+    harness.listeners.messages[0],
+      {
+        type: 'BATCH_CREATE_WORKER_TAB',
+        batchId: 'batch-1',
+        urlIndex: 0,
+        attempt: 1
+      },
+      sender
+  );
+  const [teardown, created] = await Promise.all([tearingDown, creating]);
+
+  assert.equal(teardown.ok, true);
+  assert.equal(created.ok, false);
+  assert.equal(created.error, 'batch_teardown_cancelled');
+  assert.deepEqual(harness.createdTabs, []);
+  assert.deepEqual(
+    harness.data.batchRuntimeCheckpoint.recoveryCleanup.orphanTabIds,
+    []
+  );
+});
+
+test('three background-owned workers use the console sender window', async () => {
+  const harness = createHarness();
+  installBatchRuntimeController(harness.chrome, harness.controller);
+  const start = startMessage(3);
+  start.settings.concurrency = 3;
+  await harness.controller.handleMessage(start);
+  const sender = batchPageSender();
+
+  const responses = await Promise.all([0, 1, 2].map((urlIndex) => (
+    sendInstalledMessage(
+      harness.listeners.messages[0],
+        {
+          type: 'BATCH_CREATE_WORKER_TAB',
+          batchId: 'batch-1',
+          urlIndex,
+          attempt: 1,
+          windowId: 999,
+          url: `https://attacker.test/${urlIndex}`
+        },
+        sender
+    )
+  )));
+
+  assert.equal(responses.every((response) => response.ok), true);
+  assert.deepEqual(harness.createdTabs, [0, 1, 2].map((urlIndex) => ({
+    windowId: 42,
+    url: `https://example.test/${urlIndex}`,
+    active: false
+  })));
+  assert.deepEqual(
+    Object.values(harness.data.batchRuntimeCheckpoint.tasks).map((task) => ({
+      state: task.state,
+      windowId: task.windowId,
+      tabId: task.tabId
+    })),
+    [
+      { state: 'active', windowId: 42, tabId: 91 },
+      { state: 'active', windowId: 42, tabId: 92 },
+      { state: 'active', windowId: 42, tabId: 93 }
+    ]
+  );
+});
+
+test('background closes a newly created tab when ACTIVE persistence fails', async () => {
+  const harness = createHarness();
+  installBatchRuntimeController(harness.chrome, harness.controller);
+  await harness.controller.handleMessage(startMessage(1));
+  harness.chrome.storage.local.setFailure = new Error('storage unavailable');
+
+  const response = await sendInstalledMessage(
+    harness.listeners.messages[0],
+    {
+      type: 'BATCH_CREATE_WORKER_TAB',
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1
+    },
+    batchPageSender()
+  );
+
+  assert.equal(response.ok, false);
+  assert.equal(response.error, 'checkpoint_write_failed');
+  assert.deepEqual(harness.removedTabs, [91]);
+  assert.equal(harness.data.batchRuntimeCheckpoint.tasks['0'].state, 'queued');
+});
+
+test('background create reasserts wakefulness after a service-worker restart', async () => {
+  const harness = createHarness();
+  await harness.controller.handleMessage(startMessage(1));
+  harness.powerCalls.length = 0;
+  const reloadedController = createBatchRuntimeController({
+    storageArea: harness.chrome.storage.local,
+    power: harness.chrome.power,
+    tabs: harness.chrome.tabs,
+    runtime: harness.chrome.runtime,
+    now: () => 9000
+  });
+
+  const response = await reloadedController.handleMessage({
+    type: 'BATCH_CREATE_WORKER_TAB',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1
+  }, batchPageSender());
+
+  assert.equal(response.ok, true);
+  assert.deepEqual(harness.powerCalls, [['request', 'system']]);
 });
 
 test('returns the checkpoint advanced by a task retry command', async () => {
