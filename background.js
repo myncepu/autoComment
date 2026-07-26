@@ -115,15 +115,38 @@ async function broadcastBatchConfirmed(
     historySaveStatus,
     historyPendingCount,
     sourceTabId,
-    sender
+    sender,
+    terminalSideEffect
   } = {}
 ) {
   const checkpoint = await batchRuntimeController.markTerminal(
     message,
-    sender
+    sender,
+    terminalSideEffect
   );
   if (!checkpoint.ok) {
-    throw new Error(`checkpoint_write_failed:${checkpoint.error}`);
+    const error = new Error(
+      `checkpoint_write_failed:${checkpoint.error}`
+    );
+    error.code = checkpoint.error;
+    throw error;
+  }
+  const sideEffect = checkpoint.sideEffect || {};
+  const effectiveHistorySaveStatus =
+    sideEffect.historySaveStatus ?? historySaveStatus;
+  const effectiveHistoryPendingCount =
+    Object.hasOwn(sideEffect, 'historyPendingCount')
+      ? sideEffect.historyPendingCount
+      : historyPendingCount;
+  if (
+    checkpoint.changed === false &&
+    typeof terminalSideEffect === 'function'
+  ) {
+    return {
+      checkpoint,
+      historySaveStatus: effectiveHistorySaveStatus,
+      historyPendingCount: effectiveHistoryPendingCount
+    };
   }
   await chrome.runtime.sendMessage({
     type: 'BATCH_CONFIRMED',
@@ -134,9 +157,13 @@ async function broadcastBatchConfirmed(
     aiContent: message.aiContent || null,
     errorCode: message.errorCode || null,
     errorMessage: message.errorMessage || null,
-    ...(historySaveStatus ? { historySaveStatus } : {}),
-    ...(Number.isInteger(historyPendingCount) || historyPendingCount === null
-      ? { historyPendingCount }
+    ...(effectiveHistorySaveStatus
+      ? { historySaveStatus: effectiveHistorySaveStatus }
+      : {}),
+    ...(
+      Number.isInteger(effectiveHistoryPendingCount) ||
+      effectiveHistoryPendingCount === null
+      ? { historyPendingCount: effectiveHistoryPendingCount }
       : {}),
     ...(Number.isInteger(sourceTabId) ? { sourceTabId } : {})
   }).then(() => {
@@ -148,6 +175,11 @@ async function broadcastBatchConfirmed(
       console.error('[background] BATCH_CONFIRMED 发送失败:', e);
     }
   });
+  return {
+    checkpoint,
+    historySaveStatus: effectiveHistorySaveStatus,
+    historyPendingCount: effectiveHistoryPendingCount
+  };
 }
 
 // content.js 确认评论已提交（标签页可能刷新，context 丢失，background 仍活着）
@@ -156,69 +188,81 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     console.log('[background] 收到 BATCH_HANDLE_CONFIRM >>>', { batchId: message.batchId, urlIndex: message.urlIndex, url: message.url, aiContentLen: message.aiContent ? message.aiContent.length : 0, sender: sender.tab ? sender.tab.id : 'N/A', time: new Date().toISOString() });
     (async () => {
       try {
-        await persistBatchReport({
-          batchId: message.batchId,
-          urlIndex: message.urlIndex,
-          attempt: message.attempt,
-          url: message.url || '',
-          result: message.result ?? 'success',
-          aiContent: message.aiContent || null,
-          errorCode: message.errorCode || null,
-          errorMessage: message.errorMessage || null
-        });
-        console.log('[background] persistBatchReport 完成，准备发送 BATCH_CONFIRMED');
-
-        const {
-          historySaveStatus,
-          pendingCount: historyPendingCount
-        } = await commentHistoryService.saveConfirmedSuccess({
-          ...message,
-          result: message.result ?? 'success'
-        });
-
-        // 关键：先通知 batch.js（popup）落盘已完成，batch.js 等到确认后才关闭标签页
-        const confirmedMessage = {
-          ...message,
-          historySaveStatus,
-          historyPendingCount
-        };
-        if (isDurableBatchConfirmation(confirmedMessage)) {
-          const result = message.result ?? 'success';
-          let submitContextReleased = result !== 'success';
-          if (result === 'success' && Number.isInteger(sender?.tab?.id)) {
-            try {
-              submitContextReleased = await batchSubmitContextStore.clearIfMatches(
-                sender.tab.id,
-                {
-                  batchId: message.batchId,
-                  urlIndex: message.urlIndex,
-                  attempt: message.attempt,
-                  historyRevision: message.history?.historyRevision
-                }
-              );
-            } catch (_) {
-              console.warn('[background] Durable history saved but submit context cleanup deferred');
-            }
-          }
-          if (submitContextReleased) {
-            await broadcastBatchConfirmed(message, {
-              historySaveStatus,
-              historyPendingCount,
-              sourceTabId: sender?.tab?.id,
-              sender
+        const committed = await broadcastBatchConfirmed(message, {
+          sourceTabId: sender?.tab?.id,
+          sender,
+          async terminalSideEffect() {
+            await persistBatchReport({
+              batchId: message.batchId,
+              urlIndex: message.urlIndex,
+              attempt: message.attempt,
+              url: message.url || '',
+              result: message.result ?? 'success',
+              aiContent: message.aiContent || null,
+              errorCode: message.errorCode || null,
+              errorMessage: message.errorMessage || null
             });
-          } else {
-            sendResponse({
-              ok: false,
-              error: 'submit_context_not_released',
+            console.log('[background] persistBatchReport 完成，准备发送 BATCH_CONFIRMED');
+
+            const {
               historySaveStatus,
-              ...(Number.isInteger(historyPendingCount) || historyPendingCount === null
+              pendingCount: historyPendingCount
+            } = await commentHistoryService.saveConfirmedSuccess({
+              ...message,
+              result: message.result ?? 'success'
+            });
+            const confirmedMessage = {
+              ...message,
+              historySaveStatus,
+              historyPendingCount
+            };
+            if (!isDurableBatchConfirmation(confirmedMessage)) {
+              const error = new Error('history_save_failed');
+              error.code = 'history_save_failed';
+              throw error;
+            }
+            const result = message.result ?? 'success';
+            let submitContextReleased = result !== 'success';
+            if (result === 'success' && Number.isInteger(sender?.tab?.id)) {
+              try {
+                submitContextReleased =
+                  await batchSubmitContextStore.clearIfMatches(
+                    sender.tab.id,
+                    {
+                      batchId: message.batchId,
+                      urlIndex: message.urlIndex,
+                      attempt: message.attempt,
+                      historyRevision:
+                        message.history?.historyRevision
+                    }
+                  );
+                if (!submitContextReleased) {
+                  submitContextReleased =
+                    await batchSubmitContextStore.get(sender.tab.id) ===
+                      null;
+                }
+              } catch (_) {
+                console.warn('[background] Durable history saved but submit context cleanup deferred');
+              }
+            }
+            if (!submitContextReleased) {
+              const error = new Error('submit_context_not_released');
+              error.code = 'submit_context_not_released';
+              throw error;
+            }
+            return {
+              historySaveStatus,
+              ...(Number.isInteger(historyPendingCount) ||
+                historyPendingCount === null
                 ? { historyPendingCount }
                 : {})
-            });
-            return;
+            };
           }
-        }
+        });
+        const {
+          historySaveStatus,
+          historyPendingCount
+        } = committed;
 
         sendResponse({
           ok: true,
@@ -230,7 +274,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         console.log('[background] BATCH_HANDLE_CONFIRM <<< sendResponse({ok:true})');
       } catch (e) {
         console.error('[background] BATCH_HANDLE_CONFIRM 错误:', e);
-        sendResponse({ ok: false, error: String(e) });
+        if (e?.code === 'history_save_failed') {
+          sendResponse({
+            ok: true,
+            historySaveStatus: 'failed'
+          });
+          return;
+        }
+        sendResponse({
+          ok: false,
+          error: e?.code || String(e)
+        });
       }
     })();
     return true;

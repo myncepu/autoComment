@@ -447,6 +447,58 @@ tab/journal reads, close-first terminal persistence, content/page sender
 binding, and protected Start/Clear. The affected command passed 187/187, and
 the full repository passed 504/504.
 
+## Round 9 Terminal Transaction and Creation Proof
+
+- A failed terminal close now has one narrowly constrained convergence path.
+  `task_terminal` may advance from `paused_recovery` only when the recovery
+  reason is exactly `terminal_cleanup_failed`, the task still holds complete
+  ACTIVE/SUBMITTING ownership, and the controller supplies its internal
+  `terminalCleanupRetry` marker after proving the exact sender, journal,
+  epoch, opener, window, tab, and request. Navigation and generic
+  `ownership_unverified` pauses cannot use this path. ACTIVE and SUBMITTING
+  close retries each converge to one terminal result, clear their journal
+  only after the durable ownership write, and are not requeued at startup.
+- `BATCH_HANDLE_CONFIRM` side effects now execute inside the controller's
+  serialized terminal transaction. The controller validates the checkpoint,
+  attempt, task, exact content sender, session journal, and live ownership
+  before invoking the injected idempotent hook; it re-proves ownership before
+  removal and terminal persistence. Background result persistence, comment
+  history durability, and exact submit-context release all run in that hook.
+  Hook failure retains the worker and original ownership. A close failure may
+  replay the hook, so each operation uses its existing idempotent identity.
+  Hook metadata is returned through the committed checkpoint response.
+- Missing, stale-batch, wrong-index, stale-attempt, and wrong-tab
+  `BATCH_HANDLE_CONFIRM` messages are rejected before the hook. The real
+  fake-IndexedDB background integration snapshots batch results, comment
+  history, submit context, broadcasts, checkpoint task state, and open tabs;
+  all remain byte-for-byte/equivalently unchanged after the wrong-tab probe.
+  Legal success, history-failure fallback, and untracked legacy report paths
+  remain covered.
+- A fresh `tabs.create` response is no longer sufficient ownership evidence.
+  Before binding the session journal, persisting ACTIVE, navigating, or
+  returning success, the controller performs a bounded live `tabs.get` and
+  proves a positive tab ID plus the exact sender window, opener tab, and full
+  canonical pending URL against both the create response and live tab.
+  Wrong opener, wrong URL, and transient lookup probes pause as
+  `ownership_unverified`, retain the valid durable reservation and precreate
+  `tabId: null` journal, and perform no ACTIVE write, navigation, or unsafe
+  removal.
+- Startup recovery now attempts a deduplicated
+  `batch.html?recovery=1` page whenever normalization returns a nonterminal
+  checkpoint, including an `ownership_unverified` failure. The recovery-page
+  query/create is best effort: failure does not replace or weaken the primary
+  ownership error, and repeated startup calls neither duplicate workers nor
+  recovery pages.
+
+Round-9 RED probes reproduced all four gaps: paused terminal retry failed with
+`invalid_transition`; the terminal hook was absent and removal happened after
+a throwing test hook; a wrong-tab background confirmation increased both
+result and history counts; fresh tab creation accepted wrong opener/URL and
+lookup uncertainty; and unverified startup created no recovery page. After
+the fixes, the focused checkpoint/controller/background command passed
+111/111, the expanded affected command passed 216/216, and the full repository
+passed 512/512.
+
 ## Legacy Race Coverage Map
 
 The removed monolith fixture is not retained. Each former integration
@@ -538,6 +590,17 @@ guarantee is owned and tested by the production module that now implements it:
 
 ## Verification
 
+- Round-9 affected runtime/background command:
+  `node --test tests/batch-runtime-checkpoint.test.mjs tests/batch-session-journal.test.mjs tests/batch-runtime-controller.test.mjs tests/batch-chrome-adapter.test.mjs tests/batch-worker-runtime.test.mjs tests/batch-multi-window-integration.test.js tests/comment-history-message-listener.test.mjs tests/batch-submit-order.test.js tests/comment-history-submit-flow.test.js`
+  passed 216/216 with zero failures.
+- Round-9 full repository: `npm test` passed 512/512 with zero failures.
+- `node --check` passed for every round-9 changed JavaScript/MJS module and
+  test; `git diff --check` passed.
+- `manifest.json` parsed successfully and `batch.js` dynamically imported
+  without DOM or Chrome globals.
+- Round-9 static sink audits found no installed `BATCH_TASK_ACTIVE` route and
+  no `ownershipEpoch` reference in background, content, batch result, comment
+  history, page composition, or DOM-facing modules.
 - Round-8 affected runtime/page command:
   `node --test tests/batch-runtime-checkpoint.test.mjs tests/batch-session-journal.test.mjs tests/batch-runtime-controller.test.mjs tests/batch-chrome-adapter.test.mjs tests/batch-worker-runtime.test.mjs tests/batch-multi-window-integration.test.js tests/comment-history-message-listener.test.mjs`
   passed 187/187 with zero failures.
@@ -592,5 +655,7 @@ guarantee is owned and tested by the production module that now implements it:
   `fix: prove batch tab ownership before cleanup`.
 - Round-8 hardening commit subject:
   `fix: journal batch tab ownership per browser session`.
+- Round-9 hardening commit subject:
+  `fix: close final batch ownership races`.
 - The final commit SHA is reported in the task `DONE` handoff because a file
   cannot contain the hash of the commit that contains itself.

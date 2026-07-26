@@ -516,6 +516,81 @@ test('moves one task through active, submitting, and terminal states', () => {
   assert.equal(initial.tasks['0'].state, 'queued');
 });
 
+test('paused terminal convergence is limited to terminal cleanup ownership', () => {
+  const started = applyBatchRuntimeEvent(createCheckpoint(1), {
+    type: 'session_started',
+    batchId: 'batch-1'
+  }, 1100).checkpoint;
+  const active = applyBatchRuntimeEvent(started, {
+    type: 'task_activated',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 41,
+    windowId: 51,
+    ownerPageTabId: 61,
+    ownershipEpoch: 'epoch-1',
+    startedAt: 1200
+  }, 1200).checkpoint;
+  const terminalEvent = {
+    type: 'task_terminal',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    terminalCleanupRetry: true,
+    result: {
+      result: 'fail',
+      errorCode: 'task_failed',
+      errorMessage: 'closed after retry'
+    }
+  };
+
+  for (const reason of ['navigation', 'ownership_unverified']) {
+    const paused = structuredClone(active);
+    paused.status = 'paused_recovery';
+    paused.recoveryCleanup = {
+      reason,
+      diagnostic: 'tab_close_failed',
+      updatedAt: 1300
+    };
+    assert.equal(
+      applyBatchRuntimeEvent(paused, terminalEvent, 1400).ok,
+      false
+    );
+  }
+
+  const eligible = structuredClone(active);
+  eligible.status = 'paused_recovery';
+  eligible.recoveryCleanup = {
+    reason: 'terminal_cleanup_failed',
+    diagnostic: 'tab_close_failed',
+    updatedAt: 1300
+  };
+  assert.equal(
+    applyBatchRuntimeEvent(eligible, {
+      ...terminalEvent,
+      terminalCleanupRetry: false
+    }, 1400).ok,
+    false
+  );
+
+  for (const state of ['active', 'submitting']) {
+    const paused = structuredClone(eligible);
+    paused.tasks['0'].state = state;
+    if (state === 'submitting') paused.tasks['0'].phase = 'submitting';
+    const converged = applyBatchRuntimeEvent(
+      paused,
+      terminalEvent,
+      1400
+    );
+
+    assert.equal(converged.ok, true);
+    assert.equal(converged.checkpoint.tasks['0'].state, 'terminal');
+    assert.equal(converged.checkpoint.results.length, 1);
+    assert.equal(validateBatchRuntimeCheckpoint(converged.checkpoint).ok, true);
+  }
+});
+
 test('rejects stale identities, skipped states, and conflicting terminal results', () => {
   const initial = createCheckpoint(1);
   const stale = applyBatchRuntimeEvent(initial, {

@@ -6,6 +6,9 @@ import {
   HISTORY_MESSAGE_TYPES,
   installCommentHistoryMessageListener
 } from '../lib/comment-history-message-listener.mjs';
+import {
+  openCommentHistoryDb
+} from '../lib/comment-history-db.mjs';
 
 function createFixture(service = {}) {
   const listeners = [];
@@ -510,7 +513,9 @@ test('background migrates an old record before its startup retention check and c
     assert.equal(responses[0]?.ok, false);
     assert.match(
       responses[0]?.error || '',
-      /invalid_batch_result_identity/
+      type === 'BATCH_HANDLE_CONFIRM'
+        ? /stale_attempt/
+        : /invalid_batch_result_identity/
     );
   }
   assert.deepEqual({
@@ -589,6 +594,39 @@ test('background migrates an old record before its startup retention check and c
   }), [{ ok: true }]);
   assert.ok(storageData.batchSubmitContextsByTab['42']);
 
+  const historyProbe = await openCommentHistoryDb({
+    indexedDBImpl: globalThis.indexedDB,
+    IDBKeyRangeImpl: globalThis.IDBKeyRange
+  });
+  const wrongSenderSnapshot = {
+    resultCount: storageData.batchResults.length,
+    historyCount: await historyProbe.countRecords(),
+    runtimeMessageCount: runtimeMessages.length,
+    submitContext: structuredClone(
+      storageData.batchSubmitContextsByTab['42']
+    ),
+    task: structuredClone(
+      storageData.batchRuntimeCheckpoint.tasks['9']
+    ),
+    tabCount: tabData.size
+  };
+  const wrongSenderResponses = await dispatchConfirm(message, {
+    id: 'extension-id',
+    tab: { id: 999, windowId: 52 },
+    url: 'https://target.test/post'
+  });
+
+  assert.equal(wrongSenderResponses[0]?.ok, false);
+  assert.deepEqual({
+    resultCount: storageData.batchResults.length,
+    historyCount: await historyProbe.countRecords(),
+    runtimeMessageCount: runtimeMessages.length,
+    submitContext: storageData.batchSubmitContextsByTab['42'],
+    task: storageData.batchRuntimeCheckpoint.tasks['9'],
+    tabCount: tabData.size
+  }, wrongSenderSnapshot);
+  historyProbe.close();
+
   const responses = await dispatchConfirm(message);
   assert.deepEqual(responses, [{
     ok: true,
@@ -652,9 +690,7 @@ test('background migrates an old record before its startup retention check and c
     }
   }), [{
     ok: false,
-    error: 'submit_context_not_released',
-    historySaveStatus: 'saved',
-    historyPendingCount: 0
+    error: 'stale_batch'
   }]);
   assert.equal(runtimeMessages.length, messagesBeforeOldAck);
   assert.deepEqual(
@@ -691,16 +727,17 @@ test('background migrates an old record before its startup retention check and c
   assert.equal(storageData.batchSubmitContextsByTab['42'], undefined);
 
   for (const [offset, result] of ['', false, 0].entries()) {
+    const messagesBeforeInvalidTask = runtimeMessages.length;
     const explicitResultResponses = await dispatchConfirm({
       ...message,
       urlIndex: 10 + offset,
       result
     });
     assert.deepEqual(explicitResultResponses, [{
-      ok: true,
-      historySaveStatus: 'not_applicable'
+      ok: false,
+      error: 'invalid_url_index'
     }]);
-    assert.equal(runtimeMessages.at(-1).result, result);
+    assert.equal(runtimeMessages.length, messagesBeforeInvalidTask);
   }
 
   assert.deepEqual(await dispatchConfirm({

@@ -42,9 +42,33 @@ test('batch confirmation remains blocked until background history is durable', a
     /createBatchSubmitContextStore\([\s\S]*maxAgeMs:\s*Number\.POSITIVE_INFINITY/,
     'exact pre-submit history must remain restorable until durable acknowledgement'
   );
-  assert.match(
-    background,
-    /if \(isDurableBatchConfirmation\(confirmedMessage\)\) \{[\s\S]*broadcastBatchConfirmed/,
-    'background must not release a success window on a failed history save'
+  const handlerStart = background.indexOf(
+    "if (message && message.type === 'BATCH_HANDLE_CONFIRM')"
+  );
+  const handlerEnd = background.indexOf(
+    '// content.js 已把精确历史写入不可变 pending 队列',
+    handlerStart
+  );
+  const handler = background.slice(handlerStart, handlerEnd);
+  const broadcastIndex = handler.indexOf('broadcastBatchConfirmed(message');
+  const hookIndex = handler.indexOf('async terminalSideEffect()', broadcastIndex);
+  const durabilityIndex = handler.indexOf(
+    'isDurableBatchConfirmation(confirmedMessage)',
+    hookIndex
+  );
+  const releaseIndex = handler.indexOf(
+    'batchSubmitContextStore.clearIfMatches(',
+    durabilityIndex
+  );
+
+  assert.notEqual(broadcastIndex, -1, 'confirmation must use the runtime controller');
+  assert.notEqual(hookIndex, -1, 'durable work must run as a serialized terminal hook');
+  assert.ok(
+    durabilityIndex > hookIndex,
+    'the terminal hook must reject a failed history save'
+  );
+  assert.ok(
+    releaseIndex > durabilityIndex,
+    'submit ownership must remain restorable until history is durable'
   );
 });

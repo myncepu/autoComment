@@ -152,10 +152,17 @@ function createHarness({ failPower = false, existingTabs = [] } = {}) {
     },
     async get(tabId) {
       fetchedTabs.push(tabId);
+      if (tabs.getFailures?.length > 0) {
+        const failure = tabs.getFailures.shift();
+        if (failure) throw failure;
+      }
       if (tabs.getFailure) throw tabs.getFailure;
       const tab = tabStore.get(tabId);
       if (!tab) throw new Error(`No tab with id: ${tabId}.`);
-      return structuredClone(tab);
+      const cloned = structuredClone(tab);
+      return tabs.getTransform
+        ? tabs.getTransform(cloned)
+        : cloned;
     },
     async update(tabId, changes) {
       updatedTabs.push([tabId, structuredClone(changes)]);
@@ -859,6 +866,77 @@ test('pre-create session journal failure creates and navigates zero tabs', async
       updatedAt: 1400
     }
   );
+});
+
+test('newly created tab live proof rejects opener URL and lookup uncertainty', async () => {
+  const cases = [
+    {
+      name: 'wrong opener',
+      configure(tabs) {
+        tabs.getTransform = (tab) => ({
+          ...tab,
+          openerTabId: 999
+        });
+      }
+    },
+    {
+      name: 'wrong URL',
+      configure(tabs) {
+        tabs.getTransform = (tab) => ({
+          ...tab,
+          url: 'chrome-extension://extension-id/worker-pending.html#wrong'
+        });
+      }
+    },
+    {
+      name: 'transient lookup',
+      configure(tabs) {
+        tabs.getFailure = new Error('tabs unavailable');
+      }
+    }
+  ];
+
+  for (const testCase of cases) {
+    const harness = createHarness();
+    await harness.controller.handleMessage(startMessage(1));
+    testCase.configure(harness.chrome.tabs);
+
+    const response = await harness.controller.handleMessage({
+      type: 'BATCH_CREATE_WORKER_TAB',
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      requestId: 'batch-1:0:1'
+    }, batchPageSender());
+
+    assert.equal(response.ok, false, testCase.name);
+    assert.equal(
+      response.error,
+      'batch_ownership_unverified',
+      testCase.name
+    );
+    assert.equal(response.recoveryRequired, true, testCase.name);
+    assert.equal(response.checkpoint.status, 'paused_recovery', testCase.name);
+    assert.equal(response.checkpoint.tasks['0'].state, 'queued', testCase.name);
+    assert.ok(
+      response.checkpoint.openingReservations['batch-1:0:1'],
+      testCase.name
+    );
+    assert.equal(
+      harness.sessionData[
+        'batchWorkerOwnershipV1:batch-1:0:1'
+      ].tabId,
+      null,
+      testCase.name
+    );
+    assert.deepEqual(harness.updatedTabs, [], testCase.name);
+    assert.deepEqual(harness.removedTabs, [], testCase.name);
+    assert.equal(
+      validateBatchRuntimeCheckpoint(response.checkpoint).ok,
+      true,
+      testCase.name
+    );
+  }
 });
 
 test('worker-tab creation rejects non-batch page senders before creating a tab', async () => {
@@ -1626,7 +1704,7 @@ test('lost create response replays the same live ACTIVE tab without creating a s
   assert.equal(replay.checkpoint.tasks['0'].state, 'active');
   assert.equal(replay.checkpoint.tasks['0'].requestId, message.requestId);
   assert.equal(harness.createdTabs.length, 1);
-  assert.deepEqual(harness.fetchedTabs, [first.tab.id]);
+  assert.deepEqual(harness.fetchedTabs, [first.tab.id, first.tab.id]);
   assert.equal(harness.tabStore.get(first.tab.id).url, 'https://example.test/0');
 });
 
@@ -1695,7 +1773,7 @@ test('missing ACTIVE replay tab is durably re-reserved and replaced once', async
   assert.equal(replay.checkpoint.tasks['0'].state, 'active');
   assert.equal(replay.checkpoint.tasks['0'].tabId, 92);
   assert.equal(harness.createdTabs.length, 2);
-  assert.deepEqual(harness.fetchedTabs, [91]);
+  assert.deepEqual(harness.fetchedTabs, [91, 91, 92]);
 });
 
 test('navigation failure pauses for recovery and closes the owned pending tab before any handle exists', async () => {
@@ -1746,7 +1824,7 @@ test('an applied navigation with a lost update response verifies the target and 
   assert.equal(response.tab.id, 91);
   assert.equal(response.checkpoint.tasks['0'].state, 'active');
   assert.equal(harness.createdTabs.length, 1);
-  assert.deepEqual(harness.fetchedTabs, [91]);
+  assert.deepEqual(harness.fetchedTabs, [91, 91]);
   assert.deepEqual(harness.removedTabs, []);
 });
 
@@ -1754,7 +1832,10 @@ test('uncertain navigation lookup preserves ACTIVE ownership and requests recove
   const harness = createHarness();
   await harness.controller.handleMessage(startMessage(1));
   harness.chrome.tabs.updateFailure = new Error('navigation uncertain');
-  harness.chrome.tabs.getFailure = new Error('tabs temporarily unavailable');
+  harness.chrome.tabs.getFailures = [
+    null,
+    new Error('tabs temporarily unavailable')
+  ];
 
   const response = await harness.controller.handleMessage({
     type: 'BATCH_CREATE_WORKER_TAB',
@@ -1921,6 +2002,41 @@ test('rejects a missing attempt before every untracked terminal return', async (
   }
 });
 
+test('empty teardown stays safe while terminal hooks require a checkpoint', async () => {
+  const { controller } = createHarness();
+  let hookCalls = 0;
+
+  const terminal = await controller.markTerminal(
+    {
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      result: 'success'
+    },
+    null,
+    async () => {
+      hookCalls += 1;
+    }
+  );
+  const teardown = await controller.handleMessage({
+    type: 'BATCH_PAGE_TEARDOWN',
+    batchId: 'batch-1',
+    reason: 'page_teardown'
+  });
+
+  assert.deepEqual(
+    { ok: terminal.ok, error: terminal.error },
+    { ok: false, error: 'checkpoint_not_found' }
+  );
+  assert.equal(hookCalls, 0);
+  assert.deepEqual(teardown, {
+    ok: true,
+    checkpoint: null,
+    cleanupComplete: true,
+    orphanTabIds: []
+  });
+});
+
 test('markTerminal preserves the stable error code from content reports', async () => {
   const { controller } = createHarness();
   await controller.handleMessage(startMessage(1));
@@ -1977,6 +2093,117 @@ test('content terminal reporting is bound to its exact active sender tab', async
   assert.deepEqual(harness.removedTabs, []);
 });
 
+test('terminal side effects require exact ownership proof and failure keeps the tab', async () => {
+  const harness = createHarness();
+  await harness.controller.handleMessage(startMessage(1));
+  await harness.controller.handleMessage({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 11,
+    windowId: 21
+  });
+  const message = {
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    result: 'success'
+  };
+  let hookCalls = 0;
+  const hook = async () => {
+    hookCalls += 1;
+    const error = new Error('history unavailable');
+    error.code = 'terminal_side_effect_failed';
+    throw error;
+  };
+
+  const forged = await harness.controller.markTerminal(
+    message,
+    {
+      id: 'extension-id',
+      tab: { id: 777, windowId: 21 },
+      url: 'https://example.test/0'
+    },
+    hook
+  );
+
+  assert.equal(forged.ok, false);
+  assert.equal(forged.error, 'stale_worker_tab');
+  assert.equal(hookCalls, 0);
+  assert.deepEqual(harness.removedTabs, []);
+
+  const failed = await harness.controller.markTerminal(
+    message,
+    {
+      id: 'extension-id',
+      tab: { id: 11, windowId: 21 },
+      url: 'https://example.test/0'
+    },
+    hook
+  );
+
+  assert.equal(failed.ok, false);
+  assert.equal(failed.error, 'terminal_side_effect_failed');
+  assert.equal(hookCalls, 1);
+  assert.deepEqual(harness.removedTabs, []);
+  assert.equal(failed.checkpoint.tasks['0'].state, 'active');
+  assert.equal(failed.checkpoint.tasks['0'].tabId, 11);
+});
+
+test('terminal side effect hook is idempotent across a close retry', async () => {
+  const harness = createHarness();
+  await harness.controller.handleMessage(startMessage(1));
+  await harness.controller.handleMessage({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 11,
+    windowId: 21
+  });
+  const effects = new Set();
+  let hookCalls = 0;
+  const hook = async () => {
+    hookCalls += 1;
+    effects.add('batch-1:0:1');
+    return { historySaveStatus: 'saved' };
+  };
+  const message = {
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    result: 'success'
+  };
+  const sender = {
+    id: 'extension-id',
+    tab: { id: 11, windowId: 21 },
+    url: 'https://example.test/0'
+  };
+  harness.chrome.tabs.removeFailure = new Error('tabs unavailable');
+
+  const first = await harness.controller.markTerminal(
+    message,
+    sender,
+    hook
+  );
+  harness.chrome.tabs.removeFailure = null;
+  const second = await harness.controller.markTerminal(
+    message,
+    sender,
+    hook
+  );
+
+  assert.equal(first.ok, false);
+  assert.equal(second.ok, true);
+  assert.equal(hookCalls, 2);
+  assert.equal(effects.size, 1);
+  assert.deepEqual(second.sideEffect, {
+    historySaveStatus: 'saved'
+  });
+  assert.equal(second.checkpoint.results.length, 1);
+});
+
 test('content terminal reporting proves and closes the worker before clearing ownership', async () => {
   const harness = createHarness();
   await harness.controller.handleMessage(startMessage(1));
@@ -2017,6 +2244,75 @@ test('content terminal reporting proves and closes the worker before clearing ow
       harness.operationLog.findIndex(([name]) => name === 'persist'),
     true
   );
+});
+
+test('active and submitting terminal cleanup retries converge exactly once', async () => {
+  for (const initialState of ['active', 'submitting']) {
+    const harness = createHarness();
+    await harness.controller.handleMessage(startMessage(1));
+    await harness.controller.handleMessage({
+      type: 'BATCH_TASK_ACTIVE',
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      tabId: 11,
+      windowId: 21
+    });
+    if (initialState === 'submitting') {
+      await harness.controller.handleMessage({
+        type: 'BATCH_TASK_SUBMITTING',
+        batchId: 'batch-1',
+        urlIndex: 0,
+        attempt: 1
+      });
+    }
+    const message = {
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      result: 'fail',
+      errorCode: 'task_failed',
+      errorMessage: `${initialState} failed`
+    };
+    const sender = {
+      id: 'extension-id',
+      tab: { id: 11, windowId: 21 },
+      url: 'https://redirect.example/final'
+    };
+    harness.chrome.tabs.removeFailure = new Error('tabs unavailable');
+
+    const failed = await harness.controller.markTerminal(message, sender);
+
+    assert.equal(failed.ok, false);
+    assert.equal(failed.checkpoint.status, 'paused_recovery');
+    assert.equal(failed.checkpoint.tasks['0'].state, initialState);
+    assert.equal(
+      failed.checkpoint.recoveryCleanup.reason,
+      'terminal_cleanup_failed'
+    );
+    assert.equal(validateBatchRuntimeCheckpoint(failed.checkpoint).ok, true);
+    assert.deepEqual(failed.checkpoint.results, []);
+
+    harness.chrome.tabs.removeFailure = null;
+    const retried = await harness.controller.markTerminal(message, sender);
+
+    assert.equal(retried.ok, true);
+    assert.equal(retried.checkpoint.tasks['0'].state, 'terminal');
+    assert.equal(retried.checkpoint.results.length, 1);
+    assert.equal(retried.checkpoint.results[0].errorCode, 'task_failed');
+    assert.equal(validateBatchRuntimeCheckpoint(retried.checkpoint).ok, true);
+    assert.equal(
+      Object.hasOwn(
+        harness.sessionData,
+        'batchWorkerOwnershipV1:batch-1:0:1'
+      ),
+      false
+    );
+
+    const startup = await harness.controller.recoverOnStartup();
+    assert.equal(startup.checkpoint.tasks['0'].state, 'terminal');
+    assert.equal(startup.checkpoint.results.length, 1);
+  }
 });
 
 test('trusted batch page terminal transition closes its worker before persistence', async () => {
@@ -2616,6 +2912,72 @@ test('startup does not duplicate an existing recovery page', async () => {
   await controller.recoverOnStartup();
 
   assert.deepEqual(createdTabs, []);
+});
+
+test('unverified startup opens one recovery page without touching ownership', async () => {
+  const harness = createHarness();
+  await harness.controller.handleMessage(startMessage(1));
+  await harness.controller.handleMessage({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 11,
+    windowId: 21
+  });
+  delete harness.sessionData[
+    'batchWorkerOwnershipV1:batch-1:0:1'
+  ];
+
+  const first = await harness.controller.recoverOnStartup();
+  const second = await harness.controller.recoverOnStartup();
+
+  for (const response of [first, second]) {
+    assert.equal(response.ok, false);
+    assert.equal(response.error, 'batch_ownership_unverified');
+    assert.equal(
+      response.checkpoint.recoveryCleanup.reason,
+      'ownership_unverified'
+    );
+    assert.equal(response.checkpoint.tasks['0'].state, 'active');
+    assert.equal(response.checkpoint.tasks['0'].tabId, 11);
+  }
+  assert.deepEqual(harness.removedTabs, []);
+  assert.equal(harness.tabStore.has(11), true);
+  assert.deepEqual(harness.createdTabs, [{
+    url: 'chrome-extension://extension-id/batch.html?recovery=1'
+  }]);
+});
+
+test('unverified startup recovery-page failure preserves the ownership error', async () => {
+  const harness = createHarness();
+  await harness.controller.handleMessage(startMessage(1));
+  await harness.controller.handleMessage({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 11,
+    windowId: 21
+  });
+  delete harness.sessionData[
+    'batchWorkerOwnershipV1:batch-1:0:1'
+  ];
+  harness.chrome.tabs.createFailure = new Error('page unavailable');
+
+  const response = await harness.controller.recoverOnStartup();
+
+  assert.equal(response.ok, false);
+  assert.equal(response.error, 'batch_ownership_unverified');
+  assert.equal(
+    response.checkpoint.recoveryCleanup.reason,
+    'ownership_unverified'
+  );
+  assert.equal(response.checkpoint.tasks['0'].tabId, 11);
+  assert.deepEqual(harness.removedTabs, []);
+  assert.deepEqual(harness.createdTabs, [{
+    url: 'chrome-extension://extension-id/batch.html?recovery=1'
+  }]);
 });
 
 test('startup ignores completed and terminated checkpoints', async () => {
