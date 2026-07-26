@@ -30,13 +30,14 @@ test('derives counters, slots and latest-attempt rows from one checkpoint', () =
     { urlIndex: 2, attempt: 2, phase: 'detecting' }
   ]);
   assert.equal(snapshot.rows[2].result, null);
+  assert.deepEqual(snapshot.rows[1].actions, ['details', 'focus-tab']);
   assert.equal(snapshot.rows[2].attemptHistory.length, 1);
   assert.deepEqual(snapshot.rows[2].attemptHistory[0], {
     attempt: 1,
     result: 'fail',
     error: {
       code: 'task_timeout',
-      message: '处理超时，窗口已安全关闭',
+      message: '处理超时，worker 标签页已安全关闭',
       retryPolicy: 'safe',
       diagnostic: {}
     },

@@ -12,6 +12,35 @@
   margin: 0 auto;
 }
 
+.batch-console__fixture-lab {
+  box-sizing: border-box;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(180px, 240px);
+  gap: var(--app-space-3, 12px);
+  align-items: center;
+  width: min(100%, 1280px);
+  margin: 0 auto var(--app-space-4, 16px);
+  padding: var(--app-space-4, 16px);
+  border: 1px dashed var(--app-color-border-strong, #cbd5e1);
+  border-radius: var(--app-radius-md, 12px);
+  background: var(--app-color-surface, #fff);
+}
+
+.batch-console__fixture-lab h1,
+.batch-console__fixture-lab p {
+  margin: 0;
+}
+
+.batch-console__fixture-lab select {
+  min-height: 40px;
+  padding: 7px 10px;
+  border: 1px solid var(--app-color-border-strong, #cbd5e1);
+  border-radius: var(--app-radius-sm, 8px);
+  background: var(--app-color-surface, #fff);
+  color: inherit;
+  font: inherit;
+}
+
 .batch-console__hero,
 .batch-console__result {
   border: 1px solid var(--app-color-border, #e5e7eb);
@@ -372,6 +401,505 @@
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
   border: 0;
+}
+
+.batch-console__command-bar {
+  position: sticky;
+  z-index: 20;
+  top: 0;
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto;
+  gap: var(--app-space-3, 12px) var(--app-space-6, 24px);
+  align-items: center;
+  padding: var(--app-space-4, 16px);
+  border: 1px solid var(--app-color-border, #e5e7eb);
+  border-radius: var(--app-radius-md, 12px);
+  background: color-mix(in srgb, var(--app-color-surface, #fff) 96%, transparent);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.1);
+  backdrop-filter: blur(12px);
+}
+
+.batch-console__identity p {
+  margin: 0;
+}
+
+.batch-console__identity [data-batch-name] {
+  overflow: hidden;
+  font-weight: 760;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batch-console__identity [data-batch-status] {
+  margin-top: 3px;
+  color: var(--app-color-muted, #6b7280);
+  font-size: 13px;
+}
+
+.batch-console__command-actions,
+.batch-console__row-actions,
+.batch-console__dialog footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--app-space-2, 8px);
+}
+
+.batch-console__command-result {
+  grid-column: 1 / -1;
+  min-height: 1.25em;
+  margin: 0;
+  color: var(--app-color-muted, #6b7280);
+  font-size: 12px;
+}
+
+.batch-console__button {
+  min-height: 40px;
+  padding: 7px 12px;
+  border: 1px solid var(--app-color-border-strong, #cbd5e1);
+  border-radius: var(--app-radius-sm, 8px);
+  background: var(--app-color-surface, #fff);
+  color: var(--app-color-text, #1f2937);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.batch-console__button--primary {
+  border-color: var(--app-color-accent, #1d4ed8);
+  background: var(--app-color-accent, #1d4ed8);
+  color: #fff;
+}
+
+.batch-console__button--danger-entry {
+  border-color: #fecaca;
+  color: #b91c1c;
+}
+
+.batch-console__button--danger {
+  border-color: #b91c1c;
+  background: #b91c1c;
+  color: #fff;
+}
+
+.batch-console__button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.batch-console__button:focus-visible,
+.batch-console__toolbar input:focus-visible,
+.batch-console__toolbar select:focus-visible,
+.batch-console__table-wrap:focus-visible,
+.batch-console__drawer:focus-visible,
+.batch-console__dialog:focus-visible {
+  outline: none;
+  box-shadow: var(--app-focus-ring, 0 0 0 3px rgba(37, 99, 235, 0.34));
+}
+
+.batch-console__banners {
+  display: grid;
+  gap: var(--app-space-2, 8px);
+  margin-top: var(--app-space-3, 12px);
+}
+
+.batch-console__banners:empty {
+  display: none;
+}
+
+.batch-console__banner {
+  padding: var(--app-space-3, 12px) var(--app-space-4, 16px);
+  border: 1px solid #bfdbfe;
+  border-radius: var(--app-radius-md, 12px);
+  background: #eff6ff;
+}
+
+.batch-console__banner--offline,
+.batch-console__banner--persistence {
+  border-color: #fde68a;
+  background: #fffbeb;
+}
+
+.batch-console__banner--error {
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+
+.batch-console__banner h2,
+.batch-console__banner p {
+  margin: 0;
+}
+
+.batch-console__banner h2 {
+  font-size: 14px;
+}
+
+.batch-console__banner p {
+  margin-top: 4px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.batch-console__summary {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: var(--app-space-3, 12px);
+  margin: var(--app-space-4, 16px) 0;
+}
+
+.batch-console__metric,
+.batch-console__panel,
+.batch-console__queue,
+.batch-console__empty {
+  border: 1px solid var(--app-color-border, #e5e7eb);
+  border-radius: var(--app-radius-md, 12px);
+  background: var(--app-color-surface, #fff);
+}
+
+.batch-console__metric {
+  min-width: 0;
+  padding: var(--app-space-3, 12px);
+}
+
+.batch-console__metric span,
+.batch-console__metric strong {
+  display: block;
+}
+
+.batch-console__metric span {
+  overflow: hidden;
+  color: var(--app-color-muted, #6b7280);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batch-console__metric strong {
+  margin-top: 4px;
+  font-size: 24px;
+}
+
+.batch-console__layout {
+  display: grid;
+  gap: var(--app-space-4, 16px);
+  align-items: start;
+}
+
+.batch-console__overview {
+  display: grid;
+  gap: var(--app-space-3, 12px);
+}
+
+.batch-console__panel,
+.batch-console__queue,
+.batch-console__empty {
+  padding: var(--app-space-4, 16px);
+}
+
+.batch-console__panel h2,
+.batch-console__queue h2,
+.batch-console__empty h2 {
+  margin: 0 0 var(--app-space-3, 12px);
+  font-size: 16px;
+}
+
+.batch-console__panel dl,
+.batch-console__card dl,
+.batch-console__drawer dl {
+  display: grid;
+  grid-template-columns: minmax(88px, max-content) minmax(0, 1fr);
+  gap: 7px 12px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.batch-console__panel dt,
+.batch-console__card dt,
+.batch-console__drawer dt {
+  color: var(--app-color-muted, #6b7280);
+  font-weight: 700;
+}
+
+.batch-console__panel dd,
+.batch-console__card dd,
+.batch-console__drawer dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.batch-console__slots {
+  display: grid;
+  gap: var(--app-space-2, 8px);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.batch-console__slot {
+  display: grid;
+  gap: 3px;
+  padding: 10px;
+  border-radius: var(--app-radius-sm, 8px);
+  background: var(--app-color-bg, #f8fafc);
+  font-size: 12px;
+}
+
+.batch-console__slot span {
+  overflow-wrap: anywhere;
+}
+
+.batch-console__toolbar {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(130px, 0.6fr)) minmax(220px, 1.4fr);
+  gap: var(--app-space-3, 12px);
+  margin-bottom: var(--app-space-4, 16px);
+}
+
+.batch-console__filter label {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--app-color-muted, #6b7280);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.batch-console__filter input,
+.batch-console__filter select {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 40px;
+  padding: 7px 10px;
+  border: 1px solid var(--app-color-border-strong, #cbd5e1);
+  border-radius: var(--app-radius-sm, 8px);
+  background: var(--app-color-surface, #fff);
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+}
+
+.batch-console__table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--app-color-border, #e5e7eb);
+  border-radius: var(--app-radius-sm, 8px);
+}
+
+.batch-console__table {
+  width: 100%;
+  min-width: 960px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.batch-console__table th,
+.batch-console__table td {
+  padding: 10px;
+  border-bottom: 1px solid var(--app-color-border, #e5e7eb);
+  vertical-align: top;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.batch-console__table thead th {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  background: var(--app-color-bg, #f8fafc);
+}
+
+.batch-console__table tbody tr:last-child > * {
+  border-bottom: 0;
+}
+
+.batch-console__table .batch-console__row-actions {
+  min-width: 180px;
+}
+
+.batch-console__row-actions .batch-console__button {
+  min-height: 34px;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+
+.batch-console__cards {
+  display: none;
+  gap: var(--app-space-3, 12px);
+}
+
+.batch-console__card {
+  padding: var(--app-space-4, 16px);
+  border: 1px solid var(--app-color-border, #e5e7eb);
+  border-radius: var(--app-radius-md, 12px);
+  background: var(--app-color-bg, #f8fafc);
+}
+
+.batch-console__card h3 {
+  margin: 0 0 var(--app-space-3, 12px);
+  font-size: 15px;
+}
+
+.batch-console__card .batch-console__row-actions {
+  margin-top: var(--app-space-3, 12px);
+}
+
+.batch-console__queue-empty,
+.batch-console__empty p {
+  margin: 0;
+  color: var(--app-color-muted, #6b7280);
+  line-height: 1.6;
+}
+
+.batch-console__overlay {
+  position: fixed;
+  z-index: 100;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--app-space-4, 16px);
+  background: rgba(15, 23, 42, 0.62);
+}
+
+.batch-console__drawer,
+.batch-console__dialog {
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  border-radius: var(--app-radius-lg, 16px);
+  background: var(--app-color-surface, #fff);
+  color: var(--app-color-text, #1f2937);
+  box-shadow: 0 24px 80px rgba(15, 23, 42, 0.32);
+}
+
+.batch-console__drawer {
+  width: min(560px, 100%);
+  margin-left: auto;
+  padding: var(--app-space-6, 24px);
+}
+
+.batch-console__drawer > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--app-space-3, 12px);
+}
+
+.batch-console__drawer h2,
+.batch-console__drawer h3 {
+  margin: 0;
+}
+
+.batch-console__drawer > dl,
+.batch-console__drawer > section,
+.batch-console__drawer > footer {
+  margin-top: var(--app-space-5, 20px);
+}
+
+.batch-console__drawer li {
+  margin-top: var(--app-space-2, 8px);
+  overflow-wrap: anywhere;
+}
+
+.batch-console__dialog {
+  width: min(480px, 100%);
+  padding: var(--app-space-6, 24px);
+}
+
+.batch-console__dialog h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.batch-console__dialog p {
+  margin: var(--app-space-3, 12px) 0 var(--app-space-5, 20px);
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
+@media (min-width: 1280px) {
+  .batch-console__layout {
+    grid-template-columns: 245px minmax(0, 1fr);
+  }
+}
+
+@media (min-width: 900px) and (max-width: 1279px) {
+  .batch-console__overview {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 899px) {
+  .batch-console__fixture-lab {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .batch-console__command-bar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .batch-console__command-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .batch-console__summary {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .batch-console__toolbar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .batch-console__table-wrap {
+    display: none;
+  }
+
+  .batch-console__cards {
+    display: grid;
+  }
+
+  .batch-wizard {
+    width: 100vw;
+    max-width: 100vw;
+    max-height: 100vh;
+    border-radius: 0;
+  }
+
+  .batch-wizard__panel {
+    min-height: 100vh;
+    max-height: 100vh;
+  }
+}
+
+@media (max-width: 639px) {
+  .batch-console__summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .batch-console__command-actions,
+  .batch-console__toolbar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .batch-console__button {
+    width: 100%;
+  }
+
+  .batch-console__panel dl,
+  .batch-console__card dl,
+  .batch-console__drawer dl {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .batch-console__drawer {
+    box-sizing: border-box;
+    width: 100vw;
+    min-height: 100vh;
+    max-height: 100vh;
+    padding: var(--app-space-4, 16px);
+    border-radius: 0;
+  }
 }
 
 @media (max-width: 1024px) {

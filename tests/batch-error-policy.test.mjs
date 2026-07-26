@@ -31,11 +31,20 @@ test('returns a safe structured timeout error without credentials', () => {
     apiKey: 'must-not-leak'
   }), {
     code: 'task_timeout',
-    message: '处理超时，窗口已安全关闭',
+    message: '处理超时，worker 标签页已安全关闭',
     retryPolicy: 'safe',
     diagnostic: {
       phase: 'generating',
       elapsedMs: 61000
     }
+  });
+});
+
+test('describes automatic creation failures as worker tab failures', () => {
+  assert.deepEqual(getBatchError('window_create_failed'), {
+    code: 'window_create_failed',
+    message: '无法创建 worker 标签页',
+    retryPolicy: 'safe',
+    diagnostic: {}
   });
 });
