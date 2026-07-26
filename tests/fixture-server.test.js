@@ -126,6 +126,27 @@ test('serves exactly five deterministic local target pages', async (t) => {
   });
 });
 
+test('serves thirty stress targets and rejects IDs outside the contract', async (t) => {
+  await withFixtureServer(t, async (origin) => {
+    for (let id = 1; id <= 30; id += 1) {
+      const response = await fetch(`${origin}/stress/${id}`);
+      const html = await response.text();
+
+      assert.equal(response.status, 200);
+      assert.match(html, new RegExp(`Local fixture target ${id}`));
+      assert.match(html, new RegExp(`data-fixture-target="${id}"`));
+      assert.match(html, new RegExp(`/stress/${id}`));
+    }
+
+    for (const id of [0, 31, '01', '1x']) {
+      assert.equal(
+        (await fetch(`${origin}/stress/${id}`)).status,
+        404
+      );
+    }
+  });
+});
+
 test('serves five isolated assignment targets and records only safe task fields locally', async (t) => {
   await withFixtureServer(t, async (origin) => {
     const pages = await Promise.all(

@@ -86,6 +86,10 @@ function getPromptText(body) {
 }
 
 function getTargetId(prompt) {
+  const stressMatch = prompt.match(
+    /\/stress\/([1-9]|[12]\d|30)\b/i
+  );
+  if (stressMatch) return Number(stressMatch[1]);
   const pathMatch = prompt.match(/\/target\/([1-5])\b/i);
   if (pathMatch) return Number(pathMatch[1]);
   const multiMatch = prompt.match(/\/multi\/([1-5])\b/i);
@@ -195,8 +199,14 @@ function createFixtureServer(options = {}) {
 
     const targetMatch = requestUrl.pathname.match(/^\/target\/([1-5])$/);
     const multiMatch = requestUrl.pathname.match(/^\/multi\/([1-5])$/);
+    const stressMatch = requestUrl.pathname.match(
+      /^\/stress\/([1-9]|[12]\d|30)$/
+    );
     const isBasicFixture = requestUrl.pathname === '/' || requestUrl.pathname === '/comment-page.html';
-    if (request.method !== 'GET' || (!targetMatch && !multiMatch && !isBasicFixture)) {
+    if (
+      request.method !== 'GET' ||
+      (!targetMatch && !multiMatch && !stressMatch && !isBasicFixture)
+    ) {
       response.writeHead(404).end('Not Found');
       return;
     }
@@ -204,7 +214,11 @@ function createFixtureServer(options = {}) {
     response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     response.end(renderFixturePage({
       requestedPath: `${requestUrl.pathname}${requestUrl.search}`,
-      targetId: targetMatch?.[1] || multiMatch?.[1] || '',
+      targetId:
+        targetMatch?.[1] ||
+        multiMatch?.[1] ||
+        stressMatch?.[1] ||
+        '',
       delayMs: getClampedDelay(requestUrl.search)
     }));
   });
