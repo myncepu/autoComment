@@ -56,6 +56,36 @@ test('renders fixed controls, six counters, tab slots and full-lifecycle rows', 
   assert.match(document.querySelector('[data-task-row="18"]').textContent, /处理超时/);
 });
 
+test('renders truncated preview columns with full hover and focus text', () => {
+  const document = consoleDocument();
+  const view = createBatchConsoleView(document, consoleHandlers());
+  view.render(runningSnapshotFixture());
+
+  const headers = [...document.querySelectorAll(
+    '.batch-console__table thead th'
+  )].map((node) => node.textContent);
+  assert.ok(headers.includes('评论文本'));
+  assert.ok(headers.includes('锚文本'));
+  assert.ok(headers.includes('推广网址'));
+
+  const row = document.querySelector('[data-task-row="18"]');
+  const previews = row.querySelectorAll('[data-preview-value]');
+  assert.equal(previews.length, 3);
+  assert.equal(
+    previews[0].title,
+    'A safe generated draft with the complete comment text.'
+  );
+  assert.equal(previews[1].title, 'Old Blog Guide · Promotion Home');
+  assert.equal(previews[2].title, 'https://promo.test/old-blog');
+  assert.equal(previews[0].tabIndex, 0);
+
+  click(document, '[data-action="details"][data-url-index="18"]');
+  const drawer = document.querySelector('[data-task-drawer]');
+  assert.match(drawer.textContent, /A safe generated draft with the complete comment text/);
+  assert.match(drawer.textContent, /Old Blog Guide · Promotion Home/);
+  assert.match(drawer.textContent, /https:\/\/promo\.test\/old-blog/);
+});
+
 test('uses distinct pause and irreversible stop confirmations with semantic arguments', () => {
   const document = consoleDocument();
   const calls = [];

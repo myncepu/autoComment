@@ -689,9 +689,28 @@
 
 .batch-console__table {
   width: 100%;
-  min-width: 960px;
+  min-width: 1320px;
   border-collapse: collapse;
   font-size: 12px;
+}
+
+.batch-console__preview-cell {
+  width: 150px;
+  max-width: 150px;
+}
+
+.batch-console__preview-value {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batch-console__preview-value:focus {
+  border-radius: 4px;
+  outline: 2px solid var(--app-color-primary, #2563eb);
+  outline-offset: 2px;
 }
 
 .batch-console__table th,

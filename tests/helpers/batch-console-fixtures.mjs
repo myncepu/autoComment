@@ -58,6 +58,9 @@ function taskRows() {
     manualResolution: { status: 'idle', updatedAt: null },
     attemptHistory: [],
     aiContent: 'A safe generated draft.',
+    commentText: 'A safe generated draft with the complete comment text.',
+    anchorTexts: ['Old Blog Guide', 'Promotion Home'],
+    promotedWebsiteUrl: 'https://promo.test/old-blog',
     timestamp: 70000
   }, {
     taskId: 'batch-1:17:1',
@@ -91,6 +94,9 @@ function taskRows() {
       elapsedMs: 3000
     }],
     aiContent: 'Potentially submitted draft.',
+    commentText: 'Potentially submitted draft.',
+    anchorTexts: ['Manual Product'],
+    promotedWebsiteUrl: 'https://promo.test/manual',
     timestamp: 69000
   }, ...Array.from({ length: 3 }, (_, offset) => ({
     taskId: `batch-1:${offset}:1`,
@@ -110,6 +116,9 @@ function taskRows() {
     manualResolution: { status: 'idle', updatedAt: null },
     attemptHistory: [],
     aiContent: null,
+    commentText: null,
+    anchorTexts: [],
+    promotedWebsiteUrl: 'https://promo.test/',
     timestamp: 68000 - offset
   }))];
 }

@@ -113,6 +113,30 @@ test('filters by URL, stored error message, and AI content', () => {
   }).map((row) => row.urlIndex), [3]);
 });
 
+test('projects and searches safe comment, anchor, and promoted-site previews', () => {
+  const checkpoint = createConsoleCheckpointFixture();
+  checkpoint.results[1] = {
+    ...checkpoint.results[1],
+    commentText: 'A concise comment about blue orchids.',
+    anchorTexts: ['Blue Orchid Guide', 'Product Home'],
+    promotedWebsiteUrl: 'https://promo.test/orchid'
+  };
+  const rows = createBatchConsoleSnapshot(checkpoint, { now: 70_000 }).rows;
+  const row = rows[3];
+
+  assert.equal(row.commentText, 'A concise comment about blue orchids.');
+  assert.deepEqual(row.anchorTexts, ['Blue Orchid Guide', 'Product Home']);
+  assert.equal(row.promotedWebsiteUrl, 'https://promo.test/orchid');
+  for (const keyword of ['concise comment', 'orchid guide', 'promo.test/orchid']) {
+    assert.deepEqual(filterBatchTaskRows(rows, {
+      status: 'all',
+      domain: 'all',
+      timeRange: 'all',
+      keyword
+    }).map((candidate) => candidate.urlIndex), [3]);
+  }
+});
+
 test('projects frozen Profile and Promotion Site labels and filters by stable IDs', () => {
   const checkpoint = createConsoleCheckpointFixture();
   checkpoint.version = 3;
