@@ -19,6 +19,14 @@ test('extension page CSP allows approved model endpoints without weakening scrip
   assert.doesNotMatch(policy, /unsafe-inline|unsafe-eval|\*/);
 });
 
+test('manifest grants tab metadata access required by worker ownership proof', () => {
+  const manifest = JSON.parse(
+    fs.readFileSync(path.join(projectRoot, 'manifest.json'), 'utf8')
+  );
+
+  assert.equal(manifest.permissions.includes('tabs'), true);
+});
+
 test('options page uses packaged styles so Chrome can enforce the extension CSP', () => {
   const html = fs.readFileSync(path.join(projectRoot, 'options.html'), 'utf8');
   const document = new JSDOM(html).window.document;
