@@ -12,6 +12,7 @@ const productionScripts = [
   'illegal-site-filter.js',
   'lib/llm-content-bridge.js',
   'lib/batch-task-config.js',
+  'lib/batch-handle-dispatch.js',
   'lib/batch-submit-context-client.js',
   'lib/comment-history-capture.js',
   'lib/batch-phase-reporter.js',
@@ -131,6 +132,10 @@ function handleFor(origin, index, profileId, promotionSiteId, source) {
     assignmentPairId: profileId === 'profile-a' ? 'pair-a' : 'pair-b',
     assignmentSource: source,
     configRevision: 12,
+    automation: {
+      autoGenerate: true,
+      autoSubmit: true
+    },
     profile: {
       id: profile.id,
       displayName: profile.displayName,
@@ -215,6 +220,12 @@ async function main() {
           handle
         );
         assert.equal(response?.ok, true);
+        assert.equal(response?.accepted, true);
+        await page.waitForFunction((taskId) => (
+          globalThis.LocalFixtureChrome.safeState().confirmations.some(
+            (message) => message.taskId === taskId
+          )
+        ), handle.taskId);
         const state = await page.evaluate(
           () => globalThis.LocalFixtureChrome.safeState()
         );
@@ -298,10 +309,15 @@ async function main() {
       timeoutPage.evaluate(
         (message) => globalThis.LocalFixtureChrome.dispatchHandle(message),
         timeoutHandle
-      ).then(() => 'completed'),
+      ).then((response) => response?.accepted === true ? 'accepted' : 'rejected'),
       new Promise((resolve) => setTimeout(() => resolve('timeout'), 100))
     ]);
-    assert.equal(timed, 'timeout');
+    assert.equal(timed, 'accepted');
+    await timeoutPage.waitForFunction(() => (
+      globalThis.LocalFixtureChrome.safeState().phases.some(
+        ({ phase }) => phase === 'generating'
+      )
+    ));
     await timeoutPage.close();
 
     const retryPage = await context.newPage();
@@ -323,6 +339,12 @@ async function main() {
       retryHandle
     );
     assert.equal(retryResponse?.ok, true);
+    assert.equal(retryResponse?.accepted, true);
+    await retryPage.waitForFunction((taskId) => (
+      globalThis.LocalFixtureChrome.safeState().confirmations.some(
+        (message) => message.taskId === taskId
+      )
+    ), retryHandle.taskId);
     await retryPage.close();
     const retriedRecords = await waitForSubmissions(origin, 6);
     const retryRecord = retriedRecords.at(-1);

@@ -114,6 +114,9 @@ function initialRows() {
     manualResolution: { status: 'idle', updatedAt: null },
     attemptHistory: [],
     aiContent: null,
+    commentText: null,
+    anchorTexts: [],
+    promotedWebsiteUrl: 'https://fixture-promo.test/',
     timestamp: 70000 - urlIndex
   }));
   return [{
@@ -139,6 +142,9 @@ function initialRows() {
     manualResolution: { status: 'idle', updatedAt: null },
     attemptHistory: [],
     aiContent: 'Fixture safe retry draft.',
+    commentText: 'Fixture safe retry draft.',
+    anchorTexts: ['Old Blog Guide', 'Promotion Home'],
+    promotedWebsiteUrl: 'https://fixture-promo.test/old-blog',
     timestamp: 71000
   }, {
     taskId: 'fixture-batch-001:17:1',
@@ -163,6 +169,9 @@ function initialRows() {
     manualResolution: { status: 'idle', updatedAt: null },
     attemptHistory: [],
     aiContent: 'Fixture uncertain draft.',
+    commentText: 'Fixture uncertain draft.',
+    anchorTexts: ['Manual Review'],
+    promotedWebsiteUrl: 'https://fixture-promo.test/manual-review',
     timestamp: 70500
   }, ...running];
 }
@@ -514,6 +523,9 @@ export function createBatchConsoleFixtureAdapter() {
           manualResolution: { status: 'idle', updatedAt: null },
           attemptHistory: [],
           aiContent: `Fixture result ${index + 1}`,
+          commentText: `Fixture result ${index + 1}`,
+          anchorTexts: [`Fixture anchor ${index + 1}`],
+          promotedWebsiteUrl: 'https://fixture-promo.test/',
           timestamp: 72000 + index
         }));
         snapshot = {

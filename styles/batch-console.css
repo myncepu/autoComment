@@ -586,6 +586,10 @@
   align-items: start;
 }
 
+.batch-console__layout > * {
+  min-width: 0;
+}
+
 .batch-console__overview {
   display: grid;
   gap: var(--app-space-3, 12px);

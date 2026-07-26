@@ -79,6 +79,10 @@ test('batch console CSS exposes desktop, overview, card and compact layout modes
   ));
   assert.equal(rowActionRule.style.getPropertyValue('min-height'), '40px');
   assert.equal(rowActionRule.style.getPropertyValue('min-width'), '40px');
+  const layoutChildRule = [...document.styleSheets[0].cssRules].find((rule) => (
+    rule.selectorText === '.batch-console__layout > *'
+  ));
+  assert.equal(layoutChildRule.style.getPropertyValue('min-width'), '0');
 });
 
 test('fixture adapter runs real CSV preflight and returns deterministic command results', async () => {
@@ -125,6 +129,32 @@ test('fixture adapter runs real CSV preflight and returns deterministic command 
       failed: 0
     }
   });
+});
+
+test('fixture adapter exposes safe comment, anchor and promotion previews', () => {
+  const adapter = createBatchConsoleFixtureAdapter();
+  const snapshot = adapter.application.getSnapshot();
+  const failed = snapshot.rows.find((row) => row.urlIndex === 18);
+  const manual = snapshot.rows.find((row) => row.urlIndex === 17);
+
+  assert.deepEqual(
+    {
+      commentText: failed.commentText,
+      anchorTexts: failed.anchorTexts,
+      promotedWebsiteUrl: failed.promotedWebsiteUrl
+    },
+    {
+      commentText: 'Fixture safe retry draft.',
+      anchorTexts: ['Old Blog Guide', 'Promotion Home'],
+      promotedWebsiteUrl: 'https://fixture-promo.test/old-blog'
+    }
+  );
+  assert.equal(manual.commentText, 'Fixture uncertain draft.');
+  assert.deepEqual(manual.anchorTexts, ['Manual Review']);
+  assert.equal(
+    manual.promotedWebsiteUrl,
+    'https://fixture-promo.test/manual-review'
+  );
 });
 
 test('fixture adapter drives deterministic console commands, filters and recovery states', async () => {
@@ -245,6 +275,15 @@ test('fixture app boots shell and completes the wizard in an ordinary HTTP docum
   assert.equal(document.querySelectorAll('[data-summary-count]').length, 6);
   assert.equal(document.querySelectorAll('[data-worker-slot]').length, 3);
   assert.equal(document.querySelectorAll('[data-task-row]').length, 5);
+  const failedRow = document.querySelector('[data-task-row="18"]');
+  const previews = failedRow.querySelectorAll('[data-preview-value]');
+  assert.equal(previews.length, 3);
+  assert.equal(previews[0].title, 'Fixture safe retry draft.');
+  assert.equal(previews[1].title, 'Old Blog Guide · Promotion Home');
+  assert.equal(
+    previews[2].title,
+    'https://fixture-promo.test/old-blog'
+  );
   click(document, '[data-action="new-batch"]');
   assert.equal(document.querySelector('[data-batch-wizard]').hasAttribute('open'), true);
 
