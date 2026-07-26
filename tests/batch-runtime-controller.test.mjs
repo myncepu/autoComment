@@ -2281,6 +2281,166 @@ test('terminal hook shares proof-only rejection for queued, terminal, missing an
   assert.equal(terminal.data.batchRuntimeCheckpoint.results.length, 1);
 });
 
+test('terminal reducer preflight rejects invalid result and error shapes before side effects', async () => {
+  const sender = {
+    id: 'extension-id',
+    tab: { id: 11, windowId: 21 },
+    url: 'https://example.test/0'
+  };
+  const invalidMessages = [
+    { result: 'bogus' },
+    { result: 'fail', errorCode: { raw: true } },
+    { result: 'fail', errorMessage: ['not', 'canonical'] },
+    { result: 'fail', errorCode: 0 },
+    { result: 'fail', errorMessage: false }
+  ];
+
+  for (const invalid of invalidMessages) {
+    const harness = createHarness();
+    await harness.controller.handleMessage(startMessage(1));
+    await harness.controller.handleMessage({
+      type: 'BATCH_TASK_ACTIVE',
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      tabId: 11,
+      windowId: 21
+    });
+    let hookCalls = 0;
+
+    const response = await harness.controller.markTerminal(
+      {
+        batchId: 'batch-1',
+        urlIndex: 0,
+        attempt: 1,
+        ...invalid
+      },
+      sender,
+      async () => {
+        hookCalls += 1;
+      }
+    );
+
+    assert.equal(response.error, 'invalid_result');
+    assert.equal(hookCalls, 0);
+    assert.deepEqual(harness.removedTabs, []);
+    assert.equal(
+      harness.data.batchRuntimeCheckpoint.tasks['0'].state,
+      'active'
+    );
+    assert.equal(harness.data.batchRuntimeCheckpoint.results.length, 0);
+    assert.ok(
+      harness.sessionData['batchWorkerOwnershipV1:batch-1:0:1']
+    );
+  }
+});
+
+test('no-hook terminal preflight rejects invalid result and string index before removal', async () => {
+  const senders = [
+    {
+      id: 'extension-id',
+      tab: { id: 11, windowId: 21 },
+      url: 'https://example.test/0'
+    },
+    batchPageSender()
+  ];
+
+  for (const sender of senders) {
+    for (const invalid of [
+      {
+        urlIndex: 0,
+        result: { result: 'bogus' },
+        expectedError: 'invalid_result'
+      },
+      {
+        urlIndex: '0',
+        result: { result: 'success' },
+        expectedError: 'invalid_url_index'
+      }
+    ]) {
+      const harness = createHarness();
+      await harness.controller.handleMessage(startMessage(1));
+      await harness.controller.handleMessage({
+        type: 'BATCH_TASK_ACTIVE',
+        batchId: 'batch-1',
+        urlIndex: 0,
+        attempt: 1,
+        tabId: 11,
+        windowId: 21
+      });
+
+      const response = await harness.controller.handleMessage({
+        type: 'BATCH_TASK_TERMINAL',
+        batchId: 'batch-1',
+        urlIndex: invalid.urlIndex,
+        attempt: 1,
+        result: invalid.result
+      }, sender);
+
+      assert.equal(response.error, invalid.expectedError);
+      assert.deepEqual(harness.removedTabs, []);
+      assert.equal(
+        harness.data.batchRuntimeCheckpoint.tasks['0'].state,
+        'active'
+      );
+      assert.equal(harness.data.batchRuntimeCheckpoint.results.length, 0);
+      assert.ok(
+        harness.sessionData['batchWorkerOwnershipV1:batch-1:0:1']
+      );
+    }
+  }
+});
+
+test('external terminal cleanup marker cannot bypass an ordinary paused session preflight', async () => {
+  const harness = createHarness();
+  await harness.controller.handleMessage(startMessage(1));
+  await harness.controller.handleMessage({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 11,
+    windowId: 21
+  });
+  const paused = await harness.controller.handleMessage({
+    type: 'BATCH_SESSION_PAUSE',
+    batchId: 'batch-1'
+  });
+  assert.equal(paused.ok, true);
+  assert.equal(paused.checkpoint.status, 'paused_recovery');
+  let hookCalls = 0;
+
+  const response = await harness.controller.markTerminal(
+    {
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      result: 'success',
+      terminalCleanupRetry: true
+    },
+    {
+      id: 'extension-id',
+      tab: { id: 11, windowId: 21 },
+      url: 'https://example.test/0'
+    },
+    async () => {
+      hookCalls += 1;
+    }
+  );
+
+  assert.equal(response.error, 'invalid_transition');
+  assert.equal(hookCalls, 0);
+  assert.deepEqual(harness.removedTabs, []);
+  assert.equal(
+    harness.data.batchRuntimeCheckpoint.tasks['0'].state,
+    'active'
+  );
+  assert.equal(harness.data.batchRuntimeCheckpoint.results.length, 0);
+  assert.ok(
+    harness.sessionData['batchWorkerOwnershipV1:batch-1:0:1']
+  );
+});
+
 test('terminal side effect hook is idempotent across a close retry', async () => {
   const harness = createHarness();
   await harness.controller.handleMessage(startMessage(1));

@@ -851,6 +851,56 @@ globalThis.confirmBatchHistoryDurably = confirmBatchHistoryDurably;`,
     changed: true
   }]);
 
+  await activateTask(6, { submitting: true });
+  const invalidReportHistoryProbe = await openCommentHistoryDb({
+    indexedDBImpl: globalThis.indexedDB,
+    IDBKeyRangeImpl: globalThis.IDBKeyRange
+  });
+  const invalidReportSnapshot = {
+    results: structuredClone(storageData.batchResults),
+    historyCount: await invalidReportHistoryProbe.countRecords(),
+    contexts: structuredClone(storageData.batchSubmitContextsByTab || {}),
+    task: structuredClone(storageData.batchRuntimeCheckpoint.tasks['6']),
+    sessionJournal: structuredClone(sessionData),
+    tabCount: tabData.size
+  };
+  invalidReportHistoryProbe.close();
+  assert.deepEqual(await dispatchConfirm({
+    type: 'BATCH_REPORT_RESULT',
+    batchId: message.batchId,
+    urlIndex: 6,
+    attempt: 1,
+    result: 'bogus',
+    url: sourceItems[6].url,
+    errorCode: { invalid: true },
+    errorMessage: ['not', 'canonical']
+  }), [{
+    ok: false,
+    error: 'invalid_result'
+  }]);
+  const invalidReportAfterProbe = await openCommentHistoryDb({
+    indexedDBImpl: globalThis.indexedDB,
+    IDBKeyRangeImpl: globalThis.IDBKeyRange
+  });
+  assert.deepEqual({
+    results: storageData.batchResults,
+    historyCount: await invalidReportAfterProbe.countRecords(),
+    contexts: storageData.batchSubmitContextsByTab || {},
+    task: storageData.batchRuntimeCheckpoint.tasks['6'],
+    sessionJournal: sessionData,
+    tabCount: tabData.size
+  }, invalidReportSnapshot);
+  invalidReportAfterProbe.close();
+  await dispatchConfirm({
+    type: 'BATCH_REPORT_RESULT',
+    batchId: message.batchId,
+    urlIndex: 6,
+    attempt: 1,
+    result: 'skipped',
+    url: sourceItems[6].url,
+    errorMessage: 'invalid report rejected'
+  });
+
   const oldRevision = {
     capturedAt: fixedNow,
     recordedAt: fixedNow + 1,

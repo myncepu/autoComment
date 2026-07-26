@@ -609,6 +609,41 @@ task-11 owner page targeting tab 99 returned `ok/sealed` and wrote a seal.
 After the fixes, the focused proof/background command passed 130/130, the
 affected command passed 239/239, and the full repository passed 519/519.
 
+## Round 12 Terminal Prevalidation Ordering
+
+- Terminal handling now rejects a missing/non-positive attempt, a
+  non-integer/negative URL index, a non-object result, a result outside the
+  reducer's legal set, and non-string result/error detail fields before any
+  terminal hook, tab removal, journal clear, checkpoint/result/history/context
+  mutation, or confirmation broadcast. Falsey non-string values such as
+  `errorCode: 0` and `errorMessage: false` are rejected rather than silently
+  normalized.
+- After the existing exact ownership proof, the controller constructs one
+  canonical internal `task_terminal` event from checkpoint/task identity and
+  normalized result fields. It sets the terminal-cleanup retry marker only
+  from controller-proven ownership plus the exact
+  `terminal_cleanup_failed`/`ownership_unverified` recovery reasons; an
+  externally supplied marker is never consumed.
+- The reducer dry-runs that canonical event against the original checkpoint
+  and validates the resulting terminal candidate before wakefulness, the
+  terminal hook, reproof, or removal. Only after successful removal does the
+  controller persist that exact candidate and clear its ownership journal.
+  Removal failure still derives paused recovery from the original checkpoint,
+  so candidate results never leak into retained ownership.
+- Direct no-hook `BATCH_TASK_TERMINAL` messages use the same strict
+  payload/identity/candidate preflight before removal. They no longer coerce a
+  string URL index into a task lookup or treat a missing/stale checkpoint as a
+  successful untracked terminalization.
+
+Round-12 RED evidence showed a bogus result invoking the terminal hook; both a
+bogus nested no-hook result and `urlIndex: "0"` removing the worker tab; an
+external retry marker bypassing an ordinary session pause; and a real
+background invalid report removing its tab before the reducer rejected it.
+The real-background snapshot covered local results, IndexedDB history,
+submit-context state, checkpoint ownership, the session journal, and live
+tabs. After the fix, the focused command passed 133/133, the affected command
+passed 242/242, and the full repository passed 522/522.
+
 ## Legacy Race Coverage Map
 
 The removed monolith fixture is not retained. Each former integration
@@ -700,6 +735,21 @@ guarantee is owned and tested by the production module that now implements it:
 
 ## Verification
 
+- Round-12 focused terminal/background command:
+  `node --test tests/batch-runtime-checkpoint.test.mjs tests/batch-runtime-controller.test.mjs tests/batch-submit-context-store.test.mjs tests/comment-history-message-listener.test.mjs`
+  passed 133/133 with zero failures.
+- Round-12 affected command:
+  `node --test tests/batch-runtime-checkpoint.test.mjs tests/batch-runtime-controller.test.mjs tests/batch-submit-context-store.test.mjs tests/batch-submit-context-client.test.js tests/comment-history-message-listener.test.mjs tests/comment-history-submit-flow.test.js tests/batch-submit-order.test.js tests/batch-worker-runtime.test.mjs tests/batch-multi-window-integration.test.js tests/batch-chrome-adapter.test.mjs`
+  passed 242/242 with zero failures.
+- Round-12 full repository: `npm test` passed 522/522 with zero failures.
+- `node --check` passed for every round-12 changed JavaScript/MJS module and
+  test; `git diff --check` passed. `manifest.json` parsed and `batch.js`
+  imported without DOM or Chrome globals.
+- Static audits confirm that the installed runtime set still excludes
+  externally supplied ACTIVE ownership, no external
+  `message.terminalCleanupRetry` field is consumed, and ownership epochs
+  remain absent from result, history, content, page-composition, and
+  DOM-facing sinks.
 - Round-11 focused proof/background command:
   `node --test tests/batch-runtime-checkpoint.test.mjs tests/batch-runtime-controller.test.mjs tests/batch-submit-context-store.test.mjs tests/comment-history-message-listener.test.mjs`
   passed 130/130 with zero failures.
@@ -803,5 +853,7 @@ guarantee is owned and tested by the production module that now implements it:
   `fix: prove every batch persistence ingress`.
 - Round-11 hardening commit subject:
   `fix: unify terminal and recovery ownership proof`.
+- Round-12 hardening commit subject:
+  `fix: preflight terminal transitions before effects`.
 - The final commit SHA is reported in the task `DONE` handoff because a file
   cannot contain the hash of the commit that contains itself.
