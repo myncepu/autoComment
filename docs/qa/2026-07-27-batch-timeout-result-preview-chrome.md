@@ -95,8 +95,10 @@ window, tab ID and ownership epoch and removal succeeds. A close failure is
 persisted as recovery state and converges on the next startup/page recovery.
 While the originating controller still has an unresolved create promise, a
 recovery scan cannot clear the tombstone. After a controller restart, the first
-no-tab scan persists a quiescence observation; only a later scan after the
-quiescence interval may clear it if no exact pending tab appeared.
+and all later page/service-worker recovery scans retain a no-tab tombstone;
+elapsed time is never treated as ownership proof. Only an authoritative create
+rejection or a full browser-startup recovery with no exact pending tab may
+clear it.
 
 The result row reads elapsed time from the terminal result once one exists.
 Only active/submitting tasks derive elapsed time from the current clock.

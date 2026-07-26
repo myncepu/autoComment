@@ -1125,7 +1125,6 @@ test('pre-create session journal failure creates and navigates zero tabs', async
       ownershipEpoch: 'epoch-test',
       tabId: null,
       cleanupOnly: false,
-      cleanupObservedAt: null,
       updatedAt: 1400
     }
   );
@@ -1381,12 +1380,6 @@ test('a never-settling background tab create cannot block queued terminal persis
     ),
     true
   );
-  assert.equal(
-    reloadRecovery.checkpoint
-      .openingReservations['batch-1:0:1'].cleanupObservedAt,
-    null
-  );
-
   createGate.resolve();
   await waitFor(
     () => harness.removedTabs.includes(91),
@@ -1475,7 +1468,7 @@ test('a late-create close failure keeps durable proof for startup recovery', asy
   );
 });
 
-test('a cleanup tombstone survives controller restart before tab creation settles', async () => {
+test('a cleanup tombstone survives repeated recovery before tab creation settles', async () => {
   const harness = createHarness({ tabCreateTimeoutMs: 5 });
   installBatchRuntimeController(harness.chrome, harness.controller);
   await harness.controller.handleMessage(startMessage(1));
@@ -1529,27 +1522,30 @@ test('a cleanup tombstone survives controller restart before tab creation settle
     now: () => 9000
   });
 
-  const quiescing = await restarted.loadForPage();
-  assert.equal(quiescing.ok, false);
-  assert.equal(
-    quiescing.checkpoint
-      .openingReservations['batch-1:0:1'].cleanupObservedAt,
-    9000
-  );
-  assert.equal(harness.tabStore.has(123), false);
+  for (let scan = 0; scan < 2; scan += 1) {
+    const retained = await restarted.loadForPage();
+    assert.equal(retained.ok, false);
+    assert.equal(
+      Object.hasOwn(
+        retained.checkpoint.openingReservations,
+        'batch-1:0:1'
+      ),
+      true
+    );
+  }
 
-  harness.tabStore.set(123, {
-    id: 123,
-    windowId: 42,
-    openerTabId: 70,
-    url:
-      'chrome-extension://extension-id/worker-pending.html#' +
-      'batch-1%3A0%3A1'
-  });
-  const recovered = await restarted.loadForPage();
-  assert.equal(recovered.ok, true);
-  assert.deepEqual(recovered.checkpoint.openingReservations, {});
-  assert.equal(harness.tabStore.has(123), false);
+  harness.chrome.tabs.createGate.resolve();
+  await waitFor(
+    () => harness.removedTabs.includes(91),
+    'post-recovery late-created tab cleanup'
+  );
+  await waitFor(
+    () => Object.keys(
+      harness.data.batchRuntimeCheckpoint.openingReservations
+    ).length === 0,
+    'post-recovery tombstone cleanup'
+  );
+  assert.equal(harness.tabStore.has(91), false);
   assert.equal(
     Object.hasOwn(
       harness.sessionData,

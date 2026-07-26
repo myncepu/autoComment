@@ -318,11 +318,6 @@ test('migrates only canonical legacy reservations that are missing batchId', () 
     migratedSafe.checkpoint.openingReservations['batch-1:0:1'].cleanupOnly,
     false
   );
-  assert.equal(
-    migratedSafe.checkpoint
-      .openingReservations['batch-1:0:1'].cleanupObservedAt,
-    null
-  );
   assert.equal(migratedUnsafe.ok, true);
   assert.equal(migratedUnsafe.changed, true);
   assert.deepEqual(migratedUnsafe.checkpoint.openingReservations, {});
