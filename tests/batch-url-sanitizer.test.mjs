@@ -82,6 +82,26 @@ test('redacts standalone authorization schemes in restored diagnostic text', () 
   );
 });
 
+test('redacts hash-prefixed raw assignments without consuming safe URL fragments', () => {
+  const source = [
+    'reason token=#raw-token-sentinel',
+    'next token=#next-token-sentinel&normal=keep',
+    'client_secret=#client-secret-sentinel&mode=safe',
+    'https://x.test/#route?safe=1',
+    'https://x.test/post?token=query-token-sentinel#route?safe=1'
+  ].join('; ');
+  const sanitized = sanitizeDiagnosticText(source);
+
+  assert.equal(sanitized, [
+    'reason token=REDACTED',
+    'next token=REDACTED&normal=keep',
+    'client_secret=REDACTED&mode=safe',
+    'https://x.test/#route?safe=1',
+    'https://x.test/post?token=REDACTED#route?safe=1'
+  ].join('; '));
+  assert.equal(sanitizeDiagnosticText(sanitized), sanitized);
+});
+
 test('redacts escaped JSON auth strings without changing ordinary JSON text', () => {
   const sensitive = JSON.stringify({
     authorization: 'Bearer abc\\"stillsecret',

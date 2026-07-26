@@ -276,6 +276,8 @@ test('sanitizes restored header labels, URLs, and reasons across DOM and callbac
         reasonCode: 'eligible',
         reason: 'Provider Bearer reason-bearer-sentinel; '
           + 'token=reason-token-sentinel; '
+          + 'token=#reason-hash-token-sentinel&normal=keep; '
+          + 'client_secret=#reason-client-secret-sentinel&mode=safe; '
           + '{"client_secret":"reason-json-sentinel","message":"ordinary detail"}',
         included: true,
         overridable: false
@@ -334,6 +336,8 @@ test('sanitizes restored header labels, URLs, and reasons across DOM and callbac
     assert.match(draft.preflight.rows[0].reason, /Bearer REDACTED/);
     assert.match(draft.preflight.rows[0].reason, /token=REDACTED/);
     assert.match(draft.preflight.rows[0].reason, /client_secret":"REDACTED"/);
+    assert.match(draft.preflight.rows[0].reason, /normal=keep/);
+    assert.match(draft.preflight.rows[0].reason, /mode=safe/);
     assert.match(draft.preflight.rows[0].reason, /ordinary detail/);
     assert.equal(draft.preflight.rows[1].url, ordinaryUrl);
     assert.equal(draft.preflight.rows[1].reason, '普通重复说明保持不变');
