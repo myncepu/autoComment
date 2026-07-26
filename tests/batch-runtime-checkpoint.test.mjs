@@ -516,7 +516,7 @@ test('moves one task through active, submitting, and terminal states', () => {
   assert.equal(initial.tasks['0'].state, 'queued');
 });
 
-test('paused terminal convergence is limited to terminal cleanup ownership', () => {
+test('paused terminal convergence is limited to internally proven cleanup ownership', () => {
   const started = applyBatchRuntimeEvent(createCheckpoint(1), {
     type: 'session_started',
     batchId: 'batch-1'
@@ -545,19 +545,17 @@ test('paused terminal convergence is limited to terminal cleanup ownership', () 
     }
   };
 
-  for (const reason of ['navigation', 'ownership_unverified']) {
-    const paused = structuredClone(active);
-    paused.status = 'paused_recovery';
-    paused.recoveryCleanup = {
-      reason,
-      diagnostic: 'tab_close_failed',
-      updatedAt: 1300
-    };
-    assert.equal(
-      applyBatchRuntimeEvent(paused, terminalEvent, 1400).ok,
-      false
-    );
-  }
+  const navigation = structuredClone(active);
+  navigation.status = 'paused_recovery';
+  navigation.recoveryCleanup = {
+    reason: 'navigation',
+    diagnostic: 'tab_close_failed',
+    updatedAt: 1300
+  };
+  assert.equal(
+    applyBatchRuntimeEvent(navigation, terminalEvent, 1400).ok,
+    false
+  );
 
   const eligible = structuredClone(active);
   eligible.status = 'paused_recovery';
@@ -574,20 +572,28 @@ test('paused terminal convergence is limited to terminal cleanup ownership', () 
     false
   );
 
-  for (const state of ['active', 'submitting']) {
-    const paused = structuredClone(eligible);
-    paused.tasks['0'].state = state;
-    if (state === 'submitting') paused.tasks['0'].phase = 'submitting';
-    const converged = applyBatchRuntimeEvent(
-      paused,
-      terminalEvent,
-      1400
-    );
+  for (
+    const reason of ['terminal_cleanup_failed', 'ownership_unverified']
+  ) {
+    for (const state of ['active', 'submitting']) {
+      const paused = structuredClone(eligible);
+      paused.recoveryCleanup.reason = reason;
+      paused.tasks['0'].state = state;
+      if (state === 'submitting') paused.tasks['0'].phase = 'submitting';
+      const converged = applyBatchRuntimeEvent(
+        paused,
+        terminalEvent,
+        1400
+      );
 
-    assert.equal(converged.ok, true);
-    assert.equal(converged.checkpoint.tasks['0'].state, 'terminal');
-    assert.equal(converged.checkpoint.results.length, 1);
-    assert.equal(validateBatchRuntimeCheckpoint(converged.checkpoint).ok, true);
+      assert.equal(converged.ok, true);
+      assert.equal(converged.checkpoint.tasks['0'].state, 'terminal');
+      assert.equal(converged.checkpoint.results.length, 1);
+      assert.equal(
+        validateBatchRuntimeCheckpoint(converged.checkpoint).ok,
+        true
+      );
+    }
   }
 });
 

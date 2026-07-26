@@ -560,6 +560,55 @@ its hook after the live tab was explicitly absent. After the fixes, the
 focused ingress command passed 121/121, the affected command passed 204/204,
 and the full repository passed 516/516.
 
+## Round 11 Unified Terminal and Recovery Proof
+
+- Terminal side-effect handling and proof-only mutations now consume the same
+  private controller validator. Before returning a checkpoint/task to either
+  hook, it requires a canonical numeric URL index and positive attempt, exact
+  batch/task identity, ACTIVE/SUBMITTING state, the route-specific sender,
+  matching request/journal/epoch identity, and a positive live
+  tab/window/opener proof. `proof.missing` is an explicit failure, not a
+  successful removal hint at this pre-side-effect boundary.
+- The shared validator closes the two former terminal divergences. A queued
+  task can no longer be terminalized by an owner-page side-effect hook, and a
+  journal-bound but explicitly missing live tab can no longer run result or
+  history work before terminalization. Queued, terminal, noncanonical,
+  owner-page-on-content, wrong-tab, live-missing, transient tab lookup, and
+  transient journal lookup probes all execute zero hooks, close zero tabs,
+  append zero results, and clear zero journals. Background emits no terminal
+  confirmation for these rejected calls.
+- A transient terminal proof failure still durably retains the original
+  ACTIVE/SUBMITTING ownership under
+  `paused_recovery/ownership_unverified`. When the same exact content payload
+  is retried and the full journal/live proof succeeds, the controller may set
+  its internal-only terminal cleanup marker for exactly
+  `terminal_cleanup_failed` or `ownership_unverified`. The reducer still
+  requires ACTIVE/SUBMITTING state and that marker; external message fields
+  are ignored. The real content helper/background integration proves the
+  complete two-send sequence: first `tabs.get` fails transiently, the second
+  identical confirmation proves ownership, the hook runs once, the worker is
+  removed once, one result is terminalized, and the journal clears.
+- Submit-context recovery no longer reuses the broad content mutation API.
+  `runOwnerPageRecoveryHook(message, sender, targetTabId, hook)` is a separate
+  serialized controller route. It requires the existing exact batch-page
+  sender predicate, `targetTabId === task.tabId`, and the same complete live
+  ownership proof before `sealAndRecover`. A content worker cannot invoke it.
+  The real task-11 owner-page probe targeting tab 99 and the exact content
+  worker recovery probe leave contexts, recovery entries, and recovery seals
+  unchanged; only the owner page targeting the proven task tab succeeds.
+  Browser-restart ownership without its session journal remains fail-closed
+  for manual inspection; no page-only or URL-only recovery authority was
+  added.
+
+Round-11 RED evidence reproduced all three review findings: the queued
+owner-page terminal hook advanced without a proof-only state gate; an
+explicitly missing live tab could run a terminal hook; a recovered
+`ownership_unverified` replay removed the tab but failed the reducer with
+`invalid_transition`; the dedicated recovery API was absent; and a real
+task-11 owner page targeting tab 99 returned `ok/sealed` and wrote a seal.
+After the fixes, the focused proof/background command passed 130/130, the
+affected command passed 239/239, and the full repository passed 519/519.
+
 ## Legacy Race Coverage Map
 
 The removed monolith fixture is not retained. Each former integration
@@ -651,6 +700,22 @@ guarantee is owned and tested by the production module that now implements it:
 
 ## Verification
 
+- Round-11 focused proof/background command:
+  `node --test tests/batch-runtime-checkpoint.test.mjs tests/batch-runtime-controller.test.mjs tests/batch-submit-context-store.test.mjs tests/comment-history-message-listener.test.mjs`
+  passed 130/130 with zero failures.
+- Round-11 affected command:
+  `node --test tests/batch-runtime-checkpoint.test.mjs tests/batch-runtime-controller.test.mjs tests/batch-submit-context-store.test.mjs tests/batch-submit-context-client.test.js tests/comment-history-message-listener.test.mjs tests/comment-history-submit-flow.test.js tests/batch-submit-order.test.js tests/batch-worker-runtime.test.mjs tests/batch-multi-window-integration.test.js tests/batch-chrome-adapter.test.mjs`
+  passed 239/239 with zero failures.
+- Round-11 full repository: `npm test` passed 519/519 with zero failures.
+- `node --check` passed for every round-11 changed JavaScript/MJS module and
+  test; `git diff --check` passed. `manifest.json` parsed and `batch.js`
+  imported without DOM or Chrome globals.
+- Static proof-to-hook audit found one shared validator feeding proof-only,
+  terminal-side-effect, and dedicated owner-page recovery hooks; no broad
+  `allowOwnerPage` option and no external `message.terminalCleanupRetry`
+  consumption remain. The installed runtime set still excludes externally
+  supplied ACTIVE ownership, and ownership epochs remain absent from result,
+  history, content, page-composition, and DOM-facing sinks.
 - Round-10 focused ingress command:
   `node --test tests/batch-runtime-controller.test.mjs tests/batch-submit-context-store.test.mjs tests/batch-submit-context-client.test.js tests/comment-history-message-listener.test.mjs tests/comment-history-submit-flow.test.js`
   passed 121/121 with zero failures.
@@ -736,5 +801,7 @@ guarantee is owned and tested by the production module that now implements it:
   `fix: close final batch ownership races`.
 - Round-10 hardening commit subject:
   `fix: prove every batch persistence ingress`.
+- Round-11 hardening commit subject:
+  `fix: unify terminal and recovery ownership proof`.
 - The final commit SHA is reported in the task `DONE` handoff because a file
   cannot contain the hash of the commit that contains itself.

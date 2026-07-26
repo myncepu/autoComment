@@ -357,7 +357,25 @@ test('listener preserves unacknowledged context when its tab closes', async () =
     }
   };
   installBatchSubmitContextListener(chromeApi, store, {
-    async runProofBoundTaskHook(_identity, _sender, hook) {
+    async runProofBoundTaskHook(_identity, sender, hook) {
+      if (sender?.tab?.id !== 42) {
+        return { ok: false, error: 'stale_worker_tab' };
+      }
+      return {
+        ok: true,
+        changed: false,
+        sideEffect: await hook()
+      };
+    },
+    async runOwnerPageRecoveryHook(_identity, sender, targetTabId, hook) {
+      if (
+        sender?.tab?.id !== 70 ||
+        sender?.url !==
+          'chrome-extension://extension-id/batch.html?recovery=1' ||
+        targetTabId !== 77
+      ) {
+        return { ok: false, error: 'invalid_recovery_target' };
+      }
       return {
         ok: true,
         changed: false,
@@ -406,7 +424,11 @@ test('listener preserves unacknowledged context when its tab closes', async () =
       attempt: 1,
       reason: 'timeout'
     },
-    { id: 'extension-id' },
+    {
+      id: 'extension-id',
+      tab: { id: 70, windowId: 52 },
+      url: 'chrome-extension://extension-id/batch.html?recovery=1'
+    },
     (response) => { recoveryResponse = response; }
   );
   await new Promise(setImmediate);

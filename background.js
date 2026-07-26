@@ -37,6 +37,9 @@ const batchSubmitContextStore = createBatchSubmitContextStore(
 installBatchSubmitContextListener(chrome, batchSubmitContextStore, {
   runProofBoundTaskHook: (...args) => (
     batchRuntimeController.runProofBoundTaskHook(...args)
+  ),
+  runOwnerPageRecoveryHook: (...args) => (
+    batchRuntimeController.runOwnerPageRecoveryHook(...args)
   )
 });
 

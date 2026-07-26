@@ -304,6 +304,7 @@ test('background migrates an old record before its startup retention check and c
   const startupListeners = [];
   const powerCalls = [];
   const tabRemoveFailures = [];
+  const tabGetFailures = [];
   const storageData = {
     batchResults: [{
       batchId: 'legacy-batch',
@@ -411,6 +412,8 @@ test('background migrates an old record before its startup retention check and c
         return tab;
       },
       async get(tabId) {
+        const failure = tabGetFailures.shift();
+        if (failure) throw failure;
         const tab = tabData.get(tabId);
         if (!tab) throw new Error(`No tab with id: ${tabId}.`);
         return structuredClone(tab);
@@ -911,6 +914,170 @@ globalThis.confirmBatchHistoryDurably = confirmBatchHistoryDurably;`,
     url: sourceItems[13].url,
     errorMessage: 'cleanup'
   });
+
+  await activateTask(11, { submitting: true });
+  assert.deepEqual(await dispatchConfirm({
+    type: 'BATCH_SAVE_SUBMIT_CONTEXT',
+    context: {
+      batchId: message.batchId,
+      urlIndex: 11,
+      attempt: 1,
+      result: 'success',
+      history: {
+        ...message.history,
+        targetPageUrl: sourceItems[11].url
+      }
+    }
+  }), [{ ok: true }]);
+  const recoveryStorageBeforeRejected = structuredClone({
+    contexts: storageData.batchSubmitContextsByTab,
+    recoveries: storageData.batchSubmitRecoveriesByTask || {},
+    seals: storageData.batchSubmitRecoverySealsByTab || {}
+  });
+  assert.deepEqual(await dispatchConfirm({
+    type: 'BATCH_RECOVER_SUBMIT_CONTEXT',
+    tabId: 99,
+    batchId: message.batchId,
+    urlIndex: 11,
+    attempt: 1,
+    reason: 'reviewer_wrong_target'
+  }, {
+    id: 'extension-id',
+    tab: { id: 900, windowId: 52 },
+    url: 'chrome-extension://extension-id/batch.html?recovery=1'
+  }), [{
+    ok: false,
+    error: 'invalid_recovery_target'
+  }]);
+  assert.deepEqual({
+    contexts: storageData.batchSubmitContextsByTab,
+    recoveries: storageData.batchSubmitRecoveriesByTask || {},
+    seals: storageData.batchSubmitRecoverySealsByTab || {}
+  }, recoveryStorageBeforeRejected);
+  assert.deepEqual(await dispatchConfirm({
+    type: 'BATCH_RECOVER_SUBMIT_CONTEXT',
+    tabId: 42,
+    batchId: message.batchId,
+    urlIndex: 11,
+    attempt: 1,
+    reason: 'reviewer_content_sender'
+  }, {
+    id: 'extension-id',
+    tab: { id: 42, windowId: 52 },
+    url: sourceItems[11].url
+  }), [{
+    ok: false,
+    error: 'stale_worker_tab'
+  }]);
+  assert.deepEqual({
+    contexts: storageData.batchSubmitContextsByTab,
+    recoveries: storageData.batchSubmitRecoveriesByTask || {},
+    seals: storageData.batchSubmitRecoverySealsByTab || {}
+  }, recoveryStorageBeforeRejected);
+  assert.deepEqual(await dispatchConfirm({
+    type: 'BATCH_RECOVER_SUBMIT_CONTEXT',
+    tabId: 42,
+    batchId: message.batchId,
+    urlIndex: 11,
+    attempt: 1,
+    reason: 'timeout'
+  }, {
+    id: 'extension-id',
+    tab: { id: 900, windowId: 52 },
+    url: 'chrome-extension://extension-id/batch.html?recovery=1'
+  }), [{
+    ok: true,
+    sealed: true,
+    recovered: true
+  }]);
+  assert.equal(storageData.batchSubmitContextsByTab['42'], undefined);
+  assert.equal(
+    Object.values(storageData.batchSubmitRecoveriesByTask).some(
+      (entry) =>
+        entry.batchId === message.batchId &&
+        entry.urlIndex === 11 &&
+        entry.attempt === 1 &&
+        entry.sourceTabId === 42
+    ),
+    true
+  );
+  await dispatchConfirm({
+    type: 'BATCH_REPORT_RESULT',
+    batchId: message.batchId,
+    urlIndex: 11,
+    attempt: 1,
+    result: 'skipped',
+    url: sourceItems[11].url,
+    errorMessage: 'recovered'
+  });
+
+  await activateTask(10, { submitting: true });
+  const ownershipRetryMessage = {
+    ...message,
+    urlIndex: 10,
+    url: sourceItems[10].url,
+    history: {
+      ...message.history,
+      targetPageUrl: sourceItems[10].url,
+      historyRevision: {
+        capturedAt: fixedNow + 12,
+        recordedAt: fixedNow + 13,
+        sequence: 4,
+        id: 'revision-ownership-retry'
+      }
+    }
+  };
+  assert.deepEqual(await dispatchConfirm({
+    type: 'BATCH_SAVE_SUBMIT_CONTEXT',
+    context: {
+      batchId: message.batchId,
+      urlIndex: 10,
+      attempt: 1,
+      result: 'success',
+      history: ownershipRetryMessage.history
+    }
+  }), [{ ok: true }]);
+  tabGetFailures.push(new Error('transient tab lookup failure'));
+  const ownershipRetryClient = createRealContentConfirmationClient();
+  assert.equal(
+    JSON.parse(JSON.stringify(
+      await ownershipRetryClient.confirm(ownershipRetryMessage)
+    )).durable,
+    true
+  );
+  assert.equal(ownershipRetryClient.dispatchCount, 2);
+  assert.equal(
+    storageData.batchResults.filter(
+      (entry) =>
+        entry.batchId === message.batchId &&
+        entry.urlIndex === 10 &&
+        entry.attempt === 1
+    ).length,
+    1
+  );
+  assert.equal(
+    storageData.batchRuntimeCheckpoint.tasks['10'].state,
+    'terminal'
+  );
+  assert.equal(tabData.has(42), false);
+  assert.equal(
+    Object.keys(sessionData).some((key) => key.includes(
+      `${message.batchId}:10:1`
+    )),
+    false
+  );
+  assert.deepEqual(await dispatchConfirm({
+    type: 'BATCH_SESSION_RESUME',
+    batchId: message.batchId
+  }, {
+    id: 'extension-id',
+    tab: { id: 900, windowId: 52 },
+    url: 'chrome-extension://extension-id/batch.html'
+  }), [{
+    ok: true,
+    checkpoint: storageData.batchRuntimeCheckpoint,
+    changed: true
+  }]);
 
   await activateTask(8, { submitting: true });
   const fallbackHistory = {

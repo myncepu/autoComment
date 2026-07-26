@@ -2162,6 +2162,125 @@ test('terminal side effects require exact ownership proof and failure keeps the 
   assert.equal(failed.checkpoint.tasks['0'].tabId, 11);
 });
 
+test('terminal hook shares proof-only rejection for queued, terminal, missing and transient ownership', async () => {
+  const message = {
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    result: 'success'
+  };
+  const sender = {
+    id: 'extension-id',
+    tab: { id: 11, windowId: 21 },
+    url: 'https://example.test/0'
+  };
+  let hookCalls = 0;
+  const hook = async () => {
+    hookCalls += 1;
+    return { historySaveStatus: 'saved' };
+  };
+
+  const queued = createHarness();
+  await queued.controller.handleMessage(startMessage(1));
+  const queuedResponse = await queued.controller.markTerminal(
+    message,
+    batchPageSender(),
+    hook
+  );
+  assert.equal(queuedResponse.error, 'invalid_transition');
+  assert.equal(hookCalls, 0);
+  assert.equal(queued.data.batchRuntimeCheckpoint.tasks['0'].state, 'queued');
+  assert.equal(queued.data.batchRuntimeCheckpoint.results.length, 0);
+  assert.deepEqual(queued.removedTabs, []);
+
+  const nonCanonical = createHarness();
+  await nonCanonical.controller.handleMessage(startMessage(1));
+  await nonCanonical.controller.handleMessage({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 11,
+    windowId: 21
+  });
+  const nonCanonicalResponse = await nonCanonical.controller.markTerminal(
+    { ...message, urlIndex: '0' },
+    sender,
+    hook
+  );
+  assert.equal(nonCanonicalResponse.error, 'invalid_url_index');
+  assert.equal(hookCalls, 0);
+  assert.equal(
+    nonCanonical.data.batchRuntimeCheckpoint.tasks['0'].state,
+    'active'
+  );
+  assert.deepEqual(nonCanonical.removedTabs, []);
+
+  for (const failure of ['missing', 'tab_lookup', 'journal_lookup']) {
+    const harness = createHarness();
+    await harness.controller.handleMessage(startMessage(1));
+    await harness.controller.handleMessage({
+      type: 'BATCH_TASK_ACTIVE',
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      tabId: 11,
+      windowId: 21
+    });
+    if (failure === 'missing') {
+      harness.tabStore.delete(11);
+    } else if (failure === 'tab_lookup') {
+      harness.chrome.tabs.getFailure = new Error('tabs unavailable');
+    } else {
+      harness.sessionArea.getFailure = new Error('session unavailable');
+    }
+
+    const response = await harness.controller.markTerminal(
+      message,
+      sender,
+      hook
+    );
+
+    assert.equal(response.error, 'batch_ownership_unverified');
+    assert.equal(hookCalls, 0);
+    assert.equal(response.checkpoint.status, 'paused_recovery');
+    assert.equal(
+      response.checkpoint.recoveryCleanup.reason,
+      'ownership_unverified'
+    );
+    assert.equal(response.checkpoint.tasks['0'].state, 'active');
+    assert.equal(response.checkpoint.tasks['0'].tabId, 11);
+    assert.equal(response.checkpoint.results.length, 0);
+    assert.deepEqual(harness.removedTabs, []);
+    assert.ok(
+      harness.sessionData['batchWorkerOwnershipV1:batch-1:0:1']
+    );
+  }
+
+  const terminal = createHarness();
+  await terminal.controller.handleMessage(startMessage(1));
+  await terminal.controller.handleMessage({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 11,
+    windowId: 21
+  });
+  const completed = await terminal.controller.markTerminal(message, sender);
+  assert.equal(completed.ok, true);
+  const removedBeforeReplay = [...terminal.removedTabs];
+  const terminalResponse = await terminal.controller.markTerminal(
+    message,
+    sender,
+    hook
+  );
+  assert.equal(terminalResponse.error, 'task_already_terminal');
+  assert.equal(hookCalls, 0);
+  assert.deepEqual(terminal.removedTabs, removedBeforeReplay);
+  assert.equal(terminal.data.batchRuntimeCheckpoint.results.length, 1);
+});
+
 test('terminal side effect hook is idempotent across a close retry', async () => {
   const harness = createHarness();
   await harness.controller.handleMessage(startMessage(1));
@@ -2213,6 +2332,71 @@ test('terminal side effect hook is idempotent across a close retry', async () =>
     historySaveStatus: 'saved'
   });
   assert.equal(second.checkpoint.results.length, 1);
+});
+
+test('ownership-unverified terminal replay converges only after a fresh exact proof', async () => {
+  const harness = createHarness();
+  await harness.controller.handleMessage(startMessage(1));
+  await harness.controller.handleMessage({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 11,
+    windowId: 21
+  });
+  const message = {
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    result: 'success',
+    aiContent: 'saved comment'
+  };
+  const sender = {
+    id: 'extension-id',
+    tab: { id: 11, windowId: 21 },
+    url: 'https://example.test/0'
+  };
+  let hookCalls = 0;
+  const hook = async () => {
+    hookCalls += 1;
+    return { historySaveStatus: 'saved' };
+  };
+  harness.chrome.tabs.getFailures = [
+    new Error('tabs temporarily unavailable')
+  ];
+
+  const first = await harness.controller.markTerminal(
+    message,
+    sender,
+    hook
+  );
+  const second = await harness.controller.markTerminal(
+    message,
+    sender,
+    hook
+  );
+
+  assert.equal(first.error, 'batch_ownership_unverified');
+  assert.equal(first.checkpoint.status, 'paused_recovery');
+  assert.equal(
+    first.checkpoint.recoveryCleanup.reason,
+    'ownership_unverified'
+  );
+  assert.equal(first.checkpoint.tasks['0'].state, 'active');
+  assert.equal(second.ok, true);
+  assert.equal(second.checkpoint.tasks['0'].state, 'terminal');
+  assert.equal(second.checkpoint.results.length, 1);
+  assert.equal(hookCalls, 1);
+  assert.deepEqual(harness.removedTabs, [11]);
+  assert.equal(
+    harness.sessionData['batchWorkerOwnershipV1:batch-1:0:1'],
+    undefined
+  );
+  assert.equal(
+    validateBatchRuntimeCheckpoint(second.checkpoint).ok,
+    true
+  );
 });
 
 test('proof-bound task hook mutates only an exact live active or submitting worker', async () => {
@@ -2379,6 +2563,72 @@ test('proof-bound task hook rejects unowned identity and retains ownership on fa
     );
   assert.equal(terminalResponse.error, 'task_already_terminal');
   assert.equal(hookCalls, 1);
+});
+
+test('submit-context recovery target requires the exact owner page and worker tab', async () => {
+  const harness = createHarness();
+  await harness.controller.handleMessage(startMessage(1));
+  await harness.controller.handleMessage({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 11,
+    windowId: 21
+  });
+  const identity = {
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1
+  };
+  const contentSender = {
+    id: 'extension-id',
+    tab: { id: 11, windowId: 21 },
+    url: 'https://example.test/0'
+  };
+  let hookCalls = 0;
+  const hook = async () => {
+    hookCalls += 1;
+    return { sealed: true, recovered: true };
+  };
+
+  const content = await harness.controller.runOwnerPageRecoveryHook(
+    identity,
+    contentSender,
+    11,
+    hook
+  );
+  const wrongTarget = await harness.controller.runOwnerPageRecoveryHook(
+    identity,
+    batchPageSender(),
+    99,
+    hook
+  );
+  const exact = await harness.controller.runOwnerPageRecoveryHook(
+    identity,
+    batchPageSender(),
+    11,
+    hook
+  );
+  delete harness.sessionData['batchWorkerOwnershipV1:batch-1:0:1'];
+  const missingJournal = await harness.controller.runOwnerPageRecoveryHook(
+    identity,
+    batchPageSender(),
+    11,
+    hook
+  );
+
+  assert.equal(content.error, 'stale_worker_tab');
+  assert.equal(wrongTarget.error, 'invalid_recovery_target');
+  assert.equal(exact.ok, true);
+  assert.deepEqual(exact.sideEffect, {
+    sealed: true,
+    recovered: true
+  });
+  assert.equal(missingJournal.error, 'batch_ownership_unverified');
+  assert.equal(hookCalls, 1);
+  assert.deepEqual(harness.removedTabs, []);
+  assert.equal(harness.data.batchRuntimeCheckpoint.tasks['0'].state, 'active');
 });
 
 test('content terminal reporting proves and closes the worker before clearing ownership', async () => {
