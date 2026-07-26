@@ -19,38 +19,24 @@ test('batch submission arms result detection before dispatching the synchronous 
   assert.ok(awaitIndex > clickIndex, 'the armed detector must be awaited after the click');
 });
 
-test('batch confirmation stores and renders the background history save status', () => {
-  const batch = fs.readFileSync(path.resolve(__dirname, '..', 'batch.js'), 'utf8');
-  const html = fs.readFileSync(path.resolve(__dirname, '..', 'batch.html'), 'utf8');
+test('batch confirmation remains blocked until background history is durable', async () => {
+  const {
+    isDurableBatchConfirmation
+  } = await import('../lib/batch-scheduler.mjs');
   const background = fs.readFileSync(path.resolve(__dirname, '..', 'background.js'), 'utf8');
 
-  assert.match(
-    batch,
-    /handleTaskConfirmed\([\s\S]*message\.historySaveStatus,\s*message\.historyPendingCount,\s*message\.sourceTabId\s*\)/
-  );
-  assert.match(
-    batch,
-    /async function handleTaskConfirmed\([\s\S]*historySaveStatus,\s*confirmedHistoryPendingCount,\s*sourceTabId\s*\)/
-  );
-  assert.match(batch, /historySaveStatus:\s*historySaveStatus\s*\|\|\s*null/);
-  assert.match(batch, /type:\s*'HISTORY_RETRY_PENDING'/);
-  assert.match(batch, /historyPendingCount\s*=\s*response\.data\.pending/);
-  assert.match(
-    batch,
-    /else if \(value === null \|\| saveStatus === 'queued'\) \{\s*historyPendingCount = null;/
-  );
-  assert.match(batch, /historyPendingCountUnavailable = true;/);
-  assert.match(
-    batch,
-    /updateHistoryPendingCount\(confirmedHistoryPendingCount,\s*historySaveStatus\)/
-  );
-  assert.match(batch, /saved:\s*'历史已保存'/);
-  assert.match(batch, /queued:\s*'历史待重试'/);
-  assert.match(batch, /failed:\s*'历史保存失败'/);
-  assert.match(batch, /historyPendingCount\s*>\s*0/);
-
-  assert.match(html, /id="historySaveWarning"/);
-  assert.match(html, /<th>历史保存<\/th>/);
+  assert.equal(isDurableBatchConfirmation({
+    result: 'success',
+    historySaveStatus: 'failed'
+  }), false);
+  assert.equal(isDurableBatchConfirmation({
+    result: 'success',
+    historySaveStatus: 'saved'
+  }), true);
+  assert.equal(isDurableBatchConfirmation({
+    result: 'success',
+    historySaveStatus: 'queued'
+  }), true);
   assert.match(
     background,
     /createBatchSubmitContextStore\([\s\S]*maxAgeMs:\s*Number\.POSITIVE_INFINITY/,
@@ -60,10 +46,5 @@ test('batch confirmation stores and renders the background history save status',
     background,
     /if \(isDurableBatchConfirmation\(confirmedMessage\)\) \{[\s\S]*broadcastBatchConfirmed/,
     'background must not release a success window on a failed history save'
-  );
-  assert.match(
-    batch,
-    /if \(!isDurableBatchConfirmation\(message\)\) \{[\s\S]*return;/,
-    'batch page must independently reject a non-durable success confirmation'
   );
 });

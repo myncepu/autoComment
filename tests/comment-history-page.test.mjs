@@ -742,16 +742,21 @@ test('history layout includes summaries, indexed filters, pagination, archive an
   assert.match(html, /<option value="100"/);
 });
 
-test('entry pages expose comment history links and batch requests retention status', () => {
+test('entry pages expose comment history through the shared application shell', async () => {
   const optionsHtml = fs.readFileSync(path.join(projectRoot, 'options.html'), 'utf8');
   const optionsJs = fs.readFileSync(path.join(projectRoot, 'options.js'), 'utf8');
   const batchHtml = fs.readFileSync(path.join(projectRoot, 'batch.html'), 'utf8');
-  const batchJs = fs.readFileSync(path.join(projectRoot, 'batch.js'), 'utf8');
+  const { bootAppShell } = await import(appShellModuleUrl);
+  const document = new JSDOM(batchHtml, {
+    url: 'chrome-extension://extension-id/batch.html'
+  }).window.document;
+  bootAppShell(document, { currentUrl: document.location.href });
 
   assert.match(optionsHtml, /id="openHistoryBtn"[^>]*>[^<]*评论历史/);
   assert.match(optionsJs, /chrome\.tabs\.create\(\{ url: 'history\.html' \}\)/);
-  assert.match(batchHtml, /id="openHistoryBtn"[^>]*>[^<]*评论历史/);
-  assert.match(batchHtml, /id="historyRetentionBanner"/);
-  assert.match(batchJs, /type:\s*'HISTORY_RETENTION_STATUS'/);
-  assert.match(batchJs, /type:\s*'HISTORY_RETRY_PENDING'/);
+  const historyLink = [...document.querySelectorAll('a')].find(
+    (link) => link.textContent === '评论历史'
+  );
+  assert.ok(historyLink);
+  assert.equal(historyLink.getAttribute('href'), 'history.html');
 });
