@@ -372,6 +372,46 @@ test('persists a sanitized session before starting workers and clears the draft 
   );
 });
 
+test('forwards a finalized plan and confirmation without rebuilding assignments', async () => {
+  const harness = createCommandHarness({
+    checkpoint: createCheckpoint({
+      status: 'paused_recovery',
+      taskState: 'queued'
+    })
+  });
+  const plan = {
+    version: 2,
+    planId: 'batch-plan',
+    planFingerprint: 'a'.repeat(64),
+    tasks: []
+  };
+  const confirmation = {
+    version: 1,
+    planFingerprint: 'a'.repeat(64),
+    normalConfirmed: true,
+    requiredRisks: [],
+    highRiskConfirmed: false,
+    confirmedAt: 1
+  };
+
+  await harness.controller.start({
+    batchId: 'batch-plan',
+    plan,
+    confirmation,
+    settings: {
+      concurrency: 3,
+      timeoutSeconds: 60
+    }
+  });
+
+  const runtimePayload = harness.calls.find(
+    ([name, type]) => name === 'runtime' && type === 'BATCH_SESSION_START'
+  )[2];
+  assert.deepEqual(runtimePayload.plan, plan);
+  assert.deepEqual(runtimePayload.confirmation, confirmation);
+  assert.equal(runtimePayload.source, undefined);
+});
+
 test('draft storage failure leaves Start safely unclaimed with no runtime side effects', async () => {
   const checkpoint = createCheckpoint({
     status: 'paused_recovery',

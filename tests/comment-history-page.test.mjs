@@ -79,6 +79,8 @@ test('builds an indexed history filter with local inclusive date bounds', () => 
     dateTo: '2026-07-31',
     targetDomain: ' EXAMPLE.COM ',
     promotedDomain: 'PROMO.EXAMPLE',
+    profileId: ' profile-a ',
+    promotionSiteId: ' site-a ',
     anchorTextPrefix: '  Product ',
     hrefDomain: 'LINKS.EXAMPLE',
     pageSize: '50'
@@ -87,6 +89,8 @@ test('builds an indexed history filter with local inclusive date bounds', () => 
     to: localDayEnd('2026-07-31'),
     targetDomain: 'example.com',
     promotedDomain: 'promo.example',
+    profileId: 'profile-a',
+    promotionSiteId: 'site-a',
     anchorTextPrefix: 'product',
     hrefDomain: 'links.example',
     limit: 50
@@ -1112,6 +1116,8 @@ test('history layout includes summaries, indexed filters, pagination, archive an
     'dateTo',
     'targetDomain',
     'promotedDomain',
+    'profileId',
+    'promotionSiteId',
     'anchorTextPrefix',
     'hrefDomain',
     'pageSize',

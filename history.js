@@ -62,6 +62,8 @@ export function buildHistoryFilter(values = {}) {
     to,
     targetDomain: normalizedText(values.targetDomain, { lowercase: true }),
     promotedDomain: normalizedText(values.promotedDomain, { lowercase: true }),
+    profileId: normalizedText(values.profileId),
+    promotionSiteId: normalizedText(values.promotionSiteId),
     anchorTextPrefix: normalizedText(values.anchorTextPrefix, { lowercase: true }),
     hrefDomain: normalizedText(values.hrefDomain, { lowercase: true }),
     limit: normalizedPageSize(values.pageSize ?? values.limit)
@@ -272,6 +274,8 @@ function formValues(elements) {
     dateTo: elements.dateTo.value,
     targetDomain: elements.targetDomain.value,
     promotedDomain: elements.promotedDomain.value,
+    profileId: elements.profileId.value,
+    promotionSiteId: elements.promotionSiteId.value,
     anchorTextPrefix: elements.anchorTextPrefix.value,
     hrefDomain: elements.hrefDomain.value,
     pageSize: elements.pageSize.value
@@ -354,7 +358,7 @@ function renderRecords(documentRef, elements, records) {
   if (!Array.isArray(records) || records.length === 0) {
     const row = documentRef.createElement('tr');
     const cell = createTextCell(documentRef, '没有符合条件的评论历史。', 'empty-cell');
-    cell.colSpan = 6;
+    cell.colSpan = 8;
     row.appendChild(cell);
     elements.historyTableBody.appendChild(row);
     return;
@@ -373,6 +377,14 @@ function renderRecords(documentRef, elements, records) {
     row.appendChild(createTextCell(documentRef, formatDateTime(record.submittedAt), 'time-cell'));
     row.appendChild(createUrlCell(documentRef, record.targetPageUrl));
     row.appendChild(createUrlCell(documentRef, record.promotedWebsiteUrl));
+    row.appendChild(createTextCell(
+      documentRef,
+      record.profileDisplayName || record.profileId || '—'
+    ));
+    row.appendChild(createTextCell(
+      documentRef,
+      record.promotionSiteName || record.promotionSiteId || '—'
+    ));
     row.appendChild(createTextCell(documentRef, record.commentText || record.commentHtml, 'comment-cell'));
     row.appendChild(createTextCell(documentRef, record.source === 'legacy' ? '旧记录' : '当前记录'));
 
@@ -380,7 +392,7 @@ function renderRecords(documentRef, elements, records) {
     detailRow.className = 'detail-row';
     detailRow.hidden = true;
     const detailCell = documentRef.createElement('td');
-    detailCell.colSpan = 6;
+    detailCell.colSpan = 8;
     const detailContainer = documentRef.createElement('div');
     detailContainer.className = 'detail-content';
     detailCell.appendChild(detailContainer);
@@ -433,6 +445,8 @@ function getElements(documentRef) {
     'dateTo',
     'targetDomain',
     'promotedDomain',
+    'profileId',
+    'promotionSiteId',
     'anchorTextPrefix',
     'hrefDomain',
     'pageSize',

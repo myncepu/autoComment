@@ -239,7 +239,8 @@
   font-weight: 700;
 }
 
-.batch-wizard__field input {
+.batch-wizard__field input,
+.batch-wizard__field select {
   box-sizing: border-box;
   width: 100%;
   min-height: 44px;

@@ -235,18 +235,24 @@ test('filters queue, opens details, focuses worker tabs and records manual outco
     ['filter', {
       status: 'manual',
       domain: 'all',
+      profile: 'all',
+      promotionSite: 'all',
       timeRange: 'all',
       keyword: ''
     }],
     ['filter', {
       status: 'manual',
       domain: 'manual.test',
+      profile: 'all',
+      promotionSite: 'all',
       timeRange: 'all',
       keyword: ''
     }],
     ['filter', {
       status: 'manual',
       domain: 'manual.test',
+      profile: 'all',
+      promotionSite: 'all',
       timeRange: 'all',
       keyword: '提交确认'
     }],
