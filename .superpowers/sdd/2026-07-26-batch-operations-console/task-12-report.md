@@ -300,6 +300,38 @@ unverified update-response loss, transient lookup dropping recovery metadata,
 adapter metadata loss, and worker terminalization of owned uncertain work.
 The same affected command passed 148/148 after implementation.
 
+## Round 6 Strict Task Ownership and Legacy Reservation Migration
+
+- Version 2 validation now enforces an explicit task ownership matrix.
+  `active` and `submitting` tasks must carry the canonical
+  `${batchId}:${urlIndex}:${attempt}` request ID, positive integer tab/window
+  IDs, and a positive finite `startedAt`. `queued` and `terminal` tasks must
+  carry null request/tab/window/start fields. Task map key, `urlIndex`,
+  attempt, source bounds, results, and reservation attempts remain mutually
+  consistent.
+- `task_activated` derives the canonical request ID when an older caller omits
+  it and rejects a conflicting ID. Older version 2 ACTIVE/SUBMITTING tasks
+  missing only `requestId` are migrated to their canonical identity; queued
+  and terminal tasks receive null.
+- A malformed ACTIVE owner (including reviewer reproduction
+  `requestId: forged-request`, `tabId: 777`), a canonical request with
+  contradictory ownership fields, or an out-of-bounds task fails migration
+  validation before recovery queries or removes tabs. Tests assert tab 777
+  remains untouched in every case.
+- Round-4 non-empty reservations that lack only `batchId` are migrated when
+  their exact legacy shape, map key/request ID, canonical batch/index/attempt,
+  queued task identity, window/tab types, source bounds, and task attempt all
+  agree. The batch ID is added with `changed: true`. Inconsistent legacy
+  entries are dropped before validation and cannot authorize cleanup. A
+  compatible migrated reservation still discovers and removes only its exact
+  pending extension URL.
+
+Round-6 focused RED ran 71 checkpoint/controller tests with four failures:
+the permissive task ownership matrix, missing safe legacy reservation
+migration, malformed task cleanup accepting tab 777, and compatible pending
+recovery failing to load. The focused command passed 71/71 after the schema
+change; the expanded round-5 affected command passed 152/152.
+
 ## Legacy Race Coverage Map
 
 The removed monolith fixture is not retained. Each former integration
@@ -390,10 +422,10 @@ guarantee is owned and tested by the production module that now implements it:
 
 ## Verification
 
-- Round-5 affected runtime/page command:
+- Round-6 affected runtime/page command:
   `node --test tests/batch-runtime-checkpoint.test.mjs tests/batch-runtime-controller.test.mjs tests/batch-chrome-adapter.test.mjs tests/batch-worker-runtime.test.mjs tests/batch-multi-window-integration.test.js`
-  passed 148/148 with zero failures.
-- Full repository: `npm test` passed 475/475 with zero failures.
+  passed 152/152 with zero failures.
+- Full repository: `npm test` passed 479/479 with zero failures.
 - `node --check` passed for every changed JavaScript module and test.
 - `manifest.json` parsed successfully.
 - `batch.js` dynamically imported without DOM or Chrome globals.
@@ -430,5 +462,7 @@ guarantee is owned and tested by the production module that now implements it:
   `fix: make worker tab creation replay-safe`.
 - Round-5 hardening commit subject:
   `fix: recover pending worker tab ownership`.
+- Round-6 hardening commit subject:
+  `fix: validate batch task ownership identities`.
 - The final commit SHA is reported in the task `DONE` handoff because a file
   cannot contain the hash of the commit that contains itself.

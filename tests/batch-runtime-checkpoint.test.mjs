@@ -197,6 +197,87 @@ test('rejects malformed opening reservations and inconsistent task request ident
   assert.equal(validateBatchRuntimeCheckpoint(invalidTask).ok, false);
 });
 
+test('enforces the task ownership matrix and canonical active request identity', () => {
+  const active = applyBatchRuntimeEvent(
+    applyBatchRuntimeEvent(createCheckpoint(1), {
+      type: 'session_started',
+      batchId: 'batch-1'
+    }, 1100).checkpoint,
+    {
+      type: 'task_activated',
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      requestId: 'batch-1:0:1',
+      tabId: 41,
+      windowId: 51,
+      startedAt: 1200
+    },
+    1200
+  ).checkpoint;
+  const mutations = [
+    (checkpoint) => { checkpoint.tasks['0'].requestId = 'forged-request'; },
+    (checkpoint) => { checkpoint.tasks['0'].requestId = 'batch-1:0:2'; },
+    (checkpoint) => { checkpoint.tasks['0'].tabId = 0; },
+    (checkpoint) => { checkpoint.tasks['0'].windowId = null; },
+    (checkpoint) => { checkpoint.tasks['0'].startedAt = null; },
+    (checkpoint) => {
+      Object.assign(checkpoint.tasks['0'], {
+        state: 'queued',
+        requestId: null,
+        tabId: 777,
+        windowId: 42,
+        startedAt: 1200
+      });
+    }
+  ];
+
+  assert.equal(validateBatchRuntimeCheckpoint(active).ok, true);
+  for (const mutate of mutations) {
+    const malformed = structuredClone(active);
+    mutate(malformed);
+    assert.equal(validateBatchRuntimeCheckpoint(malformed).ok, false);
+  }
+});
+
+test('migrates only canonical legacy reservations that are missing batchId', () => {
+  const safe = createCheckpoint(1);
+  safe.openingReservations = {
+    'batch-1:0:1': {
+      requestId: 'batch-1:0:1',
+      urlIndex: 0,
+      attempt: 1,
+      windowId: 42,
+      tabId: null,
+      updatedAt: 2000
+    }
+  };
+  const unsafe = structuredClone(safe);
+  unsafe.openingReservations = {
+    forged: {
+      requestId: 'forged',
+      urlIndex: 0,
+      attempt: 1,
+      windowId: 42,
+      tabId: 777,
+      updatedAt: 2000
+    }
+  };
+
+  const migratedSafe = migrateBatchRuntimeCheckpoint(safe, 2100);
+  const migratedUnsafe = migrateBatchRuntimeCheckpoint(unsafe, 2100);
+
+  assert.equal(migratedSafe.ok, true);
+  assert.equal(migratedSafe.changed, true);
+  assert.equal(
+    migratedSafe.checkpoint.openingReservations['batch-1:0:1'].batchId,
+    'batch-1'
+  );
+  assert.equal(migratedUnsafe.ok, true);
+  assert.equal(migratedUnsafe.changed, true);
+  assert.deepEqual(migratedUnsafe.checkpoint.openingReservations, {});
+});
+
 function createCheckpoint(count = 4) {
   const items = createItems(count);
   return createBatchRuntimeCheckpoint({
@@ -263,7 +344,7 @@ test('moves one task through active, submitting, and terminal states', () => {
       windowId: 51,
       startedAt: 1200,
       updatedAt: 1200,
-      requestId: null,
+      requestId: 'batch-1:0:1',
       manualResolution: {
         status: 'idle',
         updatedAt: null

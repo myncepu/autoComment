@@ -1001,6 +1001,81 @@ test('malformed opening reservations fail validation without deleting their clai
   assert.equal(harness.tabStore.has(777), true);
 });
 
+test('malformed task ownership never deletes the claimed user tab during page recovery', async () => {
+  for (const mutation of [
+    (task) => Object.assign(task, {
+      state: 'active',
+      requestId: 'forged-request',
+      tabId: 777,
+      windowId: 42,
+      startedAt: 2000
+    }),
+    (task) => Object.assign(task, {
+      state: 'active',
+      requestId: 'batch-1:0:1',
+      tabId: null,
+      windowId: 42,
+      startedAt: 2000
+    }),
+    (task) => Object.assign(task, {
+      urlIndex: 9,
+      attempt: 2,
+      state: 'active',
+      requestId: 'batch-1:9:2',
+      tabId: 777,
+      windowId: 42,
+      startedAt: 2000
+    })
+  ]) {
+    const harness = createHarness({
+      existingTabs: [{
+        id: 777,
+        windowId: 42,
+        url: 'https://user-owned.test/',
+        active: true
+      }]
+    });
+    await harness.controller.handleMessage(startMessage(1));
+    mutation(harness.data.batchRuntimeCheckpoint.tasks['0']);
+
+    const response = await harness.controller.loadForPage();
+
+    assert.equal(response.ok, false);
+    assert.equal(response.error, 'invalid_checkpoint');
+    assert.deepEqual(harness.removedTabs, []);
+    assert.equal(harness.tabStore.has(777), true);
+  }
+});
+
+test('legacy canonical reservation migration still discovers and cleans its exact pending tab', async () => {
+  const harness = createHarness({
+    existingTabs: [{
+      id: 600,
+      windowId: 42,
+      url:
+        'chrome-extension://extension-id/worker-pending.html#batch-1%3A0%3A1',
+      active: false
+    }]
+  });
+  await harness.controller.handleMessage(startMessage(1));
+  harness.data.batchRuntimeCheckpoint.openingReservations = {
+    'batch-1:0:1': {
+      requestId: 'batch-1:0:1',
+      urlIndex: 0,
+      attempt: 1,
+      windowId: 42,
+      tabId: null,
+      updatedAt: 2000
+    }
+  };
+
+  const response = await harness.controller.recoverOnStartup();
+
+  assert.equal(response.ok, true);
+  assert.deepEqual(harness.removedTabs, [600]);
+  assert.deepEqual(response.checkpoint.openingReservations, {});
+});
+
 test('lost create response replays the same live ACTIVE tab without creating a second target', async () => {
   const harness = createHarness();
   installBatchRuntimeController(harness.chrome, harness.controller);
