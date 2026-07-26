@@ -913,6 +913,30 @@
     }
   }
 
+  const batchHandleDispatcher =
+    globalThis.AutoCommentBatchHandleDispatch?.create?.({
+      accept: getBatchHandleValidationError,
+      getKey: getBatchTaskKey,
+      execute(taskConfig) {
+        setBatchContext(taskConfig);
+        return handleBatchTask(
+          taskConfig.batchId,
+          taskConfig.urlIndex,
+          taskConfig.attempt,
+          taskConfig.url
+        );
+      },
+      onExecutionError(error, taskConfig) {
+        console.error('[content] BATCH_HANDLE 异步处理异常', {
+          batchId: taskConfig?.batchId,
+          urlIndex: taskConfig?.urlIndex,
+          errorCode: typeof error?.code === 'string'
+            ? error.code
+            : 'batch_task_failed'
+        });
+      }
+    });
+
   async function reportBatchPhase(context, phase) {
     const reporter = globalThis.AutoCommentBatchPhaseReporter;
     if (!reporter?.report) throw new Error('batch_phase_reporter_unavailable');
@@ -4255,39 +4279,18 @@
       if (message && message.type === 'TOGGLE_PROMOTE_PANEL') {
         createOrToggleQwenPanel();
       }
-      // 批量处理模式：收到任务后自动执行评论流程（改为 async，等待执行结果再响应）
+      // 任务接收与实际执行解耦：同步确认，避免长页面流程占用消息通道。
       if (message && message.type === 'BATCH_HANDLE') {
-        console.log('[content] 收到 BATCH_HANDLE >>>', { batchId: message.batchId, taskId: message.taskId, urlIndex: message.urlIndex, time: new Date().toISOString() });
-        const validation = getBatchHandleValidationError(message);
-        if (!validation.taskConfig) {
-          _sendResponse(validation);
-          return;
-        }
-        const taskKey = getBatchTaskKey(validation.taskConfig);
-        if (runningBatchTaskKey === taskKey) {
-          console.warn('[content] 同一批处理任务正在执行，忽略重复 BATCH_HANDLE:', taskKey);
-          _sendResponse({ ok: false, error: 'duplicate_batch_task_running', urlIndex: message.urlIndex });
-          return;
-        }
-        setBatchContext(validation.taskConfig);
-        handleBatchTask(
-          validation.taskConfig.batchId,
-          validation.taskConfig.urlIndex,
-          validation.taskConfig.attempt,
-          validation.taskConfig.url
-        )
-          .then(() => {
-            console.log('[content] BATCH_HANDLE 处理完成, 发送响应 {ok:true}');
-            _sendResponse({ ok: true, urlIndex: message.urlIndex });
-          })
-          .catch((err) => {
-            const errorCode = typeof err?.code === 'string'
-              ? err.code
-              : 'batch_task_failed';
-            console.error('[content] BATCH_HANDLE 处理异常', { errorCode });
-            _sendResponse({ ok: false, error: errorCode });
+        if (!batchHandleDispatcher) {
+          _sendResponse({
+            ok: false,
+            error: 'batch_handle_dispatch_unavailable',
+            urlIndex: message.urlIndex
           });
-        return true;
+          return false;
+        }
+        batchHandleDispatcher.handleMessage(message, _sendResponse);
+        return false;
       }
     });
   }
@@ -4398,6 +4401,18 @@
           attempt,
           url,
           illegalCheck
+        );
+        return;
+      }
+      if (context.automation?.autoGenerate === false) {
+        await reportGeneratedCommentForManualHandling(
+          context,
+          null,
+          null,
+          {
+            errorCode: 'automation_disabled',
+            errorMessage: '此任务已配置为人工处理'
+          }
         );
         return;
       }
@@ -4538,6 +4553,14 @@
 
       const editor = findLikelyCommentTextarea({ allowGenericFallback: true });
       const history = await captureCurrentCommentHistory(editor, url);
+      if (context.automation?.autoSubmit === false) {
+        await reportGeneratedCommentForManualHandling(
+          context,
+          aiContent,
+          history
+        );
+        return;
+      }
       // 提交前先写入 pending 结果（页面刷新后 batch.js 仍能立即读到）
       await writePendingResult(
         batchId,
@@ -4795,6 +4818,8 @@
   }
 
   const MANUAL_REQUIRED_MESSAGE = '检测到验证码/反垃圾验证，请手动填写后提交';
+  const GENERATED_MANUAL_MESSAGE =
+    '评论已生成但未自动提交，请从批次控制台进入人工处理';
   const MANUAL_REQUIRED_KEYWORDS = [
     'captcha',
     'aiowps-captcha',
@@ -4989,6 +5014,45 @@
     setTimeout(() => {
       window.close();
     }, 500);
+  }
+
+  async function reportGeneratedCommentForManualHandling(
+    context,
+    aiContent,
+    history,
+    {
+      errorCode = 'auto_submit_disabled',
+      errorMessage = GENERATED_MANUAL_MESSAGE
+    } = {}
+  ) {
+    await writePendingResult(
+      context.batchId,
+      context.urlIndex,
+      context.attempt,
+      context.url,
+      'manual_required',
+      aiContent || null,
+      errorMessage,
+      errorCode
+    );
+    await confirmBatchHistoryDurably({
+      type: 'BATCH_HANDLE_CONFIRM',
+      batchId: context.batchId,
+      urlIndex: context.urlIndex,
+      attempt: context.attempt,
+      url: context.url || '',
+      aiContent: aiContent || '',
+      result: 'manual_required',
+      errorCode,
+      errorMessage,
+      resultPreview: history
+        ? {
+            commentText: history.commentText,
+            anchors: history.anchors,
+            promotedWebsiteUrl: history.promotedWebsiteUrl
+          }
+        : undefined
+    });
   }
 
   /**

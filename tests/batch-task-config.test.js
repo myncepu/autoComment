@@ -33,6 +33,10 @@ function validHandle(overrides = {}) {
     assignmentPairId: 'pair-a',
     assignmentSource: 'weighted',
     configRevision: 7,
+    automation: {
+      autoGenerate: true,
+      autoSubmit: false
+    },
     profile: {
       id: 'profile-a',
       displayName: '作者 A',
@@ -55,6 +59,10 @@ test('accepts exact safe snapshots and rejects secrets in BATCH_HANDLE', () => {
 
   assert.equal(context.profile.name, 'Alice');
   assert.equal(context.promotionSite.url, 'https://promo-a.test/');
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(context.automation)),
+    { autoGenerate: true, autoSubmit: false }
+  );
   assert.equal(Object.isFrozen(context), true);
   assert.equal(Object.isFrozen(context.profile), true);
   assert.throws(() => taskConfig.acceptHandle({
@@ -74,7 +82,10 @@ test('rejects unknown fields, mismatched ids, credentials, and stale attempts', 
     validHandle({ profileId: 'profile-b' }),
     validHandle({ promotionSiteId: 'site-b' }),
     validHandle({ url: 'https://user:pass@target.test/' }),
-    validHandle({ attempt: 0 })
+    validHandle({ attempt: 0 }),
+    validHandle({
+      automation: { autoGenerate: false, autoSubmit: true }
+    })
   ];
 
   for (const handle of invalid) {

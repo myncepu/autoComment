@@ -384,6 +384,132 @@ globalThis.handleBatchTask = handleBatchTask;`,
   assert.equal(clickCount, 0);
 });
 
+test('generate-only batch tasks finish as manual work without clicking submit', async () => {
+  const phases = [];
+  const manualReports = [];
+  let clickCount = 0;
+  const context = vm.createContext({
+    console: { log() {}, warn() {}, error() {} },
+    location: { href: 'https://target.test/post' },
+    lastGeneratedPromotionCopy: '',
+    getBatchTaskKey: (task) => (
+      `${task.batchId}:${task.urlIndex}:${task.attempt}`
+    ),
+    reportBatchPhase: async (_task, phase) => {
+      phases.push(phase);
+    },
+    waitForPageReady: async () => {},
+    evaluateCurrentPageForIllegalSite: () => ({ blocked: false }),
+    checkExistingBatchResult: async () => null,
+    findCommentForm: () => ({ id: 'commentform' }),
+    findLikelyCommentTextarea: () => ({ value: 'Generated comment' }),
+    triggerCommentFormFlow: async () => {},
+    findCommentTargetsForBatchUsingManualFlow: async () => ({}),
+    detectManualRequiredChallenge: () => ({ found: false }),
+    getCachedPromotionCopy: async () => 'Generated comment',
+    generatePromotionCopyWithLlm: async () => {
+      throw new Error('generation should use the cached fixture value');
+    },
+    tryFillCommentTextareaWithPromotion: () => true,
+    ensureAllCommentFormFieldsFilled: async () => ({ success: true }),
+    captureCurrentCommentHistory: async () => ({
+      commentText: 'Generated comment',
+      anchors: [{ anchorText: 'Product' }],
+      promotedWebsiteUrl: 'https://promo.test/'
+    }),
+    reportGeneratedCommentForManualHandling: async (...args) => {
+      manualReports.push(args);
+    },
+    persistBatchSubmitContext: async () => {
+      throw new Error('generate-only mode must not persist submit context');
+    },
+    clickCommentSubmitButton: async () => {
+      clickCount += 1;
+      return { success: true };
+    }
+  });
+  const taskSource = sourceBetween(
+    'async function handleBatchTask(batchId, urlIndex, attempt, url)',
+    '\n  /**\n   * 等待页面关键元素加载'
+  );
+  vm.runInContext(
+    `let runningBatchTaskKey = null;
+let _batchCtx = {
+  batchId: 'batch-generate',
+  taskId: 'task-generate',
+  urlIndex: 1,
+  profileId: 'profile-a',
+  promotionSiteId: 'site-a',
+  attempt: 1,
+  url: 'https://target.test/post',
+  automation: { autoGenerate: true, autoSubmit: false }
+};
+${taskSource}
+globalThis.handleBatchTask = handleBatchTask;`,
+    context
+  );
+
+  await context.handleBatchTask(
+    'batch-generate',
+    1,
+    1,
+    'https://target.test/post'
+  );
+
+  assert.deepEqual(phases, ['loading', 'detecting', 'filling']);
+  assert.equal(clickCount, 0);
+  assert.equal(manualReports.length, 1);
+  assert.equal(manualReports[0][0].taskId, 'task-generate');
+  assert.equal(manualReports[0][1], 'Generated comment');
+  assert.equal(manualReports[0][2].commentText, 'Generated comment');
+});
+
+test('generate-only manual result exposes a safe preview without submit history', async () => {
+  const pending = [];
+  const confirmations = [];
+  const context = vm.createContext({
+    GENERATED_MANUAL_MESSAGE: 'manual',
+    writePendingResult: async (...args) => pending.push(args),
+    confirmBatchHistoryDurably: async (message) => {
+      confirmations.push(message);
+    }
+  });
+  const functionSource = sourceBetween(
+    'async function reportGeneratedCommentForManualHandling',
+    '\n\n  /**\n   * 将待确认结果写入 storage'
+  );
+  vm.runInContext(
+    `${functionSource}
+globalThis.reportGeneratedCommentForManualHandling =
+  reportGeneratedCommentForManualHandling;`,
+    context
+  );
+
+  await context.reportGeneratedCommentForManualHandling({
+    batchId: 'batch-a',
+    urlIndex: 2,
+    attempt: 1,
+    url: 'https://target.test/post'
+  }, 'Generated comment', {
+    commentHtml: '<a href="https://promo.test/">Generated comment</a>',
+    commentText: 'Generated comment',
+    anchors: [{ anchorText: 'Product' }],
+    promotedWebsiteUrl: 'https://promo.test/'
+  });
+
+  assert.equal(pending[0][4], 'manual_required');
+  assert.deepEqual(plain(confirmations[0].resultPreview), {
+    commentText: 'Generated comment',
+    anchors: [{ anchorText: 'Product' }],
+    promotedWebsiteUrl: 'https://promo.test/'
+  });
+  assert.equal(Object.hasOwn(confirmations[0], 'history'), false);
+  assert.equal(
+    JSON.stringify(confirmations[0]).includes('commentHtml'),
+    false
+  );
+});
+
 test('batch handles reject a missing attempt before accepting frozen task identity', () => {
   const identitySource = sourceBetween(
     'function getBatchTaskKey',

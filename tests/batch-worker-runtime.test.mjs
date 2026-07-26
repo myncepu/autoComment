@@ -1176,6 +1176,8 @@ test('sanitizes BATCH_HANDLE URLs and diagnostic Chrome errors', async () => {
 
 test('BATCH_HANDLE carries only the frozen non-sensitive task assignment', async () => {
   const harness = createWorkerHarness({ concurrency: 1, taskCount: 1 });
+  harness.checkpoint.settings.autoGenerate = true;
+  harness.checkpoint.settings.autoSubmit = false;
   Object.assign(harness.checkpoint, {
     version: 3,
     configRevision: 7,
@@ -1223,6 +1225,10 @@ test('BATCH_HANDLE carries only the frozen non-sensitive task assignment', async
     assignmentPairId: 'pair-a',
     assignmentSource: 'weighted',
     configRevision: 7,
+    automation: {
+      autoGenerate: true,
+      autoSubmit: false
+    },
     profile: harness.checkpoint.profiles['profile-a'],
     promotionSite: harness.checkpoint.promotionSites['site-a']
   });

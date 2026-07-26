@@ -65,6 +65,7 @@ test('loads the bridge before content code and routes every generation through i
     'illegal-site-filter.js',
     'lib/llm-content-bridge.js',
     'lib/batch-task-config.js',
+    'lib/batch-handle-dispatch.js',
     'lib/batch-submit-context-client.js',
     'lib/comment-history-capture.js',
     'lib/batch-phase-reporter.js',
