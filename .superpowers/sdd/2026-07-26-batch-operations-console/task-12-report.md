@@ -16,9 +16,10 @@
 - Automatic workers are background-owned tabs in the existing console
   window. The page sends only batch/task identity; the serialized background
   controller derives the checkpoint URL and the real batch-page
-  `sender.tab.windowId`, calls
-  `tabs.create({ windowId, url, active: false })`, and persists ACTIVE before
-  responding. Normal windows are created only by the explicit manual-work
+  `sender.tab.windowId`. It first persists an opening request reservation,
+  creates an inactive `about:blank` tab, persists ACTIVE ownership of the
+  returned tab ID, and only then navigates it to the checkpoint URL and
+  responds. Normal windows are created only by the explicit manual-work
   adapter and are returned with `automation: false`; they do not receive
   `BATCH_HANDLE` and do not occupy worker slots.
 - A restored paused checkpoint performs no automatic resume. Explicit resume
@@ -212,6 +213,50 @@ reassert wakefulness. Each production correction followed its focused
 failure. The running-entry and deferred-START tests document already-correct
 state/command barriers and passed without an additional production change.
 
+## Round 4 Durable Reservation and Replay-Safe Creation
+
+- `BATCH_CREATE_WORKER_TAB` is now a four-stage serialized protocol:
+  persist `openingReservations[requestId]`; create one inactive `about:blank`
+  tab in the trusted batch-page sender window; persist the tab ID as an ACTIVE
+  task owned by the same request identity; then call `tabs.update` with the
+  sanitized checkpoint URL. The background never returns a usable tab before
+  both ownership persistence and navigation succeed.
+- `BatchTabManager` derives one stable request ID from
+  `{ batchId, urlIndex, attempt }`, and the Chrome page adapter forwards that
+  ID unchanged. A transport-level lost response is retried once with the
+  exact same message identity. Response-level failures are not converted into
+  success.
+- An exact ACTIVE replay first checks the durable request identity and calls
+  `tabs.get(task.tabId)`. A live tab is returned with the existing ACTIVE
+  checkpoint and no second tab is created. If the tab is already absent, the
+  controller durably resets the task to queued and re-reserves the same
+  request before creating its one replacement.
+- If ACTIVE persistence fails, the background closes only the still-blank
+  tab. If that close also fails, it durably records the blank tab ID in both
+  the opening reservation and `recoveryCleanup.orphanTabIds`, transitions to
+  `paused_recovery`, and returns `checkpoint_write_failed`. No target
+  navigation or `BATCH_HANDLE` can occur. Startup and explicit page teardown
+  use the same cleanup path and retain only tab IDs whose removal still
+  fails.
+- A permanent failure while writing the initial reservation creates no tab
+  and cannot report queued work as a successful create. A target navigation
+  failure normalizes the now-owned ACTIVE task into `paused_recovery`, closes
+  the orphan through the durable teardown path, and returns
+  `tab_navigation_failed`.
+- The round-3 create/teardown ordering remains serialized. Create-first
+  reaches durable ACTIVE before teardown closes it; teardown-first rejects
+  create with zero tabs. Three concurrent workers still create and navigate
+  three distinct tabs in the trusted console window.
+
+Round-4 RED evidence was captured before production changes: the focused
+controller/adapter/manager command ran 55 tests with 11 failures. The failures
+showed direct target navigation, no opening reservation, successful tab
+creation before permanent storage failure, lost-response
+`invalid_transition`, missing-tab replay failure, ignored navigation failure,
+missing request IDs, no adapter retry, and unstable manager identity. After
+the protocol implementation, the expanded affected runtime/page command
+passed 121/121.
+
 ## Legacy Race Coverage Map
 
 The removed monolith fixture is not retained. Each former integration
@@ -302,10 +347,10 @@ guarantee is owned and tested by the production module that now implements it:
 
 ## Verification
 
-- Affected composition/runtime/history command:
-  `node --test tests/batch-multi-window-integration.test.js tests/batch-runtime-controller.test.mjs tests/batch-runtime-checkpoint.test.mjs tests/batch-command-controller.test.mjs tests/batch-worker-runtime.test.mjs tests/batch-window-manager.test.mjs tests/batch-chrome-adapter.test.mjs tests/batch-export.test.mjs tests/comment-history-page.test.mjs`
-  passed 202/202 with zero failures.
-- Full repository: `npm test` passed 459/459 with zero failures.
+- Round-4 affected runtime/page command:
+  `node --test tests/batch-runtime-controller.test.mjs tests/batch-chrome-adapter.test.mjs tests/batch-window-manager.test.mjs tests/batch-runtime-checkpoint.test.mjs tests/batch-worker-runtime.test.mjs tests/batch-page-integration.test.mjs`
+  passed 121/121 with zero failures.
+- Full repository: `npm test` passed 464/464 with zero failures.
 - `node --check` passed for every changed JavaScript module and test.
 - `manifest.json` parsed successfully.
 - `batch.js` dynamically imported without DOM or Chrome globals.
@@ -338,5 +383,7 @@ guarantee is owned and tested by the production module that now implements it:
   `fix: move batch teardown ownership to background`.
 - Round-3 hardening commit subject:
   `fix: atomically create background-owned batch tabs`.
+- Round-4 hardening commit subject:
+  `fix: make worker tab creation replay-safe`.
 - The final commit SHA is reported in the task `DONE` handoff because a file
   cannot contain the hash of the commit that contains itself.

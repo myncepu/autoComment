@@ -253,7 +253,8 @@ test('worker tab adapter requests an already-checkpointed background tab without
     type: 'BATCH_CREATE_WORKER_TAB',
     batchId: 'batch-1',
     urlIndex: 3,
-    attempt: 2
+    attempt: 2,
+    requestId: 'batch-1:3:2'
   }]);
   assert.deepEqual(created, {
     id: 501,
@@ -267,6 +268,62 @@ test('worker tab adapter requests an already-checkpointed background tab without
       status: 'running'
     }
   });
+});
+
+test('worker tab adapter retries a lost response once with the same request identity', async () => {
+  const harness = createChromeHarness();
+  let calls = 0;
+  harness.chromeApi.runtime.sendMessage = async (message) => {
+    harness.runtimeMessages.push(structuredClone(message));
+    calls += 1;
+    if (calls === 1) {
+      throw new Error('The message port closed before a response was received.');
+    }
+    return {
+      ok: true,
+      checkpoint: {
+        version: 2,
+        batchId: message.batchId,
+        status: 'running'
+      },
+      tab: {
+        id: 501,
+        windowId: 42,
+        url: 'https://checkpoint.test/worker',
+        active: false
+      }
+    };
+  };
+  const dependencies = createChromeBatchDependencies(harness.chromeApi);
+
+  const created = await dependencies.tabsApi.create({
+    windowId: 999,
+    url: 'https://attacker.test/ignored',
+    active: true
+  }, {
+    batchId: 'batch-1',
+    urlIndex: 3,
+    attempt: 2,
+    requestId: 'batch-1:3:2'
+  });
+
+  assert.equal(created.id, 501);
+  assert.deepEqual(harness.runtimeMessages, [
+    {
+      type: 'BATCH_CREATE_WORKER_TAB',
+      batchId: 'batch-1',
+      urlIndex: 3,
+      attempt: 2,
+      requestId: 'batch-1:3:2'
+    },
+    {
+      type: 'BATCH_CREATE_WORKER_TAB',
+      batchId: 'batch-1',
+      urlIndex: 3,
+      attempt: 2,
+      requestId: 'batch-1:3:2'
+    }
+  ]);
 });
 
 test('loads only whitelisted profile and automation settings', async () => {

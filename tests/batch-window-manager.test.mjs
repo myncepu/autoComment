@@ -125,7 +125,8 @@ test('propagates background checkpoint ownership with the task identity', async 
   assert.deepEqual(receivedIdentity, {
     batchId: 'batch-a',
     urlIndex: 2,
-    attempt: 3
+    attempt: 3,
+    requestId: 'batch-a:2:3'
   });
   assert.equal(activity.backgroundCheckpointed, true);
   assert.equal(activity.runtimeCheckpoint, runtimeCheckpoint);
