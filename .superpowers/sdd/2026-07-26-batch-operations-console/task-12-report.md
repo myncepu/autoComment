@@ -499,6 +499,67 @@ the fixes, the focused checkpoint/controller/background command passed
 111/111, the expanded affected command passed 216/216, and the full repository
 passed 512/512.
 
+## Round 10 Ownership-Proven Persistence Ingress
+
+- Every production batch mutation ingress now enters one controller-serialized
+  ownership transaction before its first side effect. The proof-only
+  `runProofBoundTaskHook` accepts only an exact ACTIVE/SUBMITTING task, positive
+  attempt, matching content tab by default (or the exact owner page only for
+  context recovery sealing), matching browser-session journal, and live
+  tab/window/opener proof. It performs no close, terminal transition, journal
+  clear, result append, or broadcast. Missing live tabs and uncertain journal
+  or tab reads fail with `batch_ownership_unverified`; hook failure retains the
+  original task ownership.
+- The authoritative mutation whitelist is:
+  - `BATCH_PERSIST_PENDING_RESULT` → proof-only hook →
+    `batchResultStore.save`, with no terminal transition.
+  - `BATCH_HANDLE_CONFIRM` → terminal hook → idempotent result persistence,
+    durable comment-history save, and exact submit-context release → ownership
+    re-proof → worker close → terminal checkpoint/journal clear → one
+    background confirmation.
+  - `BATCH_REPORT_RESULT` → the same terminal transaction. An exact unresolved
+    failed-submit context returns a deferred result before any result/history
+    write, close, checkpoint mutation, or broadcast.
+  - `BATCH_HISTORY_PENDING_FALLBACK` → terminal hook → durable history and
+    exact context release → re-proof/close/terminal/broadcast. The obsolete
+    clear-first `BATCH_HISTORY_FALLBACK_DURABLE` route was removed.
+  - Submit-context SAVE and matched CLEAR → proof-only hook; exact owner-page
+    recovery sealing → proof-only hook with its narrowly scoped page option.
+    GET/HAS remain read-only, and unscoped clear is rejected.
+- The only production batch-result write calls are the background helper used
+  inside terminal hooks and the pending-result proof hook. The only success
+  history call is the background durable-history helper used inside terminal
+  hooks. Submit-context mutations are either proof-bound listener hooks or the
+  exact compare-and-clear inside a terminal hook. `BATCH_CONFIRMED` is emitted
+  only by background after a changed terminal checkpoint. Content retains its
+  duplicate-result read compatibility but has no `batchResults`,
+  `batchReportedUrls`, or `historyPending:*` write path.
+- Content uses one two-attempt, identical-payload transport. Transport failure
+  and the bounded ownership/teardown cleanup class retry the same message.
+  `stale_worker_tab`, `stale_attempt`, `checkpoint_not_found`,
+  `task_already_terminal`, `stale_batch`, `invalid_url_index`, and
+  `forbidden_sender` stop immediately with no fallback or context clear.
+  Exhaustion returns structured non-durable/retryable state and leaves durable
+  ownership/context available for recovery. A real background integration
+  makes the first `tabs.remove` fail and proves that the content helper
+  automatically resends the same confirmation, after which result/history,
+  close, terminal state, and journal cleanup converge once.
+- The real background/fake-IndexedDB matrix snapshots result rows, history
+  count, submit context, broadcasts, checkpoint task, session journal, and
+  live tabs. Wrong-tab CONFIRM, REPORT, PENDING, and HISTORY fallback messages
+  change none of them. Exact legal and duplicate routes remain idempotent;
+  already-terminal messages cannot overwrite authoritative data. Proof-hook
+  storage failure, missing live proof, and transport exhaustion all retain the
+  valid ACTIVE/SUBMITTING or paused/manual recovery ownership.
+
+Round-10 RED evidence included the missing controller API; a page sender
+invoking a terminal side-effect hook; unproved REPORT/PENDING/history fallback
+mutations; wrong-tab integration snapshots changing; all eight initial content
+no-local-fallback/retry expectations failing; and a journal-only proof invoking
+its hook after the live tab was explicitly absent. After the fixes, the
+focused ingress command passed 121/121, the affected command passed 204/204,
+and the full repository passed 516/516.
+
 ## Legacy Race Coverage Map
 
 The removed monolith fixture is not retained. Each former integration
@@ -590,6 +651,22 @@ guarantee is owned and tested by the production module that now implements it:
 
 ## Verification
 
+- Round-10 focused ingress command:
+  `node --test tests/batch-runtime-controller.test.mjs tests/batch-submit-context-store.test.mjs tests/batch-submit-context-client.test.js tests/comment-history-message-listener.test.mjs tests/comment-history-submit-flow.test.js`
+  passed 121/121 with zero failures.
+- Round-10 affected command:
+  `node --test tests/batch-runtime-controller.test.mjs tests/batch-submit-context-store.test.mjs tests/batch-submit-context-client.test.js tests/comment-history-message-listener.test.mjs tests/comment-history-submit-flow.test.js tests/batch-submit-order.test.js tests/batch-worker-runtime.test.mjs tests/batch-multi-window-integration.test.js tests/batch-chrome-adapter.test.mjs`
+  passed 204/204 with zero failures.
+- Round-10 full repository: `npm test` passed 516/516 with zero failures.
+- `node --check` passed for every round-10 changed JavaScript/MJS module and
+  test; `git diff --check` passed.
+- `manifest.json` parsed successfully and `batch.js` dynamically imported
+  without DOM or Chrome globals.
+- Round-10 static audits enumerate every result/history/context mutation and
+  background confirmation as described in the whitelist above. The installed
+  runtime message set still excludes externally supplied `BATCH_TASK_ACTIVE`,
+  and `ownershipEpoch` remains absent from background, content, results,
+  history, page composition, and DOM-facing files.
 - Round-9 affected runtime/background command:
   `node --test tests/batch-runtime-checkpoint.test.mjs tests/batch-session-journal.test.mjs tests/batch-runtime-controller.test.mjs tests/batch-chrome-adapter.test.mjs tests/batch-worker-runtime.test.mjs tests/batch-multi-window-integration.test.js tests/comment-history-message-listener.test.mjs tests/batch-submit-order.test.js tests/comment-history-submit-flow.test.js`
   passed 216/216 with zero failures.
@@ -657,5 +734,7 @@ guarantee is owned and tested by the production module that now implements it:
   `fix: journal batch tab ownership per browser session`.
 - Round-9 hardening commit subject:
   `fix: close final batch ownership races`.
+- Round-10 hardening commit subject:
+  `fix: prove every batch persistence ingress`.
 - The final commit SHA is reported in the task `DONE` handoff because a file
   cannot contain the hash of the commit that contains itself.

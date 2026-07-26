@@ -26,12 +26,18 @@ function createBatchResultFallbackHarness(initial = {}) {
     batchReportedUrls: [],
     ...plain(initial)
   };
+  const messages = [];
   const runtime = {
     lastError: null,
-    sendMessage(_message, callback) {
-      runtime.lastError = { message: 'background unavailable' };
-      callback();
-      runtime.lastError = null;
+    sendMessage(message, callback) {
+      messages.push(plain(message));
+      if (typeof callback === 'function') {
+        runtime.lastError = { message: 'background unavailable' };
+        callback();
+        runtime.lastError = null;
+        return undefined;
+      }
+      return Promise.reject(new Error('background unavailable'));
     }
   };
   const context = vm.createContext({
@@ -60,19 +66,28 @@ function createBatchResultFallbackHarness(initial = {}) {
     'function hasCompleteBatchResultIdentity(',
     '\n\n  function hasHistoryRevision'
   );
+  const transportSource = sourceBetween(
+    'const BATCH_PROVEN_MESSAGE_MAX_ATTEMPTS',
+    '\n\n  function isAcknowledgedBatchHistoryConfirmation'
+  );
   vm.runInContext(
     `${identitySource}
+${transportSource}
 ${reporterSource}
 globalThis.reportBatchResult = reportBatchResult;`,
     context
   );
-  return { reportBatchResult: context.reportBatchResult, storageData };
+  return {
+    reportBatchResult: context.reportBatchResult,
+    storageData,
+    messages
+  };
 }
 
-test('local result fallback keeps attempts distinct and preserves error codes', async () => {
+test('content result transport exhaustion never writes local batch storage', async () => {
   const harness = createBatchResultFallbackHarness();
 
-  await harness.reportBatchResult(
+  const response = await harness.reportBatchResult(
     'batch-fallback',
     5,
     1,
@@ -82,51 +97,21 @@ test('local result fallback keeps attempts distinct and preserves error codes', 
     'https://target.test/post',
     'submission_uncertain'
   );
-  await harness.reportBatchResult(
-    'batch-fallback',
-    5,
-    2,
-    'success',
-    'new content',
-    null,
-    'https://target.test/post',
-    null
-  );
 
-  assert.deepEqual(
-    harness.storageData.batchResults.map(
-      ({ batchId, urlIndex, attempt, result, errorCode }) => ({
-        batchId,
-        urlIndex,
-        attempt,
-        result,
-        errorCode
-      })
-    ),
-    [
-      {
-        batchId: 'batch-fallback',
-        urlIndex: 5,
-        attempt: 1,
-        result: 'fail',
-        errorCode: 'submission_uncertain'
-      },
-      {
-        batchId: 'batch-fallback',
-        urlIndex: 5,
-        attempt: 2,
-        result: 'success',
-        errorCode: null
-      }
-    ]
-  );
-  assert.deepEqual(harness.storageData.batchReportedUrls, [
-    'batch-fallback:5:1',
-    'batch-fallback:5:2'
-  ]);
+  assert.deepEqual(plain(response), {
+    ok: false,
+    error: 'batch_transport_exhausted',
+    retryable: true
+  });
+  assert.deepEqual(harness.storageData, {
+    batchResults: [],
+    batchReportedUrls: []
+  });
+  assert.equal(harness.messages.length, 2);
+  assert.deepEqual(harness.messages[0], harness.messages[1]);
 });
 
-test('full local fallback ignores an older attempt without evicting current data', async () => {
+test('content result transport exhaustion does not alter authoritative local cache', async () => {
   const targetResult = {
     batchId: 'fallback-capacity',
     urlIndex: 5,
@@ -153,8 +138,9 @@ test('full local fallback ignores an older attempt without evicting current data
     ]
   };
   const harness = createBatchResultFallbackHarness(initial);
+  harness.messages.length = 0;
 
-  await harness.reportBatchResult(
+  const response = await harness.reportBatchResult(
     'fallback-capacity',
     5,
     1,
@@ -165,6 +151,7 @@ test('full local fallback ignores an older attempt without evicting current data
     'submission_uncertain'
   );
 
+  assert.equal(response?.ok, false);
   assert.deepEqual(harness.storageData, initial);
 });
 
@@ -809,136 +796,92 @@ function exactConfirmationMessage(overrides = {}) {
   };
 }
 
-function expectedPendingWrite(entryId, message) {
-  return {
-    [`historyPending:v2:${entryId}`]: {
-      queueVersion: 2,
-      entryId,
-      commentId: `${message.batchId}:${message.urlIndex}`,
-      revision: message.history.historyRevision,
-      message
-    }
-  };
-}
-
-test('rejected confirmations queue exact history and preserve context until close handoff', async () => {
-  for (const rejection of [
-    new Error('background rejected'),
-    new Error('The message channel closed before a response was received.')
-  ]) {
-    const harness = createConfirmationHarness({
-      rejection,
-      pendingEntryIds: ['rejected-entry']
-    });
-    const message = exactConfirmationMessage();
-
-    assert.deepEqual(
-      plain(await harness.context.confirmBatchHistoryDurably(message)),
-      { durable: true, acknowledgement: null }
-    );
-    assert.deepEqual(harness.sentMessages, [
-      message,
-      {
-        type: 'BATCH_HISTORY_FALLBACK_DURABLE',
-        batchId: message.batchId,
-        urlIndex: message.urlIndex,
-        attempt: message.attempt,
-        url: message.url,
-        result: 'success',
-        aiContent: message.aiContent,
-        errorCode: null,
-        errorMessage: null,
-        historyRevision: message.history.historyRevision
-      }
-    ]);
-    assert.deepEqual(
-      harness.storageWrites,
-      [expectedPendingWrite('rejected-entry', message)]
-    );
-    assert.deepEqual(harness.storageRemovals, []);
-  }
-});
-
-test('content fallback creates immutable queue entries for same-ID exact revisions', async () => {
+test('content authorization rejection has zero history fallback or context side effects', async () => {
   const harness = createConfirmationHarness({
-    rejection: new Error('background unavailable'),
-    pendingEntryIds: ['content-entry-first', 'content-entry-second']
-  });
-  const first = exactConfirmationMessage({
-    history: {
-      ...exactConfirmationMessage().history,
-      submittedAt: 1721000000000,
-      historyRevision: {
-        capturedAt: 1721000000000,
-        recordedAt: 1721000000001,
-        sequence: 1,
-        id: 'revision-first'
-      }
+    response: {
+      ok: false,
+      error: 'stale_worker_tab'
     }
   });
-  const second = exactConfirmationMessage({
-    history: {
-      ...exactConfirmationMessage().history,
-      submittedAt: 1721000001000,
-      commentHtml: 'New exact submitted body',
-      commentText: 'New exact submitted body',
-      historyRevision: {
-        capturedAt: 1721000001000,
-        recordedAt: 1721000001001,
-        sequence: 2,
-        id: 'revision-second'
-      }
-    }
-  });
+  const message = exactConfirmationMessage();
 
-  await harness.context.confirmBatchHistoryDurably(first);
-  await harness.context.confirmBatchHistoryDurably(second);
-
-  const keys = harness.storageWrites.map((write) => Object.keys(write)[0]);
-  assert.deepEqual(keys, [
-    'historyPending:v2:content-entry-first',
-    'historyPending:v2:content-entry-second'
-  ]);
-  const queued = harness.storageWrites.map((write, index) => write[keys[index]]);
   assert.deepEqual(
-    queued.map(({ queueVersion, entryId, commentId, revision, message }) => ({
-      queueVersion,
-      entryId,
-      commentId,
-      revision,
-      message
-    })),
-    [
-      {
-        queueVersion: 2,
-        entryId: 'content-entry-first',
-        commentId: 'batch-a:7',
-        revision: first.history.historyRevision,
-        message: first
-      },
-      {
-        queueVersion: 2,
-        entryId: 'content-entry-second',
-        commentId: 'batch-a:7',
-        revision: second.history.historyRevision,
-        message: second
+    plain(await harness.context.confirmBatchHistoryDurably(message)),
+    {
+      durable: false,
+      acknowledgement: {
+        ok: false,
+        error: 'stale_worker_tab'
       }
-    ]
+    }
   );
+  assert.deepEqual(harness.sentMessages, [message]);
+  assert.deepEqual(harness.storageWrites, []);
+  assert.deepEqual(harness.storageRemovals, []);
 });
 
-test('content announces a durable fallback before allowing the worker to close', async () => {
+test('content retries the identical confirmation after cleanup failure', async () => {
+  let calls = 0;
+  const harness = createConfirmationHarness({
+    response() {
+      calls += 1;
+      return calls === 1
+        ? { ok: false, error: 'batch_teardown_cleanup_failed' }
+        : {
+            ok: true,
+            historySaveStatus: 'saved',
+            historyPendingCount: 0
+          };
+    }
+  });
+  const message = exactConfirmationMessage();
+
+  assert.deepEqual(
+    plain(await harness.context.confirmBatchHistoryDurably(message)),
+    {
+      durable: true,
+      acknowledgement: {
+        ok: true,
+        historySaveStatus: 'saved',
+        historyPendingCount: 0
+      }
+    }
+  );
+  assert.deepEqual(harness.sentMessages, [message, message]);
+  assert.deepEqual(harness.storageWrites, []);
+  assert.deepEqual(harness.storageRemovals, []);
+});
+
+test('content transport exhaustion preserves history and context in memory only', async () => {
+  const harness = createConfirmationHarness({
+    rejection: new Error('background unavailable')
+  });
+  const message = exactConfirmationMessage();
+
+  assert.deepEqual(
+    plain(await harness.context.confirmBatchHistoryDurably(message)),
+    { durable: false, acknowledgement: null }
+  );
+  assert.deepEqual(harness.sentMessages, [message, message]);
+  assert.deepEqual(harness.storageWrites, []);
+  assert.deepEqual(harness.storageRemovals, []);
+});
+
+test('content requests a proven background history fallback without local writes', async () => {
   const harness = createConfirmationHarness({
     response(message) {
       if (message.type === 'BATCH_HANDLE_CONFIRM') {
         return { ok: true, historySaveStatus: 'failed' };
       }
-      if (message.type === 'BATCH_HISTORY_FALLBACK_DURABLE') {
-        return { ok: true };
+      if (message.type === 'BATCH_HISTORY_PENDING_FALLBACK') {
+        return {
+          ok: true,
+          historySaveStatus: 'queued',
+          historyPendingCount: 1
+        };
       }
       throw new Error(`unexpected message: ${message.type}`);
-    },
-    pendingEntryIds: ['fallback-handoff-entry']
+    }
   });
   const message = exactConfirmationMessage();
 
@@ -952,57 +895,15 @@ test('content announces a durable fallback before allowing the worker to close',
   assert.deepEqual(harness.sentMessages, [
     message,
     {
-      type: 'BATCH_HISTORY_FALLBACK_DURABLE',
-      batchId: message.batchId,
-      urlIndex: message.urlIndex,
-      attempt: message.attempt,
-      url: message.url,
-      result: 'success',
-      aiContent: message.aiContent,
-      errorCode: null,
-      errorMessage: null,
-      historyRevision: message.history.historyRevision
+      ...message,
+      type: 'BATCH_HISTORY_PENDING_FALLBACK'
     }
   ]);
-  assert.deepEqual(harness.storageRemovals, ['submit-context']);
+  assert.deepEqual(harness.storageWrites, []);
+  assert.deepEqual(harness.storageRemovals, []);
 });
 
-test('failed acknowledgement falls back, while a fallback write failure preserves submit context', async () => {
-  const failedAck = createConfirmationHarness({
-    response: { ok: true, historySaveStatus: 'failed' },
-    pendingEntryIds: ['failed-ack-entry']
-  });
-  const message = exactConfirmationMessage();
-  assert.deepEqual(
-    plain(await failedAck.context.confirmBatchHistoryDurably(message)),
-    {
-      durable: true,
-      acknowledgement: { ok: true, historySaveStatus: 'failed' }
-    }
-  );
-  assert.deepEqual(
-    failedAck.storageWrites,
-    [expectedPendingWrite('failed-ack-entry', message)]
-  );
-  assert.deepEqual(failedAck.storageRemovals, ['submit-context']);
-
-  for (const failureOptions of [
-    { fallbackLastError: { message: 'quota exceeded' } },
-    { fallbackThrows: true }
-  ]) {
-    const failedFallback = createConfirmationHarness({
-      rejection: new Error('background unavailable'),
-      ...failureOptions
-    });
-    assert.deepEqual(
-      plain(await failedFallback.context.confirmBatchHistoryDurably(message)),
-      { durable: false, acknowledgement: null }
-    );
-    assert.deepEqual(failedFallback.storageRemovals, []);
-  }
-});
-
-test('restored exact and marked legacy contexts clear only after a valid acknowledgement', async () => {
+test('restored exact and marked legacy contexts rely on background acknowledgement', async () => {
   const exactHarness = createConfirmationHarness({
     response: { ok: true, historySaveStatus: 'saved' }
   });
@@ -1017,7 +918,7 @@ test('restored exact and marked legacy contexts clear only after a valid acknowl
   await exactHarness.context.confirmRestoredBatchSubmit(exactContext);
   assert.equal(exactHarness.sentMessages[0].history.commentHtml, 'Exact submitted body');
   assert.deepEqual(exactHarness.storageWrites, []);
-  assert.deepEqual(exactHarness.storageRemovals, ['submit-context']);
+  assert.deepEqual(exactHarness.storageRemovals, []);
 
   const legacyHarness = createConfirmationHarness({
     response: { ok: true, historySaveStatus: 'not_applicable' }
@@ -1036,7 +937,7 @@ test('restored exact and marked legacy contexts clear only after a valid acknowl
     'legacy_context'
   );
   assert.deepEqual(legacyHarness.storageWrites, []);
-  assert.deepEqual(legacyHarness.storageRemovals, ['submit-context']);
+  assert.deepEqual(legacyHarness.storageRemovals, []);
 });
 
 test('restored legacy context without an attempt is not reported or cleared', async () => {

@@ -938,6 +938,79 @@
       .catch(() => {});
   }
 
+  const BATCH_PROVEN_MESSAGE_MAX_ATTEMPTS = 2;
+  const BATCH_AUTHORIZATION_TERMINAL_ERRORS = new Set([
+    'stale_worker_tab',
+    'stale_attempt',
+    'checkpoint_not_found',
+    'task_already_terminal',
+    'stale_batch',
+    'invalid_url_index',
+    'forbidden_sender'
+  ]);
+  const BATCH_RETRYABLE_OWNERSHIP_ERRORS = new Set([
+    'batch_teardown_cleanup_failed',
+    'batch_ownership_unverified',
+    'checkpoint_write_failed',
+    'submit_context_not_released'
+  ]);
+
+  function isAuthorizationTerminalBatchError(error) {
+    return BATCH_AUTHORIZATION_TERMINAL_ERRORS.has(error);
+  }
+
+  function isRetryableBatchOwnershipError(error) {
+    return BATCH_RETRYABLE_OWNERSHIP_ERRORS.has(error);
+  }
+
+  async function sendProvenBatchMessage(message) {
+    if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
+      return {
+        response: null,
+        transportExhausted: true
+      };
+    }
+    for (
+      let attempt = 1;
+      attempt <= BATCH_PROVEN_MESSAGE_MAX_ATTEMPTS;
+      attempt += 1
+    ) {
+      let response;
+      try {
+        response = await chrome.runtime.sendMessage(message);
+      } catch (_) {
+        if (attempt === BATCH_PROVEN_MESSAGE_MAX_ATTEMPTS) {
+          return {
+            response: null,
+            transportExhausted: true
+          };
+        }
+        continue;
+      }
+      if (response?.ok === true) {
+        return { response, transportExhausted: false };
+      }
+      if (isAuthorizationTerminalBatchError(response?.error)) {
+        return {
+          response,
+          authorizationTerminal: true,
+          transportExhausted: false
+        };
+      }
+      if (
+        isRetryableBatchOwnershipError(response?.error) &&
+        attempt < BATCH_PROVEN_MESSAGE_MAX_ATTEMPTS
+      ) {
+        continue;
+      }
+      return { response, transportExhausted: false };
+    }
+    return {
+      response: null,
+      transportExhausted: true
+    };
+  }
+
   function isAcknowledgedBatchHistoryConfirmation(message, response) {
     if (!response?.ok) return false;
     if (
@@ -954,68 +1027,6 @@
     );
   }
 
-  function persistHistoryPendingFallback(message) {
-    return new Promise((resolve) => {
-      if (
-        typeof chrome === 'undefined'
-        || !chrome.storage?.local?.set
-        || !message?.batchId
-        || message.urlIndex === undefined
-      ) {
-        resolve(false);
-        return;
-      }
-      const entryId = createHistoryUniqueId();
-      const pendingKey = `historyPending:v2:${entryId}`;
-      const pendingEntry = {
-        queueVersion: 2,
-        entryId,
-        commentId: `${message.batchId}:${message.urlIndex}`,
-        revision: message.history?.historyRevision || null,
-        message
-      };
-      let settled = false;
-      const finish = (saved) => {
-        if (settled) return;
-        settled = true;
-        resolve(saved);
-      };
-      try {
-        const pendingWrite = chrome.storage.local.set({
-          [pendingKey]: pendingEntry
-        }, () => {
-          finish(!chrome.runtime?.lastError);
-        });
-        if (pendingWrite && typeof pendingWrite.then === 'function') {
-          pendingWrite.then(() => finish(true), () => finish(false));
-        }
-      } catch (_) {
-        finish(false);
-      }
-    });
-  }
-
-  async function notifyHistoryFallbackDurable(message) {
-    if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return false;
-    try {
-      const response = await chrome.runtime.sendMessage({
-        type: 'BATCH_HISTORY_FALLBACK_DURABLE',
-        batchId: message.batchId,
-        urlIndex: message.urlIndex,
-        attempt: message.attempt,
-        url: message.url || '',
-        result: message.result ?? 'success',
-        aiContent: message.aiContent || null,
-        errorCode: message.errorCode || null,
-        errorMessage: message.errorMessage || null,
-        historyRevision: message.history?.historyRevision || null
-      });
-      return response?.ok === true;
-    } catch (_) {
-      return false;
-    }
-  }
-
   async function confirmBatchHistoryDurably(message) {
     const versionedMessage = message?.history
       ? {
@@ -1023,40 +1034,33 @@
           history: ensureHistoryRevision(message.history)
         }
       : message;
-    let acknowledgement = null;
-    if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-      try {
-        acknowledgement = await chrome.runtime.sendMessage(versionedMessage);
-      } catch (_) {
-        acknowledgement = null;
-      }
-    }
+    const primary = await sendProvenBatchMessage(versionedMessage);
+    const acknowledgement = primary.response;
     const backgroundAcknowledged = isAcknowledgedBatchHistoryConfirmation(
       versionedMessage,
       acknowledgement
     );
-    let fallbackDurable = false;
-    let fallbackHandoffAcknowledged = false;
-    if (!backgroundAcknowledged) {
-      fallbackDurable = await persistHistoryPendingFallback(versionedMessage);
-      if (fallbackDurable) {
-        fallbackHandoffAcknowledged = await notifyHistoryFallbackDurable(
-          versionedMessage
-        );
-      }
+    if (backgroundAcknowledged) {
+      return { durable: true, acknowledgement };
     }
-    const durable = backgroundAcknowledged || fallbackDurable;
-    if (backgroundAcknowledged || fallbackHandoffAcknowledged) {
-      await clearBatchSubmitContext({
-        batchId: versionedMessage.batchId,
-        urlIndex: versionedMessage.urlIndex,
-        attempt: versionedMessage.attempt,
-        ...(versionedMessage.history?.historyRevision
-          ? { historyRevision: versionedMessage.history.historyRevision }
-          : {})
-      });
+    if (
+      primary.transportExhausted ||
+      primary.authorizationTerminal ||
+      acknowledgement?.historySaveStatus !== 'failed'
+    ) {
+      return { durable: false, acknowledgement };
     }
-    return { durable, acknowledgement };
+    const fallback = await sendProvenBatchMessage({
+      ...versionedMessage,
+      type: 'BATCH_HISTORY_PENDING_FALLBACK'
+    });
+    return {
+      durable: isAcknowledgedBatchHistoryConfirmation(
+        versionedMessage,
+        fallback.response
+      ),
+      acknowledgement
+    };
   }
 
   async function confirmRestoredBatchSubmit(ctx) {
@@ -4118,29 +4122,21 @@
       'illegal_site'
     );
 
-    await new Promise((resolve) => {
-      chrome.runtime.sendMessage({
-        type: 'BATCH_HANDLE_CONFIRM',
-        batchId,
-        urlIndex,
-        attempt,
-        url: url || location.href || '',
-        aiContent: '',
-        result: 'blocked_illegal',
-        errorCode: 'illegal_site',
-        errorMessage: reason
-      }).then((response) => {
-        console.log('[content] blocked_illegal BATCH_HANDLE_CONFIRM 响应:', response);
-        resolve(response);
-      }).catch((err) => {
-        if (err.message && err.message.includes('message channel closed')) {
-          console.log('[content] 消息通道已关闭（标签页可能已关闭），忽略错误');
-        } else {
-          console.warn('[content] blocked_illegal 发送消息失败:', err);
-        }
-        resolve(null);
-      });
+    const confirmation = await confirmBatchHistoryDurably({
+      type: 'BATCH_HANDLE_CONFIRM',
+      batchId,
+      urlIndex,
+      attempt,
+      url: url || location.href || '',
+      aiContent: '',
+      result: 'blocked_illegal',
+      errorCode: 'illegal_site',
+      errorMessage: reason
     });
+    console.log(
+      '[content] blocked_illegal BATCH_HANDLE_CONFIRM 响应:',
+      confirmation.acknowledgement
+    );
 
     setTimeout(() => {
       window.close();
@@ -4391,29 +4387,21 @@
           'no_comment_box'
         );
         // 使用 BATCH_HANDLE_CONFIRM 触发 background -> batch 的 BATCH_CONFIRMED 流程
-        await new Promise((resolve) => {
-          chrome.runtime.sendMessage({
-            type: 'BATCH_HANDLE_CONFIRM',
-            batchId,
-            urlIndex,
-            attempt,
-            url: url || '',
-            aiContent: '',
-            result: 'no_comment_box',
-            errorCode: 'no_comment_box',
-            errorMessage: '未找到评论框'
-          }).then((response) => {
-            console.log('[content] no_comment_box BATCH_HANDLE_CONFIRM 响应:', response);
-            resolve(response);
-          }).catch((err) => {
-            if (err.message && err.message.includes('message channel closed')) {
-              console.log('[content] 消息通道已关闭（标签页可能已关闭），忽略错误');
-            } else {
-              console.warn('[content] no_comment_box 发送消息失败:', err);
-            }
-            resolve(null);
-          });
+        const confirmation = await confirmBatchHistoryDurably({
+          type: 'BATCH_HANDLE_CONFIRM',
+          batchId,
+          urlIndex,
+          attempt,
+          url: url || '',
+          aiContent: '',
+          result: 'no_comment_box',
+          errorCode: 'no_comment_box',
+          errorMessage: '未找到评论框'
         });
+        console.log(
+          '[content] no_comment_box BATCH_HANDLE_CONFIRM 响应:',
+          confirmation.acknowledgement
+        );
         // 关闭当前标签页
         setTimeout(() => {
           window.close();
@@ -4544,21 +4532,17 @@
       'already_commented',
       null
     );
-    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
-      await new Promise((resolve) => {
-        chrome.runtime.sendMessage({
-          type: 'BATCH_HANDLE_CONFIRM',
-          batchId,
-          urlIndex,
-          attempt,
-          url: url || '',
-          aiContent: aiContent || '',
-          result: 'skipped',
-          errorCode: null,
-          errorMessage: 'already_commented'
-        }).then(resolve).catch(resolve);
-      });
-    }
+    await confirmBatchHistoryDurably({
+      type: 'BATCH_HANDLE_CONFIRM',
+      batchId,
+      urlIndex,
+      attempt,
+      url: url || '',
+      aiContent: aiContent || '',
+      result: 'skipped',
+      errorCode: null,
+      errorMessage: 'already_commented'
+    });
   }
 
   const MANUAL_REQUIRED_MESSAGE = '检测到验证码/反垃圾验证，请手动填写后提交';
@@ -4738,21 +4722,17 @@
       'submission_uncertain'
     );
 
-    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
-      await new Promise((resolve) => {
-        chrome.runtime.sendMessage({
-          type: 'BATCH_HANDLE_CONFIRM',
-          batchId,
-          urlIndex,
-          attempt,
-          url: url || '',
-          aiContent: aiContent || '',
-          result: 'manual_required',
-          errorCode: 'submission_uncertain',
-          errorMessage: MANUAL_REQUIRED_MESSAGE
-        }).then(resolve).catch(resolve);
-      });
-    }
+    await confirmBatchHistoryDurably({
+      type: 'BATCH_HANDLE_CONFIRM',
+      batchId,
+      urlIndex,
+      attempt,
+      url: url || '',
+      aiContent: aiContent || '',
+      result: 'manual_required',
+      errorCode: 'submission_uncertain',
+      errorMessage: MANUAL_REQUIRED_MESSAGE
+    });
 
     setTimeout(() => {
       window.close();
@@ -4773,7 +4753,7 @@
     errorCode
   ) {
     console.log('[content] writePendingResult >>>', { batchId, urlIndex, attempt, url, result, aiContentLen: aiContent ? aiContent.length : 0, errorMessage, errorCode });
-    const response = await chrome.runtime.sendMessage({
+    const delivery = await sendProvenBatchMessage({
       type: 'BATCH_PERSIST_PENDING_RESULT',
       batchId,
       urlIndex,
@@ -4784,8 +4764,17 @@
       errorMessage,
       errorCode
     });
+    const response = delivery.response;
     if (!response?.ok) {
-      throw new Error(response?.error || '批处理待确认结果保存失败');
+      const error = new Error(
+        delivery.transportExhausted
+          ? 'batch_transport_exhausted'
+          : response?.error || '批处理待确认结果保存失败'
+      );
+      error.code = delivery.transportExhausted
+        ? 'batch_transport_exhausted'
+        : response?.error;
+      throw error;
     }
     console.log('[content] writePendingResult <<< 写入完成');
   }
@@ -4812,85 +4801,20 @@
       errorCode
     };
 
-    // 主路径：background 先落盘 storage 再 sendResponse；页面跳转/关页前必须 await，否则 batch 收不到成功
-    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
-      try {
-        await new Promise((resolve, reject) => {
-          chrome.runtime.sendMessage(payload, (response) => {
-            if (chrome.runtime.lastError) {
-              const errMsg = chrome.runtime.lastError.message || '';
-              if (errMsg.includes('message channel closed')) {
-                console.log('[AutoComment] 消息通道已关闭（标签页可能已关闭），忽略错误');
-                resolve(null);
-              } else {
-                reject(new Error(errMsg));
-              }
-              return;
-            }
-            if (response && response.ok) {
-              resolve(response);
-            } else {
-              reject(new Error((response && response.error) || 'background 上报失败'));
-            }
-          });
-        });
-        return;
-      } catch (e) {
-        console.warn('[AutoComment] sendMessage 上报失败，尝试本地写入 storage:', e);
-      }
+    const delivery = await sendProvenBatchMessage(payload);
+    if (delivery.response?.ok === true) {
+      return delivery.response;
     }
-
-    // 兜底：extension 上下文异常时仍尽量写入本地，供 batch 页轮询
-    if (typeof chrome !== 'undefined' && chrome.storage) {
-      try {
-        if (!hasCompleteBatchResultIdentity(
-          batchId,
-          urlIndex,
-          attempt
-        )) return;
-        const data = await new Promise((resolve) => {
-          chrome.storage.local.get(['batchResults', 'batchReportedUrls'], (d) => resolve(d));
-        });
-        const results = Array.isArray(data.batchResults) ? data.batchResults : [];
-        const hasNewerAttempt = results.some((item) =>
-          item.batchId === batchId &&
-          item.urlIndex === urlIndex &&
-          Number.isInteger(item.attempt) &&
-          item.attempt > attempt
-        );
-        if (hasNewerAttempt) return;
-        const entry = {
-          batchId,
-          urlIndex,
-          attempt,
-          url: pageUrl || '',
-          result,
-          aiContent,
-          errorCode: errorCode || null,
-          errorMessage,
-          timestamp: Date.now()
-        };
-        const existingIndex = results.findIndex((item) =>
-          item.batchId === batchId &&
-          item.urlIndex === urlIndex &&
-          item.attempt === attempt
-        );
-        if (existingIndex >= 0) {
-          results[existingIndex] = { ...results[existingIndex], ...entry };
-        } else {
-          results.push(entry);
-        }
-        if (results.length > 100) results.shift();
-        const reported = Array.isArray(data.batchReportedUrls) ? data.batchReportedUrls : [];
-        const urlKey = `${batchId}:${urlIndex}:${attempt}`;
-        if (!reported.includes(urlKey)) {
-          reported.push(urlKey);
-          if (reported.length > 500) reported.shift();
-        }
-        await new Promise((resolve) => {
-          chrome.storage.local.set({ batchResults: results, batchReportedUrls: reported }, resolve);
-        });
-      } catch (_) {}
+    if (delivery.transportExhausted) {
+      return {
+        ok: false,
+        error: 'batch_transport_exhausted',
+        retryable: true
+      };
     }
+    return delivery.response || {
+      ok: false,
+      error: 'batch_report_rejected'
+    };
   }
 })();

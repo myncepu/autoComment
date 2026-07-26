@@ -34,7 +34,11 @@ const batchSubmitContextStore = createBatchSubmitContextStore(
   chrome.storage.local,
   { maxAgeMs: Number.POSITIVE_INFINITY }
 );
-installBatchSubmitContextListener(chrome, batchSubmitContextStore);
+installBatchSubmitContextListener(chrome, batchSubmitContextStore, {
+  runProofBoundTaskHook: (...args) => (
+    batchRuntimeController.runProofBoundTaskHook(...args)
+  )
+});
 
 let commentHistoryRepositoryPromise;
 
@@ -107,6 +111,74 @@ const commentHistoryRetention = installCommentHistoryRetention(chrome, {
  */
 async function persistBatchReport(message) {
   await batchResultStore.save(message);
+}
+
+function batchIngressError(code) {
+  const error = new Error(code);
+  error.code = code;
+  return error;
+}
+
+function submitContextMatches(context, message) {
+  return Boolean(
+    context &&
+    context.batchId === message.batchId &&
+    context.urlIndex === message.urlIndex &&
+    context.attempt === message.attempt
+  );
+}
+
+async function clearExactSubmitContext(message, sender) {
+  const result = message.result ?? 'success';
+  if (result !== 'success') return;
+  if (!Number.isInteger(sender?.tab?.id)) {
+    throw batchIngressError('missing_sender_tab');
+  }
+  let released = false;
+  try {
+    released = await batchSubmitContextStore.clearIfMatches(
+      sender.tab.id,
+      {
+        batchId: message.batchId,
+        urlIndex: message.urlIndex,
+        attempt: message.attempt,
+        historyRevision: message.history?.historyRevision
+      }
+    );
+    if (!released) {
+      released = await batchSubmitContextStore.get(sender.tab.id) === null;
+    }
+  } catch (_) {
+    console.warn('[background] Durable history saved but submit context cleanup deferred');
+  }
+  if (!released) {
+    throw batchIngressError('submit_context_not_released');
+  }
+}
+
+async function saveDurableHistory(message, sender) {
+  const {
+    historySaveStatus,
+    pendingCount: historyPendingCount
+  } = await commentHistoryService.saveConfirmedSuccess({
+    ...message,
+    result: message.result ?? 'success'
+  });
+  if (!isDurableBatchConfirmation({
+    ...message,
+    historySaveStatus,
+    historyPendingCount
+  })) {
+    throw batchIngressError('history_save_failed');
+  }
+  await clearExactSubmitContext(message, sender);
+  return {
+    historySaveStatus,
+    ...(Number.isInteger(historyPendingCount) ||
+      historyPendingCount === null
+      ? { historyPendingCount }
+      : {})
+  };
 }
 
 async function broadcastBatchConfirmed(
@@ -203,60 +275,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               errorMessage: message.errorMessage || null
             });
             console.log('[background] persistBatchReport 完成，准备发送 BATCH_CONFIRMED');
-
-            const {
-              historySaveStatus,
-              pendingCount: historyPendingCount
-            } = await commentHistoryService.saveConfirmedSuccess({
-              ...message,
-              result: message.result ?? 'success'
-            });
-            const confirmedMessage = {
-              ...message,
-              historySaveStatus,
-              historyPendingCount
-            };
-            if (!isDurableBatchConfirmation(confirmedMessage)) {
-              const error = new Error('history_save_failed');
-              error.code = 'history_save_failed';
-              throw error;
-            }
-            const result = message.result ?? 'success';
-            let submitContextReleased = result !== 'success';
-            if (result === 'success' && Number.isInteger(sender?.tab?.id)) {
-              try {
-                submitContextReleased =
-                  await batchSubmitContextStore.clearIfMatches(
-                    sender.tab.id,
-                    {
-                      batchId: message.batchId,
-                      urlIndex: message.urlIndex,
-                      attempt: message.attempt,
-                      historyRevision:
-                        message.history?.historyRevision
-                    }
-                  );
-                if (!submitContextReleased) {
-                  submitContextReleased =
-                    await batchSubmitContextStore.get(sender.tab.id) ===
-                      null;
-                }
-              } catch (_) {
-                console.warn('[background] Durable history saved but submit context cleanup deferred');
-              }
-            }
-            if (!submitContextReleased) {
-              const error = new Error('submit_context_not_released');
-              error.code = 'submit_context_not_released';
-              throw error;
-            }
-            return {
-              historySaveStatus,
-              ...(Number.isInteger(historyPendingCount) ||
-                historyPendingCount === null
-                ? { historyPendingCount }
-                : {})
-            };
+            return saveDurableHistory(message, sender);
           }
         });
         const {
@@ -291,46 +310,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-// content.js 已把精确历史写入不可变 pending 队列，可以安全释放对应窗口。
+// background 在 ownership-proven terminal hook 内保存精确历史并释放窗口。
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message && message.type === 'BATCH_HISTORY_FALLBACK_DURABLE') {
-    if (!Number.isInteger(sender?.tab?.id)) {
-      sendResponse({ ok: false, error: 'missing_sender_tab' });
-      return false;
-    }
+  if (message && message.type === 'BATCH_HISTORY_PENDING_FALLBACK') {
     (async () => {
       try {
-        let submitContextReleased = false;
-        submitContextReleased = await batchSubmitContextStore.clearIfMatches(
-          sender.tab.id,
-          {
-            batchId: message.batchId,
-            urlIndex: message.urlIndex,
-            attempt: message.attempt,
-            historyRevision: message.historyRevision
-          }
-        );
-        if (!submitContextReleased) {
-          sendResponse({
-            ok: false,
-            error: 'submit_context_not_released'
-          });
-          return;
-        }
-        await broadcastBatchConfirmed(message, {
-          historySaveStatus: 'queued',
-          historyPendingCount: null,
-          sourceTabId: sender.tab.id,
-          sender
+        const committed = await broadcastBatchConfirmed(message, {
+          sourceTabId: sender?.tab?.id,
+          sender,
+          terminalSideEffect: () => saveDurableHistory(message, sender)
         });
-        sendResponse({ ok: true });
+        sendResponse({
+          ok: true,
+          historySaveStatus: committed.historySaveStatus,
+          ...(Number.isInteger(committed.historyPendingCount) ||
+            committed.historyPendingCount === null
+            ? { historyPendingCount: committed.historyPendingCount }
+            : {})
+        });
       } catch (error) {
-        console.warn('[background] Fallback history handoff deferred');
         sendResponse({
           ok: false,
-          error: error?.message?.startsWith('checkpoint_write_failed:')
-            ? 'checkpoint_write_failed'
-            : 'submit_context_not_released'
+          error: error?.code || 'history_pending_fallback_failed'
         });
       }
     })();
@@ -343,11 +344,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message && message.type === 'BATCH_PERSIST_PENDING_RESULT') {
     (async () => {
       try {
-        await batchResultStore.save(message);
+        const response = await batchRuntimeController.runProofBoundTaskHook(
+          message,
+          sender,
+          () => batchResultStore.save(message)
+        );
+        if (!response.ok) {
+          sendResponse({
+            ok: false,
+            error: response.error
+          });
+          return;
+        }
         sendResponse({ ok: true });
       } catch (e) {
         console.error('[background] BATCH_PERSIST_PENDING_RESULT 错误:', e);
-        sendResponse({ ok: false, error: String(e) });
+        sendResponse({
+          ok: false,
+          error: e?.code || 'pending_result_write_failed'
+        });
       }
     })();
     return true;
@@ -360,31 +375,39 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     console.log('[background] 收到 BATCH_REPORT_RESULT >>>', { batchId: message.batchId, urlIndex: message.urlIndex, result: message.result, sender: sender.tab ? sender.tab.id : 'N/A', time: new Date().toISOString() });
     (async () => {
       try {
-        await persistBatchReport(message);
         const tabId = sender?.tab?.id;
-        const submitContext = Number.isInteger(tabId)
-          ? await batchSubmitContextStore.get(tabId)
-          : null;
-        const hasUnacknowledgedSubmission = Boolean(
-          message.result === 'fail'
-          && submitContext
-          && submitContext.batchId === message.batchId
-          && submitContext.urlIndex === message.urlIndex
-          && submitContext.attempt === message.attempt
-        );
-        if (hasUnacknowledgedSubmission) {
-          sendResponse({ ok: true, deferred: true });
-          return;
-        }
         await broadcastBatchConfirmed(message, {
           sourceTabId: tabId,
-          sender
+          sender,
+          async terminalSideEffect() {
+            const submitContext = Number.isInteger(tabId)
+              ? await batchSubmitContextStore.get(tabId)
+              : null;
+            if (
+              message.result === 'fail' &&
+              submitContextMatches(submitContext, message)
+            ) {
+              throw batchIngressError('submit_context_unresolved');
+            }
+            if (submitContext) {
+              throw batchIngressError('submit_context_not_released');
+            }
+            await persistBatchReport(message);
+            return saveDurableHistory(message, sender);
+          }
         });
         console.log('[background] BATCH_REPORT_RESULT <<< sendResponse({ok:true})');
         sendResponse({ ok: true });
       } catch (e) {
         console.error('[background] BATCH_REPORT_RESULT 错误:', e);
-        sendResponse({ ok: false, error: String(e) });
+        if (e?.code === 'submit_context_unresolved') {
+          sendResponse({ ok: true, deferred: true });
+          return;
+        }
+        sendResponse({
+          ok: false,
+          error: e?.code || 'batch_report_failed'
+        });
       }
     })();
     return true;

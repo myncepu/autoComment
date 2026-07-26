@@ -356,7 +356,15 @@ test('listener preserves unacknowledged context when its tab closes', async () =
       return { sealed: true, recovered: true };
     }
   };
-  installBatchSubmitContextListener(chromeApi, store);
+  installBatchSubmitContextListener(chromeApi, store, {
+    async runProofBoundTaskHook(_identity, _sender, hook) {
+      return {
+        ok: true,
+        changed: false,
+        sideEffect: await hook()
+      };
+    }
+  });
 
   const valid = await new Promise((resolve) => {
     listener(
@@ -495,4 +503,79 @@ test('listener rejects a matched clear without a complete attempt identity', asy
     error: 'invalid_submit_context_match'
   });
   assert.equal(clearCalls, 0);
+});
+
+test('submit-context mutations use the proof-bound task hook before storage', async () => {
+  let listener;
+  const saved = [];
+  const cleared = [];
+  const proofCalls = [];
+  const chromeApi = {
+    runtime: {
+      id: 'extension-id',
+      onMessage: { addListener(fn) { listener = fn; } }
+    }
+  };
+  const store = {
+    async save(tabId, context) {
+      saved.push({ tabId, context });
+    },
+    async clearIfMatches(tabId, match) {
+      cleared.push({ tabId, match });
+      return true;
+    }
+  };
+  installBatchSubmitContextListener(chromeApi, store, {
+    async runProofBoundTaskHook(identity, sender, hook, options) {
+      proofCalls.push({ identity, sender, options });
+      if (sender.tab.id !== 42) {
+        return { ok: false, error: 'stale_worker_tab' };
+      }
+      await hook();
+      return { ok: true, changed: false };
+    }
+  });
+  const identity = {
+    batchId: 'batch-proof',
+    urlIndex: 4,
+    attempt: 2
+  };
+  async function dispatch(message, tabId) {
+    return new Promise((resolve) => {
+      listener(
+        message,
+        { id: 'extension-id', tab: { id: tabId } },
+        resolve
+      );
+    });
+  }
+
+  assert.deepEqual(await dispatch({
+    type: 'BATCH_SAVE_SUBMIT_CONTEXT',
+    context: identity
+  }, 999), {
+    ok: false,
+    error: 'stale_worker_tab'
+  });
+  assert.deepEqual(await dispatch({
+    type: 'BATCH_CLEAR_SUBMIT_CONTEXT',
+    match: identity
+  }, 999), {
+    ok: false,
+    error: 'stale_worker_tab'
+  });
+  assert.deepEqual(saved, []);
+  assert.deepEqual(cleared, []);
+
+  assert.deepEqual(await dispatch({
+    type: 'BATCH_SAVE_SUBMIT_CONTEXT',
+    context: identity
+  }, 42), { ok: true });
+  assert.deepEqual(await dispatch({
+    type: 'BATCH_CLEAR_SUBMIT_CONTEXT',
+    match: identity
+  }, 42), { ok: true });
+  assert.deepEqual(saved, [{ tabId: 42, context: identity }]);
+  assert.deepEqual(cleared, [{ tabId: 42, match: identity }]);
+  assert.equal(proofCalls.length, 4);
 });

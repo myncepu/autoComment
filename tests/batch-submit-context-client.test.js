@@ -28,7 +28,7 @@ function loadClient(responses = {}) {
   return { client: window.AutoCommentBatchSubmitContext, messages };
 }
 
-test('saves, restores, and clears through background messages', async () => {
+test('saves, restores, and clears an exact context through background messages', async () => {
   const restored = {
     batchId: 'a',
     urlIndex: 2,
@@ -49,12 +49,19 @@ test('saves, restores, and clears through background messages', async () => {
 
   await client.save(restored);
   assert.deepEqual(await client.restore(), restored);
-  await client.clear();
+  await client.clear({
+    batchId: restored.batchId,
+    urlIndex: restored.urlIndex,
+    attempt: restored.attempt
+  });
 
   assert.deepEqual(JSON.parse(JSON.stringify(messages)), [
     { type: 'BATCH_SAVE_SUBMIT_CONTEXT', context: restored },
     { type: 'BATCH_GET_SUBMIT_CONTEXT' },
-    { type: 'BATCH_CLEAR_SUBMIT_CONTEXT' }
+    {
+      type: 'BATCH_CLEAR_SUBMIT_CONTEXT',
+      match: { batchId: 'a', urlIndex: 2, attempt: 1 }
+    }
   ]);
 });
 
@@ -80,41 +87,42 @@ test('clears only the submit context matching the acknowledged history revision'
   }]);
 });
 
-test('acknowledged confirmation clears the persisted submit context', async () => {
+test('acknowledged confirmation relies on the background transaction to clear context', async () => {
   const { client, messages } = loadClient({
     BATCH_HANDLE_CONFIRM: { ok: true }
   });
 
   await client.confirm({ batchId: 'a', urlIndex: 2, attempt: 1 });
 
-  assert.deepEqual(JSON.parse(JSON.stringify(messages)), [
-    { type: 'BATCH_HANDLE_CONFIRM', batchId: 'a', urlIndex: 2, attempt: 1 },
-    {
-      type: 'BATCH_CLEAR_SUBMIT_CONTEXT',
-      match: { batchId: 'a', urlIndex: 2, attempt: 1 }
-    }
-  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{
+    type: 'BATCH_HANDLE_CONFIRM',
+    batchId: 'a',
+    urlIndex: 2,
+    attempt: 1
+  }]);
 });
 
-test('confirmation clear carries the acknowledged attempt identity', async () => {
+test('confirmation carries the exact attempt without a second clear message', async () => {
   const { client, messages } = loadClient({
     BATCH_HANDLE_CONFIRM: { ok: true }
   });
 
   await client.confirm({ batchId: 'a', urlIndex: 2, attempt: 3 });
 
-  assert.deepEqual(JSON.parse(JSON.stringify(messages)), [
-    {
-      type: 'BATCH_HANDLE_CONFIRM',
-      batchId: 'a',
-      urlIndex: 2,
-      attempt: 3
-    },
-    {
-      type: 'BATCH_CLEAR_SUBMIT_CONTEXT',
-      match: { batchId: 'a', urlIndex: 2, attempt: 3 }
-    }
-  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{
+    type: 'BATCH_HANDLE_CONFIRM',
+    batchId: 'a',
+    urlIndex: 2,
+    attempt: 3
+  }]);
+});
+
+test('unscoped submit-context clear is rejected before transport', async () => {
+  const { client, messages } = loadClient();
+
+  await assert.rejects(client.clear(), /exact submit context identity required/);
+
+  assert.deepEqual(messages, []);
 });
 
 test('negative confirmation preserves the persisted submit context', async () => {

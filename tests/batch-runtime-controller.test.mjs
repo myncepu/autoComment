@@ -2133,6 +2133,17 @@ test('terminal side effects require exact ownership proof and failure keeps the 
   assert.equal(hookCalls, 0);
   assert.deepEqual(harness.removedTabs, []);
 
+  const page = await harness.controller.markTerminal(
+    message,
+    batchPageSender(),
+    hook
+  );
+
+  assert.equal(page.ok, false);
+  assert.equal(page.error, 'stale_worker_tab');
+  assert.equal(hookCalls, 0);
+  assert.deepEqual(harness.removedTabs, []);
+
   const failed = await harness.controller.markTerminal(
     message,
     {
@@ -2202,6 +2213,172 @@ test('terminal side effect hook is idempotent across a close retry', async () =>
     historySaveStatus: 'saved'
   });
   assert.equal(second.checkpoint.results.length, 1);
+});
+
+test('proof-bound task hook mutates only an exact live active or submitting worker', async () => {
+  for (const state of ['active', 'submitting']) {
+    const harness = createHarness();
+    await harness.controller.handleMessage(startMessage(1));
+    await harness.controller.handleMessage({
+      type: 'BATCH_TASK_ACTIVE',
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      tabId: 11,
+      windowId: 21
+    });
+    const sender = {
+      id: 'extension-id',
+      tab: { id: 11, windowId: 21 },
+      url: 'https://example.test/0'
+    };
+    if (state === 'submitting') {
+      const submitting = await harness.controller.handleMessage({
+        type: 'BATCH_TASK_SUBMITTING',
+        batchId: 'batch-1',
+        urlIndex: 0,
+        attempt: 1
+      }, sender);
+      assert.equal(submitting.ok, true);
+    }
+    let hookCalls = 0;
+
+    const response = await harness.controller.runProofBoundTaskHook(
+      {
+        batchId: 'batch-1',
+        urlIndex: 0,
+        attempt: 1
+      },
+      sender,
+      async ({ task }) => {
+        hookCalls += 1;
+        return { observedState: task.state };
+      }
+    );
+
+    assert.equal(response.ok, true);
+    assert.equal(response.changed, false);
+    assert.equal(response.checkpoint.tasks['0'].state, state);
+    assert.deepEqual(response.sideEffect, { observedState: state });
+    assert.equal(hookCalls, 1);
+    assert.deepEqual(harness.removedTabs, []);
+    assert.equal(harness.data.batchRuntimeCheckpoint.results.length, 0);
+  }
+});
+
+test('proof-bound task hook rejects unowned identity and retains ownership on failure', async () => {
+  let hookCalls = 0;
+  const hook = async () => {
+    hookCalls += 1;
+    const error = new Error('pending result unavailable');
+    error.code = 'pending_result_write_failed';
+    throw error;
+  };
+  const message = {
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1
+  };
+  const sender = {
+    id: 'extension-id',
+    tab: { id: 11, windowId: 21 },
+    url: 'https://example.test/0'
+  };
+
+  const empty = createHarness();
+  const noCheckpoint = await empty.controller.runProofBoundTaskHook(
+    message,
+    sender,
+    hook
+  );
+  assert.equal(noCheckpoint.error, 'checkpoint_not_found');
+
+  const queued = createHarness();
+  await queued.controller.handleMessage(startMessage(1));
+  const queuedResponse = await queued.controller.runProofBoundTaskHook(
+    message,
+    sender,
+    hook
+  );
+  assert.equal(queuedResponse.error, 'invalid_transition');
+
+  const active = createHarness();
+  await active.controller.handleMessage(startMessage(1));
+  await active.controller.handleMessage({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 11,
+    windowId: 21
+  });
+  const wrongTab = await active.controller.runProofBoundTaskHook(
+    message,
+    {
+      ...sender,
+      tab: { id: 999, windowId: 21 }
+    },
+    hook
+  );
+  const staleAttempt = await active.controller.runProofBoundTaskHook(
+    { ...message, attempt: 2 },
+    sender,
+    hook
+  );
+  active.sessionArea.getFailure = new Error('session unavailable');
+  const unverified = await active.controller.runProofBoundTaskHook(
+    message,
+    sender,
+    hook
+  );
+  active.sessionArea.getFailure = null;
+  const liveTab = active.tabStore.get(11);
+  active.tabStore.delete(11);
+  const missingLiveTab = await active.controller.runProofBoundTaskHook(
+    message,
+    sender,
+    hook
+  );
+  active.tabStore.set(11, liveTab);
+  const hookFailed = await active.controller.runProofBoundTaskHook(
+    message,
+    sender,
+    hook
+  );
+
+  assert.equal(wrongTab.error, 'stale_worker_tab');
+  assert.equal(staleAttempt.error, 'stale_attempt');
+  assert.equal(unverified.error, 'batch_ownership_unverified');
+  assert.equal(missingLiveTab.error, 'batch_ownership_unverified');
+  assert.equal(hookFailed.error, 'pending_result_write_failed');
+  assert.equal(hookCalls, 1);
+  assert.equal(active.data.batchRuntimeCheckpoint.tasks['0'].state, 'active');
+  assert.equal(active.data.batchRuntimeCheckpoint.tasks['0'].tabId, 11);
+  assert.deepEqual(active.removedTabs, []);
+
+  const terminal = createHarness();
+  await terminal.controller.handleMessage(startMessage(1));
+  await terminal.controller.handleMessage({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 11,
+    windowId: 21
+  });
+  const completed = await terminal.controller.markTerminal(
+    { ...message, result: 'success' },
+    sender
+  );
+  assert.equal(completed.ok, true);
+  const terminalResponse =
+    await terminal.controller.runProofBoundTaskHook(
+      message,
+      sender,
+      hook
+    );
+  assert.equal(terminalResponse.error, 'task_already_terminal');
+  assert.equal(hookCalls, 1);
 });
 
 test('content terminal reporting proves and closes the worker before clearing ownership', async () => {
