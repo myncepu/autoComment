@@ -24,7 +24,7 @@
     "type": "module"
   },
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'none'; default-src 'self'; base-uri 'none'"
+    "extension_pages": "script-src 'self'; object-src 'none'; default-src 'self'; connect-src https: http:; base-uri 'none'"
   },
   "web_accessible_resources": [
     {
