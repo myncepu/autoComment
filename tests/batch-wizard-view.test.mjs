@@ -187,6 +187,146 @@ test('requires assignment snapshots and keeps credentials out of emitted drafts'
   assert.doesNotMatch(JSON.stringify(drafts.at(-1)), /secret|password|apiKey/);
 });
 
+test('redacts sensitive CSV columns and strips unknown row secrets from every emitted draft', () => {
+  const document = wizardDocument();
+  const emitted = [];
+  const preflight = {
+    headers: ['原URL', 'apiKey'],
+    summary: {
+      raw: 2,
+      eligible: 1,
+      duplicate: 1,
+      blocked: 0,
+      invalid: 0,
+      included: 1
+    },
+    rows: [
+      {
+        rowNumber: 2,
+        originalRow: ['https://target.test/1', 'csv-secret-sentinel'],
+        url: 'https://target.test/1',
+        sourceDomain: 'target.test',
+        status: 'eligible',
+        reasonCode: 'eligible',
+        reason: 'URL 和域名有效',
+        included: true,
+        overridable: false,
+        apiKey: 'row-secret-sentinel'
+      },
+      {
+        rowNumber: 3,
+        originalRow: ['https://target.test/1', 'duplicate-secret-sentinel'],
+        url: 'https://target.test/1',
+        sourceDomain: 'target.test',
+        status: 'duplicate',
+        reasonCode: 'duplicate_url',
+        reason: '重复 URL',
+        included: false,
+        overridable: true,
+        credential: 'credential-secret-sentinel'
+      }
+    ]
+  };
+  const view = createBatchWizardView(document, {
+    onDraftChange(draft) {
+      emitted.push(draft);
+    },
+    onStart(draft) {
+      emitted.push(draft);
+    }
+  });
+
+  view.open(validDraftFixture({ step: 2, preflight }));
+  click(document, '[data-preflight-row="3"] button');
+  view.render(validDraftFixture({ step: 4, preflight }));
+  click(document, '[data-action="wizard-start"]');
+
+  assert.equal(emitted.length, 2);
+  for (const draft of emitted) {
+    assert.deepEqual(
+      draft.preflight.rows.map((row) => row.originalRow[1]),
+      ['[REDACTED]', '[REDACTED]']
+    );
+    assert.equal(Object.hasOwn(draft.preflight.rows[0], 'apiKey'), false);
+    assert.equal(Object.hasOwn(draft.preflight.rows[1], 'credential'), false);
+    assert.doesNotMatch(JSON.stringify(draft), /secret-sentinel/);
+  }
+});
+
+test('normalizes malicious restored inclusion flags and recalculates the summary', () => {
+  const document = wizardDocument();
+  const starts = [];
+  const preflight = {
+    headers: ['原URL'],
+    summary: {
+      raw: 99,
+      eligible: 0,
+      duplicate: 0,
+      blocked: 0,
+      invalid: 0,
+      included: 99
+    },
+    rows: [
+      {
+        rowNumber: 2,
+        url: 'https://target.test/ok',
+        status: 'eligible',
+        reason: 'URL 和域名有效',
+        included: false,
+        overridable: true
+      },
+      {
+        rowNumber: 3,
+        url: 'https://blocked.test/',
+        status: 'blocked',
+        reason: '命中非法站点规则',
+        included: true,
+        overridable: true
+      },
+      {
+        rowNumber: 4,
+        url: null,
+        status: 'invalid',
+        reason: 'URL 无效',
+        included: true,
+        overridable: true
+      }
+    ]
+  };
+  const view = createBatchWizardView(document, {
+    onStart(draft) {
+      starts.push(draft);
+    }
+  });
+
+  view.open(validDraftFixture({ step: 2, preflight }));
+  assert.equal(document.querySelector('[data-preflight-row="2"]').dataset.included, 'true');
+  assert.equal(document.querySelector('[data-preflight-row="3"]').dataset.included, 'false');
+  assert.equal(document.querySelector('[data-preflight-row="4"]').dataset.included, 'false');
+  assert.match(document.querySelector('[data-preflight-summary]').textContent, /共 3 行；将处理 1 行/);
+  assert.equal(document.querySelector('[data-preflight-row="3"] button'), null);
+  assert.equal(document.querySelector('[data-preflight-row="4"] button'), null);
+
+  view.render(validDraftFixture({ step: 4, preflight }));
+  click(document, '[data-action="wizard-start"]');
+  assert.equal(starts.length, 1);
+  assert.equal(starts[0].preflight.summary.included, 1);
+  assert.equal(starts[0].preflight.summary.blocked, 1);
+  assert.equal(starts[0].preflight.summary.invalid, 1);
+  assert.deepEqual(
+    starts[0].preflight.rows.map(({ status, included, overridable }) => ({
+      status,
+      included,
+      overridable
+    })),
+    [
+      { status: 'eligible', included: true, overridable: false },
+      { status: 'blocked', included: false, overridable: false },
+      { status: 'invalid', included: false, overridable: false }
+    ]
+  );
+});
+
 test('renders native file import states and only lets duplicate rows be overridden', () => {
   const document = wizardDocument();
   const parsedFiles = [];
@@ -316,6 +456,12 @@ test('traps focus while open, restores the trigger, and cancels on Escape', () =
   }));
   assert.equal(document.activeElement, document.querySelector('[data-action="wizard-next"]'));
 
+  document.activeElement.dispatchEvent(new document.defaultView.KeyboardEvent('keydown', {
+    bubbles: true,
+    key: 'Tab'
+  }));
+  assert.equal(document.activeElement, close);
+
   document.querySelector('[data-batch-wizard]').dispatchEvent(
     new document.defaultView.KeyboardEvent('keydown', {
       bubbles: true,
@@ -325,5 +471,63 @@ test('traps focus while open, restores the trigger, and cancels on Escape', () =
   );
   assert.equal(cancelCount, 1);
   assert.equal(document.querySelector('[data-batch-wizard]').hasAttribute('open'), false);
+  assert.equal(document.activeElement, trigger);
+});
+
+test('keeps focus inside the dialog across step, field, and duplicate rerenders', () => {
+  const document = wizardDocument();
+  const view = createBatchWizardView(document);
+  view.open(validDraftFixture());
+
+  const identity = document.querySelector('[name="identityId"]');
+  identity.focus();
+  change(document, '[name="identityId"]', 'updated-identity');
+  assert.equal(document.activeElement, document.querySelector('[name="identityId"]'));
+  assert.equal(document.querySelector('[data-batch-wizard]').contains(document.activeElement), true);
+
+  click(document, '[data-action="wizard-next"]');
+  assert.equal(document.activeElement, document.querySelector('#batch-wizard-step-2'));
+  assert.equal(document.querySelector('[data-batch-wizard]').contains(document.activeElement), true);
+
+  view.render(validDraftFixture({
+    step: 2,
+    preflight: preflightWithExcludedRows()
+  }));
+  const duplicate = document.querySelector('[data-preflight-row="7"] button');
+  duplicate.focus();
+  click(document, '[data-preflight-row="7"] button');
+  assert.equal(
+    document.activeElement,
+    document.querySelector('[data-preflight-row="7"] button')
+  );
+  assert.equal(document.querySelector('[data-batch-wizard]').contains(document.activeElement), true);
+});
+
+test('fallback dialog isolates background focus and restores prior attributes on close', () => {
+  const document = wizardDocument();
+  const trigger = document.querySelector('[data-action="new-batch"]');
+  const background = document.createElement('button');
+  background.textContent = '背景操作';
+  background.setAttribute('aria-hidden', 'false');
+  document.body.insertBefore(background, document.querySelector('[data-batch-wizard]'));
+  trigger.focus();
+  const view = createBatchWizardView(document);
+
+  view.open(validDraftFixture());
+  assert.equal(background.hasAttribute('inert'), true);
+  assert.equal(background.getAttribute('aria-hidden'), 'true');
+  background.focus();
+  assert.equal(document.querySelector('[data-batch-wizard]').contains(document.activeElement), true);
+
+  view.close();
+  assert.equal(background.hasAttribute('inert'), false);
+  assert.equal(background.getAttribute('aria-hidden'), 'false');
+  assert.equal(document.activeElement, trigger);
+
+  view.open(validDraftFixture());
+  assert.equal(background.hasAttribute('inert'), true);
+  view.destroy();
+  assert.equal(background.hasAttribute('inert'), false);
+  assert.equal(background.getAttribute('aria-hidden'), 'false');
   assert.equal(document.activeElement, trigger);
 });
