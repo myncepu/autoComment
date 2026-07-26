@@ -33,7 +33,8 @@ used the local fixture server created by
 - automation Chromium loaded the unpacked worktree's MV3 service worker and
   opened `batch.html`;
 - no password appeared in serialized acceptance output;
-- no non-loopback request or third-party submission was observed.
+- request auditing covered both browser contexts; no non-loopback web request
+  or third-party submission was observed.
 
 Google Chrome 150 cannot be used for command-line unpacked-extension loading:
 Chrome removed `--load-extension` from branded builds starting in Chrome 137.
@@ -74,10 +75,18 @@ pause, stop and batch completion. The scan remains a recovery fallback.
 
 Deadline finalization also has bounded submit-context sealing. If that boundary
 does not answer, the task becomes `manual_required`, closes its proven worker
-tab and replenishes capacity. A timed-out tab-creation reservation is released
-before the underlying create promise settles; any late-created tab waits for
-terminal persistence and is then cleaned up. Dedicated never-settling seal and
-late-create tests cover both liveness paths.
+tab and replenishes capacity. At the page-runtime layer, a timed-out
+tab-creation reservation is released before the underlying create promise
+settles; any late-created activity waits for terminal persistence and is then
+cleaned up. Dedicated never-settling seal and late-create tests cover both
+liveness paths.
+
+The background controller independently bounds proof-bound storage hooks and
+`chrome.tabs.create`, so a hung Chrome/storage operation cannot retain the
+controller's serialized checkpoint queue. The opening request ID remains the
+durable ownership token; queued terminal persistence clears that exact token,
+and a late `tabs.create` completion closes only the exact tab returned by its
+own operation.
 
 The result row reads elapsed time from the terminal result once one exists.
 Only active/submitting tasks derive elapsed time from the current clock.

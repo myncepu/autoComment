@@ -13,6 +13,9 @@ import {
   createBatchSessionJournal
 } from '../lib/batch-session-journal.mjs';
 import {
+  installBatchSubmitContextListener
+} from '../lib/batch-submit-context-store.mjs';
+import {
   validateBatchRuntimeCheckpoint
 } from '../lib/batch-runtime-checkpoint.mjs';
 import {
@@ -56,7 +59,9 @@ function createHarness({
   prepareStartStoragePatch,
   cleanupPreparedStart,
   currentConfigRevision = 7,
-  loadRecentSuccessUrls = async () => []
+  loadRecentSuccessUrls = async () => [],
+  proofSideEffectTimeoutMs,
+  tabCreateTimeoutMs
 } = {}) {
   const data = {};
   const setCalls = [];
@@ -239,6 +244,12 @@ function createHarness({
     loadRecentSuccessUrls,
     prepareStartStoragePatch,
     cleanupPreparedStart,
+    ...(proofSideEffectTimeoutMs === undefined
+      ? {}
+      : { proofSideEffectTimeoutMs }),
+    ...(tabCreateTimeoutMs === undefined
+      ? {}
+      : { tabCreateTimeoutMs }),
     now: () => {
       clock += 100;
       return clock;
@@ -1292,6 +1303,60 @@ test('a create already in background finishes checkpointing before pagehide clea
   );
   assert.deepEqual(harness.removedTabs, [91]);
   assert.equal(harness.data.batchRuntimeCheckpoint.tasks['0'].state, 'queued');
+});
+
+test('a never-settling background tab create cannot block queued terminal persistence', async () => {
+  const harness = createHarness({ tabCreateTimeoutMs: 5 });
+  installBatchRuntimeController(harness.chrome, harness.controller);
+  await harness.controller.handleMessage(startMessage(1));
+  const createGate = deferred();
+  harness.chrome.tabs.createGate = createGate;
+  const creating = sendInstalledMessage(
+    harness.listeners.messages[0],
+    {
+      type: 'BATCH_CREATE_WORKER_TAB',
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      requestId: 'batch-1:0:1'
+    },
+    batchPageSender()
+  );
+  await waitFor(
+    () => harness.createdTabs.length === 1,
+    'background tab creation'
+  );
+
+  const terminal = sendInstalledMessage(
+    harness.listeners.messages[0],
+    {
+      type: 'BATCH_TASK_TERMINAL',
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      result: {
+        result: 'manual_required',
+        errorCode: 'task_timeout',
+        errorMessage: 'timed out'
+      }
+    },
+    batchPageSender()
+  );
+  const [createResponse, terminalResponse] = await Promise.race([
+    Promise.all([creating, terminal]),
+    new Promise((resolve) => setTimeout(() => resolve(['hung']), 100))
+  ]);
+
+  assert.equal(createResponse.ok, false);
+  assert.equal(createResponse.error, 'tab_create_timeout');
+  assert.equal(terminalResponse.ok, true);
+  assert.equal(terminalResponse.checkpoint.tasks['0'].state, 'terminal');
+
+  createGate.resolve();
+  await waitFor(
+    () => harness.removedTabs.includes(91),
+    'late created tab cleanup'
+  );
 });
 
 test('pagehide serialized before create rejects the create with zero orphan tabs', async () => {
@@ -3089,6 +3154,67 @@ test('submit-context recovery target requires the exact owner page and worker ta
   assert.equal(hookCalls, 1);
   assert.deepEqual(harness.removedTabs, []);
   assert.equal(harness.data.batchRuntimeCheckpoint.tasks['0'].state, 'active');
+});
+
+test('a never-settling submit-context hook cannot block terminal persistence', async () => {
+  const harness = createHarness({ proofSideEffectTimeoutMs: 5 });
+  await harness.controller.handleMessage(startMessage(1));
+  await harness.controller.handleMessage({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 11,
+    windowId: 21
+  });
+  const task = harness.data.batchRuntimeCheckpoint.tasks['0'];
+  const identity = {
+    batchId: 'batch-1',
+    taskId: task.taskId,
+    urlIndex: 0,
+    profileId: task.profileId,
+    promotionSiteId: task.promotionSiteId,
+    attempt: 1
+  };
+  installBatchSubmitContextListener(harness.chrome, {
+    sealAndRecover: () => new Promise(() => {})
+  }, {
+    runProofBoundTaskHook: (...args) => (
+      harness.controller.runProofBoundTaskHook(...args)
+    ),
+    runOwnerPageRecoveryHook: (...args) => (
+      harness.controller.runOwnerPageRecoveryHook(...args)
+    )
+  });
+  const recovery = sendInstalledMessage(
+    harness.listeners.messages.at(-1),
+    {
+      type: 'BATCH_RECOVER_SUBMIT_CONTEXT',
+      tabId: 11,
+      ...identity,
+      reason: 'timeout'
+    },
+    batchPageSender()
+  );
+  const terminal = harness.controller.handleMessage({
+    type: 'BATCH_TASK_TERMINAL',
+    ...identity,
+    result: {
+      result: 'manual_required',
+      errorCode: 'submission_uncertain',
+      errorMessage: 'submit context recovery timed out'
+    }
+  }, batchPageSender());
+  const [recoveryResponse, terminalResponse] = await Promise.race([
+    Promise.all([recovery, terminal]),
+    new Promise((resolve) => setTimeout(() => resolve(['hung']), 100))
+  ]);
+
+  assert.equal(recoveryResponse.ok, false);
+  assert.equal(recoveryResponse.error, 'proof_side_effect_timeout');
+  assert.equal(terminalResponse.ok, true);
+  assert.equal(terminalResponse.checkpoint.tasks['0'].state, 'terminal');
+  assert.deepEqual(harness.removedTabs, [11]);
 });
 
 test('content terminal reporting proves and closes the worker before clearing ownership', async () => {

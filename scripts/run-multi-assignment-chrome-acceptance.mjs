@@ -175,6 +175,7 @@ async function main() {
   );
   let context;
   const requestedUrls = [];
+  const extensionRequestedUrls = [];
   const pageErrors = [];
   const outcomes = [];
   let chromeVersion = '';
@@ -453,6 +454,10 @@ async function main() {
       ]
       }
     );
+    context.on(
+      'request',
+      (request) => extensionRequestedUrls.push(request.url())
+    );
     let serviceWorker = context.serviceWorkers().find(
       (worker) => worker.url().startsWith('chrome-extension://')
     );
@@ -479,6 +484,15 @@ async function main() {
     );
     await smokePage.close();
     extensionSmoke = 'automation-chromium-service-worker-and-batch-page';
+    for (const requestedUrl of extensionRequestedUrls) {
+      const parsed = new URL(requestedUrl);
+      assert.equal(
+        ['127.0.0.1', 'localhost'].includes(parsed.hostname) ||
+          ['chrome-extension:', 'data:'].includes(parsed.protocol),
+        true,
+        `non-local extension request: ${requestedUrl}`
+      );
+    }
 
     const result = {
       ok: true,
@@ -496,6 +510,7 @@ async function main() {
       submittingInterruption,
       refreshRecovery: 'confirmed',
       extensionSmoke,
+      thirdPartyRequests: 0,
       thirdPartySubmissions: 0
     };
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
