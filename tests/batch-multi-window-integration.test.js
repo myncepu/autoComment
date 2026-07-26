@@ -235,12 +235,13 @@ function createTabsApi() {
   };
 }
 
-async function waitFor(predicate, label) {
-  for (let attempt = 0; attempt < 80; attempt += 1) {
+async function waitFor(predicate, label, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() <= deadline) {
     if (predicate()) return;
-    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setTimeout(resolve, 10));
   }
-  assert.fail(`Timed out waiting for ${label}`);
+  assert.fail(`Timed out waiting for ${label} after ${timeoutMs}ms`);
 }
 
 function click(document, selector) {
