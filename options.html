@@ -3,6 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <title>Auto Register Filler 设置</title>
+    <link rel="stylesheet" href="styles/tokens.css" />
+    <link rel="stylesheet" href="styles/app-shell.css" />
     <style>
       body {
         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu,
@@ -166,33 +168,37 @@
     </style>
   </head>
   <body>
+    <header data-app-shell></header>
     <div class="container">
       <h1>Auto Register Filler 设置</h1>
       <div class="subtitle">
         在这里配置自有模型 API、推广网站信息和自动填表信息。
       </div>
 
-      <div style="margin-bottom: 20px; padding: 14px 16px; background: #eff6ff; border-radius: 10px; border: 1px solid #bfdbfe;">
-        <div style="font-size: 14px; font-weight: 700; color: #1d4ed8;">自有模型 API</div>
-        <div class="hint" style="margin: 6px 0 12px;">默认使用 OpenRouter，可填写任意 OpenRouter 模型 ID 或其他 OpenAI 兼容地址。</div>
-        <label for="llmApiBaseUrl">API Base URL</label>
-        <input id="llmApiBaseUrl" type="url" value="https://openrouter.ai/api/v1" autocomplete="off" />
-        <label for="llmApiKey" style="margin-top: 10px;">API Key</label>
-        <input id="llmApiKey" type="password" autocomplete="off" placeholder="sk-or-v1-..." />
-        <label for="llmModel" style="margin-top: 10px;">模型 ID</label>
-        <input id="llmModel" type="text" value="qwen/qwen-plus" autocomplete="off" />
-        <div class="row">
-          <button id="saveLlmConfigBtn" class="btn btn-primary" type="button">保存模型配置</button>
-          <button id="testLlmConnectionBtn" class="btn btn-secondary" type="button">测试连接</button>
-          <span id="llmStatus" class="status"></span>
+      <section id="identity" style="margin-top: 20px" aria-labelledby="identity-heading">
+        <h2 id="identity-heading" data-section-heading tabindex="-1">身份配置</h2>
+        <div class="hint">这些信息会用于注册和评论表单。</div>
+        <div style="margin-top: 16px">
+          <label class="required-label" style="font-weight: 500; font-size: 12px">自动填表的个人信息（注册 / 评论表单）</label>
+          <div style="display: flex; gap: 12px; margin-top: 6px; flex-wrap: wrap">
+            <div style="flex: 1 1 160px">
+              <input type="text" id="userName" class="required-field" placeholder="姓名 / 昵称，例如：CloudHu" autocomplete="off" required />
+              <div class="required-hint">请填写姓名或昵称。</div>
+            </div>
+            <div style="flex: 1 1 180px">
+              <input type="email" id="userEmail" class="required-field" placeholder="邮箱，例如：you@test.com" autocomplete="off" required />
+              <div class="required-hint">请填写有效邮箱，例如：you@test.com</div>
+            </div>
+            <div style="flex: 1 1 180px">
+              <input type="password" id="userPassword" placeholder="登录/注册时常用的密码（可选）" autocomplete="new-password" />
+            </div>
+          </div>
         </div>
-      </div>
+      </section>
 
-      <div style="margin-top: 20px">
-        <label>自动填表的信息</label>
-        <div class="hint">
-          - 这里配置的内容会用于评论表单中的 Website / URL / Name / Email 等信息
-        </div>
+      <section id="promotion" style="margin-top: 20px" aria-labelledby="promotion-heading">
+        <h2 id="promotion-heading" data-section-heading tabindex="-1">推广网站</h2>
+        <div class="hint">这里配置的内容会用于评论表单中的 Website / URL。</div>
         <div style="margin-top: 10px">
           <label for="websiteUrl" class="required-label" style="font-weight: 500; font-size: 12px">你的网站链接</label>
           <input
@@ -227,58 +233,40 @@
           ></textarea>
           <div class="required-hint">请填写你的网站内容，这会用于生成评论文案。</div>
         </div>
+      </section>
 
-        <div style="margin-top: 16px">
-          <label class="required-label" style="font-weight: 500; font-size: 12px">自动填表的个人信息（注册 / 评论表单）</label>
-          <div style="display: flex; gap: 12px; margin-top: 6px; flex-wrap: wrap">
-            <div style="flex: 1 1 160px">
-              <input
-                type="text"
-                id="userName"
-                class="required-field"
-                placeholder="姓名 / 昵称，例如：CloudHu"
-                autocomplete="off"
-                required
-              />
-              <div class="required-hint">请填写姓名或昵称。</div>
-            </div>
-            <div style="flex: 1 1 180px">
-              <input
-                type="email"
-                id="userEmail"
-                class="required-field"
-                placeholder="邮箱，例如：you@test.com"
-                autocomplete="off"
-                required
-              />
-              <div class="required-hint">请填写有效邮箱，例如：you@test.com</div>
-            </div>
-            <div style="flex: 1 1 180px">
-              <input
-                type="password"
-                id="userPassword"
-                placeholder="登录/注册时常用的密码（可选）"
-                autocomplete="new-password"
-              />
-            </div>
+      <section id="settings" style="margin-top: 20px" aria-labelledby="settings-heading">
+        <h2 id="settings-heading" data-section-heading tabindex="-1">设置</h2>
+        <div style="margin-bottom: 20px; padding: 14px 16px; background: #eff6ff; border-radius: 10px; border: 1px solid #bfdbfe;">
+          <div style="font-size: 14px; font-weight: 700; color: #1d4ed8;">自有模型 API</div>
+          <div class="hint" style="margin: 6px 0 12px;">默认使用 OpenRouter，可填写任意 OpenRouter 模型 ID 或其他 OpenAI 兼容地址。</div>
+          <label for="llmApiBaseUrl">API Base URL</label>
+          <input id="llmApiBaseUrl" type="url" value="https://openrouter.ai/api/v1" autocomplete="off" />
+          <label for="llmApiKey" style="margin-top: 10px;">API Key</label>
+          <input id="llmApiKey" type="password" autocomplete="off" placeholder="sk-or-v1-..." />
+          <label for="llmModel" style="margin-top: 10px;">模型 ID</label>
+          <input id="llmModel" type="text" value="qwen/qwen-plus" autocomplete="off" />
+          <div class="row">
+            <button id="saveLlmConfigBtn" class="btn btn-primary" type="button">保存模型配置</button>
+            <button id="testLlmConnectionBtn" class="btn btn-secondary" type="button">测试连接</button>
+            <span id="llmStatus" class="status"></span>
           </div>
         </div>
-      </div>
 
-      <div class="row">
-        <button id="saveSettingsBtn" class="btn btn-primary">保存</button>
-        <span id="settingsStatus" class="status">已保存</span>
-      </div>
-
-      <div style="margin-top: 20px; padding: 14px 16px; background: #f8fafc; border-radius: 10px; border: 1px solid #e5e7eb;">
-        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
-          <div>
-            <div style="font-size: 13px; font-weight: 700; color: #374151;">导出外链浮动按钮</div>
-            <div class="hint">控制页面左下角“导出外链”按钮是否显示。</div>
-          </div>
-          <button id="toggleExportOutlinksFloatingBtn" class="btn btn-secondary" type="button">加载中...</button>
+        <div class="row">
+          <button id="saveSettingsBtn" class="btn btn-primary">保存身份与推广网站</button>
+          <span id="settingsStatus" class="status">已保存</span>
         </div>
-      </div>
+
+        <div style="margin-top: 20px; padding: 14px 16px; background: #f8fafc; border-radius: 10px; border: 1px solid #e5e7eb;">
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
+            <div>
+              <div style="font-size: 13px; font-weight: 700; color: #374151;">导出外链浮动按钮</div>
+              <div class="hint">控制页面左下角“导出外链”按钮是否显示。</div>
+            </div>
+            <button id="toggleExportOutlinksFloatingBtn" class="btn btn-secondary" type="button">加载中...</button>
+          </div>
+        </div>
       
       <!-- 批量外链评论入口 -->
       <div style="margin-top: 24px; padding: 14px 16px; background: #eff6ff; border-radius: 10px; border: 1px solid #bfdbfe;">
@@ -298,20 +286,21 @@
       </div>
 
       <!-- 配置导入/导出 -->
-      <div style="margin-top: 20px; padding: 14px 16px; background: #fffbeb; border-radius: 10px; border: 1px solid #fde68a;">
-        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
-          <span style="font-size: 13px; font-weight: 700; color: #b45309;">配置备份与恢复</span>
+        <div style="margin-top: 20px; padding: 14px 16px; background: #fffbeb; border-radius: 10px; border: 1px solid #fde68a;">
+          <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
+            <span style="font-size: 13px; font-weight: 700; color: #b45309;">配置备份与恢复</span>
+          </div>
+          <div class="hint" style="margin-bottom: 10px;">
+            - 每次重新部署扩展后，配置会重置。请使用"导出配置"将当前设置保存为文件。
+          </div>
+          <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+            <button id="exportConfigBtn" class="btn btn-secondary">导出配置</button>
+            <button id="importConfigBtn" class="btn btn-secondary">导入配置</button>
+            <input type="file" id="importConfigFileInput" accept=".json" style="display: none;" />
+            <span id="importExportStatus" class="status" style="color: #b45309;"></span>
+          </div>
         </div>
-        <div class="hint" style="margin-bottom: 10px;">
-          - 每次重新部署扩展后，配置会重置。请使用"导出配置"将当前设置保存为文件。
-        </div>
-        <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
-          <button id="exportConfigBtn" class="btn btn-secondary">导出配置</button>
-          <button id="importConfigBtn" class="btn btn-secondary">导入配置</button>
-          <input type="file" id="importConfigFileInput" accept=".json" style="display: none;" />
-          <span id="importExportStatus" class="status" style="color: #b45309;"></span>
-        </div>
-      </div>
+      </section>
     </div>
 
     <script type="module" src="options.js"></script>

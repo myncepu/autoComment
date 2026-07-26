@@ -10,9 +10,13 @@ const projectRoot = path.resolve(dirname, '..');
 const csvModuleUrl = pathToFileURL(
   path.join(projectRoot, 'lib/comment-history-csv.mjs')
 ).href;
+const appShellModuleUrl = pathToFileURL(
+  path.join(projectRoot, 'lib/app-shell.mjs')
+).href;
 const historyModuleSource = fs
   .readFileSync(path.join(projectRoot, 'history.js'), 'utf8')
-  .replace("'./lib/comment-history-csv.mjs'", `'${csvModuleUrl}'`);
+  .replace("'./lib/comment-history-csv.mjs'", `'${csvModuleUrl}'`)
+  .replace("'./lib/app-shell.mjs'", `'${appShellModuleUrl}'`);
 const {
   advancePagination,
   buildAnchorsRequest,

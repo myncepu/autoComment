@@ -1,0 +1,18 @@
+:root {
+  --app-color-canvas: #f5f5f7;
+  --app-color-surface: #ffffff;
+  --app-color-text: #1f2937;
+  --app-color-muted: #6b7280;
+  --app-color-border: #e5e7eb;
+  --app-color-accent: #1d4ed8;
+  --app-color-accent-subtle: #eff6ff;
+  --app-focus-ring: 0 0 0 3px rgba(37, 99, 235, 0.34);
+  --app-radius-sm: 8px;
+  --app-radius-md: 12px;
+  --app-space-2: 8px;
+  --app-space-3: 12px;
+  --app-space-4: 16px;
+  --app-space-6: 24px;
+  --app-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu,
+    Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+}

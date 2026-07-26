@@ -4,6 +4,8 @@ import {
   loadLlmConfig
 } from './lib/llm-config.mjs';
 import { saveOptionsModelConfig, testOptionsModelConfig } from './lib/llm-options-controller.mjs';
+import { bootAppShell } from './lib/app-shell.mjs';
+import { focusOptionsSection } from './lib/options-section-navigation.mjs';
 
 const LEGACY_SKILL_TEMPLATE_STORAGE_KEY = 'qwen_skill_template';
 const WEBSITE_URL_STORAGE_KEY = 'promotion_website_url';
@@ -39,6 +41,11 @@ const modelDependencies = {
 };
 
 document.addEventListener('DOMContentLoaded', async () => {
+  bootAppShell(document, { currentUrl: window.location.href });
+  const focusCurrentSection = () => focusOptionsSection(document, window.location.hash);
+  focusCurrentSection();
+  window.addEventListener('hashchange', focusCurrentSection);
+
   const websiteUrlInput = document.getElementById('websiteUrl');
   const websiteContentInput = document.getElementById('websiteContent');
   const userNameInput = document.getElementById('userName');
