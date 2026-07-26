@@ -253,6 +253,94 @@ test('redacts sensitive CSV columns and strips unknown row secrets from every em
   }
 });
 
+test('sanitizes restored header labels, URLs, and reasons across DOM and callbacks', () => {
+  const document = wizardDocument();
+  const emitted = [];
+  const sensitiveUrl = 'https://target.test/post?view=keep'
+    + '&token=url-query-sentinel'
+    + '#route?access_token=hash-token-sentinel&panel=comments';
+  const ordinaryUrl = 'https://ordinary.test/post?view=thread#comments';
+  const preflight = {
+    headers: ['原URL', 'apiKey header-label-sentinel', '普通列'],
+    rows: [
+      {
+        rowNumber: 2,
+        originalRow: [
+          sensitiveUrl,
+          'sensitive-column-sentinel',
+          'ordinary cell'
+        ],
+        url: sensitiveUrl,
+        sourceDomain: 'target.test',
+        status: 'eligible',
+        reasonCode: 'eligible',
+        reason: 'Provider Bearer reason-bearer-sentinel; '
+          + 'token=reason-token-sentinel; '
+          + '{"client_secret":"reason-json-sentinel","message":"ordinary detail"}',
+        included: true,
+        overridable: false
+      },
+      {
+        rowNumber: 3,
+        originalRow: [ordinaryUrl, 'another-column-sentinel', 'keep cell'],
+        url: ordinaryUrl,
+        sourceDomain: 'ordinary.test',
+        status: 'duplicate',
+        reasonCode: 'duplicate_url',
+        reason: '普通重复说明保持不变',
+        included: false,
+        overridable: true
+      }
+    ],
+    summary: {
+      raw: 2,
+      eligible: 1,
+      duplicate: 1,
+      blocked: 0,
+      invalid: 0,
+      included: 1
+    }
+  };
+  const view = createBatchWizardView(document, {
+    onDraftChange(draft) {
+      emitted.push(draft);
+    },
+    onStart(draft) {
+      emitted.push(draft);
+    }
+  });
+
+  view.open(validDraftFixture({ step: 2, preflight }));
+  const wizardText = document.querySelector('[data-batch-wizard]').textContent;
+  assert.doesNotMatch(wizardText, /sentinel/);
+  assert.match(wizardText, /view=keep/);
+  assert.match(wizardText, /ordinary detail/);
+  assert.match(wizardText, /普通重复说明保持不变/);
+  click(document, '[data-preflight-row="3"] button');
+  view.render(validDraftFixture({ step: 4, preflight }));
+  click(document, '[data-action="wizard-start"]');
+
+  assert.equal(emitted.length, 2);
+  for (const draft of emitted) {
+    assert.doesNotMatch(JSON.stringify(draft), /sentinel/);
+    assert.deepEqual(draft.preflight.headers, ['原URL', '敏感列', '普通列']);
+    assert.equal(
+      draft.preflight.rows[0].url,
+      'https://target.test/post?view=keep&token=REDACTED'
+        + '#route?access_token=REDACTED&panel=comments'
+    );
+    assert.equal(draft.preflight.rows[0].originalRow[0], draft.preflight.rows[0].url);
+    assert.equal(draft.preflight.rows[0].originalRow[1], '[REDACTED]');
+    assert.match(draft.preflight.rows[0].reason, /Bearer REDACTED/);
+    assert.match(draft.preflight.rows[0].reason, /token=REDACTED/);
+    assert.match(draft.preflight.rows[0].reason, /client_secret":"REDACTED"/);
+    assert.match(draft.preflight.rows[0].reason, /ordinary detail/);
+    assert.equal(draft.preflight.rows[1].url, ordinaryUrl);
+    assert.equal(draft.preflight.rows[1].reason, '普通重复说明保持不变');
+    assert.equal(draft.preflight.rows[1].originalRow[2], 'keep cell');
+  }
+});
+
 test('normalizes malicious restored inclusion flags and recalculates the summary', () => {
   const document = wizardDocument();
   const starts = [];

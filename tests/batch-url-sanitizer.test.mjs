@@ -70,6 +70,18 @@ test('redacts auth schemes, JSON secrets, and hash-router tokens', () => {
   assert.match(sanitized, /panel=comments/);
 });
 
+test('redacts standalone authorization schemes in restored diagnostic text', () => {
+  const sanitized = sanitizeDiagnosticText(
+    'Provider rejected Bearer standalone-bearer-sentinel; '
+      + 'retry used Basic standalone-basic-sentinel; ordinary detail stays'
+  );
+
+  assert.equal(
+    sanitized,
+    'Provider rejected Bearer REDACTED; retry used Basic REDACTED; ordinary detail stays'
+  );
+});
+
 test('redacts escaped JSON auth strings without changing ordinary JSON text', () => {
   const sensitive = JSON.stringify({
     authorization: 'Bearer abc\\"stillsecret',
