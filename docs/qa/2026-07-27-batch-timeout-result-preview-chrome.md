@@ -98,7 +98,11 @@ recovery scan cannot clear the tombstone. After a controller restart, the first
 and all later page/service-worker recovery scans retain a no-tab tombstone;
 elapsed time is never treated as ownership proof. Only an authoritative create
 rejection or a full browser-startup recovery with no exact pending tab may
-clear it.
+clear it. The opening reservation records `createCompletionUnknown` before
+calling `tabs.create`, so this protection also covers the interval before a
+terminal task result turns the reservation into `cleanupOnly`. Checkpoints
+written by the retired quiescence implementation migrate by removing only a
+valid null/finite `cleanupObservedAt` field; malformed values still fail closed.
 
 The result row reads elapsed time from the terminal result once one exists.
 Only active/submitting tasks derive elapsed time from the current clock.

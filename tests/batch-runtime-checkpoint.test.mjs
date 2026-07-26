@@ -323,6 +323,67 @@ test('migrates only canonical legacy reservations that are missing batchId', () 
   assert.deepEqual(migratedUnsafe.checkpoint.openingReservations, {});
 });
 
+test('migrates the retired cleanup observation from ordinary and cleanup-only reservations', () => {
+  const running = applyBatchRuntimeEvent(createCheckpoint(1), {
+    type: 'session_started',
+    batchId: 'batch-1'
+  }, 1100).checkpoint;
+  running.openingReservations = {
+    'batch-1:0:1': {
+      requestId: 'batch-1:0:1',
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      windowId: 42,
+      ownerPageTabId: 70,
+      ownershipEpoch: 'epoch-test',
+      tabId: null,
+      cleanupOnly: false,
+      updatedAt: 1200
+    }
+  };
+  const terminal = applyBatchRuntimeEvent(running, {
+    type: 'task_terminal',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    retainOpeningRequestId: 'batch-1:0:1',
+    result: {
+      result: 'manual_required',
+      errorCode: 'task_timeout',
+      errorMessage: 'timed out'
+    }
+  }, 1300).checkpoint;
+  const ordinary = structuredClone(running);
+  ordinary.openingReservations['batch-1:0:1'].cleanupObservedAt = null;
+  terminal.openingReservations['batch-1:0:1'].cleanupObservedAt = 1250;
+
+  for (const legacy of [ordinary, terminal]) {
+    const migrated = migrateBatchRuntimeCheckpoint(legacy, 1400);
+    assert.equal(migrated.ok, true, JSON.stringify(migrated));
+    assert.equal(migrated.changed, true);
+    const reservation =
+      migrated.checkpoint.openingReservations['batch-1:0:1'];
+    assert.equal(
+      Object.hasOwn(reservation, 'cleanupObservedAt'),
+      false
+    );
+    assert.equal(reservation.createCompletionUnknown, false);
+    assert.equal(
+      validateBatchRuntimeCheckpoint(migrated.checkpoint).ok,
+      true
+    );
+  }
+
+  const malformed = structuredClone(ordinary);
+  malformed.openingReservations['batch-1:0:1'].cleanupObservedAt =
+    'not-a-timestamp';
+  assert.equal(
+    migrateBatchRuntimeCheckpoint(malformed, 1400).ok,
+    false
+  );
+});
+
 test('migrates valid legacy ACTIVE ownership to canonical identity and rejects incomplete ownership', () => {
   const legacy = createCheckpoint(1);
   Object.assign(legacy.tasks['0'], {

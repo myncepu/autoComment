@@ -1125,6 +1125,7 @@ test('pre-create session journal failure creates and navigates zero tabs', async
       ownershipEpoch: 'epoch-test',
       tabId: null,
       cleanupOnly: false,
+      createCompletionUnknown: true,
       updatedAt: 1400
     }
   );
@@ -1398,6 +1399,74 @@ test('a never-settling background tab create cannot block queued terminal persis
     ),
     false
   );
+});
+
+test('ordinary recovery before terminal persistence retains an unresolved create', async () => {
+  const harness = createHarness({ tabCreateTimeoutMs: 5 });
+  installBatchRuntimeController(harness.chrome, harness.controller);
+  await harness.controller.handleMessage(startMessage(1));
+  const createGate = deferred();
+  harness.chrome.tabs.createGate = createGate;
+
+  const createResponse = await sendInstalledMessage(
+    harness.listeners.messages[0],
+    {
+      type: 'BATCH_CREATE_WORKER_TAB',
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      requestId: 'batch-1:0:1'
+    },
+    batchPageSender()
+  );
+  assert.equal(createResponse.ok, false);
+  assert.equal(createResponse.error, 'tab_create_timeout');
+
+  const recovery = await harness.controller.loadForPage();
+  assert.equal(recovery.ok, false);
+  assert.equal(
+    Object.hasOwn(
+      recovery.checkpoint.openingReservations,
+      'batch-1:0:1'
+    ),
+    true
+  );
+  assert.equal(
+    recovery.checkpoint.openingReservations['batch-1:0:1']
+      .createCompletionUnknown,
+    true
+  );
+  const restarted = createBatchRuntimeController({
+    storageArea: harness.chrome.storage.local,
+    sessionJournal: createBatchSessionJournal(
+      harness.chrome.storage.session
+    ),
+    power: harness.chrome.power,
+    tabs: harness.chrome.tabs,
+    runtime: harness.chrome.runtime,
+    generateOwnershipEpoch: () => 'epoch-restarted',
+    now: () => 9000
+  });
+  const restartedRecovery = await restarted.loadForPage();
+  assert.equal(restartedRecovery.ok, false);
+  assert.equal(
+    restartedRecovery.checkpoint.openingReservations['batch-1:0:1']
+      .createCompletionUnknown,
+    true
+  );
+
+  createGate.resolve();
+  await waitFor(
+    () => harness.removedTabs.includes(91),
+    'pre-terminal late-created tab cleanup'
+  );
+  await waitFor(
+    () => Object.keys(
+      harness.data.batchRuntimeCheckpoint.openingReservations
+    ).length === 0,
+    'pre-terminal opening reservation cleanup'
+  );
+  assert.equal(harness.tabStore.has(91), false);
 });
 
 test('a late-create close failure keeps durable proof for startup recovery', async () => {
