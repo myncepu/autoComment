@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
 import test from 'node:test';
 
 import {
   createAutoSubmitLoadPlan
 } from './helpers/auto-submit-load-plan.mjs';
+import {
+  closeBrowserContextWithin
+} from './helpers/browser-cleanup.mjs';
 
 function counts(values) {
   return Object.fromEntries(
@@ -73,3 +77,40 @@ test('rejects a topology that does not provide exactly six blog origins', () => 
   );
 });
 
+test('exposes a local-only Chrome runner for thirty automatic submissions', async () => {
+  const runnerUrl = new URL(
+    '../scripts/run-auto-submit-load-chrome-acceptance.mjs',
+    import.meta.url
+  );
+  const packageUrl = new URL('../package.json', import.meta.url);
+  const [runner, packageDocument] = await Promise.all([
+    fs.readFile(runnerUrl, 'utf8'),
+    fs.readFile(packageUrl, 'utf8').then(JSON.parse)
+  ]);
+
+  assert.equal(
+    packageDocument.scripts['test:chrome:auto-submit-30'],
+    'node scripts/run-auto-submit-load-chrome-acceptance.mjs'
+  );
+  assert.match(runner, /createAutoSubmitLoadPlan/);
+  assert.match(runner, /createFixtureServer/);
+  assert.match(runner, /content\.js/);
+  assert.match(runner, /thirdPartyRequests:\s*0/);
+  assert.match(runner, /thirdPartySubmissions:\s*0/);
+  assert.doesNotMatch(runner, /https:\/\/(?!example\.invalid)/);
+});
+
+test('browser cleanup remains live when context.close never settles', async () => {
+  const never = new Promise(() => {});
+  const timedOut = await closeBrowserContextWithin(
+    { close: () => never },
+    1
+  );
+  const closed = await closeBrowserContextWithin(
+    { close: async () => {} },
+    100
+  );
+
+  assert.equal(timedOut, 'timeout');
+  assert.equal(closed, 'closed');
+});
