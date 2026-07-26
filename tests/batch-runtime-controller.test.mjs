@@ -60,7 +60,6 @@ function createHarness({
   cleanupPreparedStart,
   currentConfigRevision = 7,
   loadRecentSuccessUrls = async () => [],
-  proofSideEffectTimeoutMs,
   tabCreateTimeoutMs
 } = {}) {
   const data = {};
@@ -244,9 +243,6 @@ function createHarness({
     loadRecentSuccessUrls,
     prepareStartStoragePatch,
     cleanupPreparedStart,
-    ...(proofSideEffectTimeoutMs === undefined
-      ? {}
-      : { proofSideEffectTimeoutMs }),
     ...(tabCreateTimeoutMs === undefined
       ? {}
       : { tabCreateTimeoutMs }),
@@ -1128,6 +1124,7 @@ test('pre-create session journal failure creates and navigates zero tabs', async
       ownerPageTabId: 70,
       ownershipEpoch: 'epoch-test',
       tabId: null,
+      cleanupOnly: false,
       updatedAt: 1400
     }
   );
@@ -1349,13 +1346,183 @@ test('a never-settling background tab create cannot block queued terminal persis
 
   assert.equal(createResponse.ok, false);
   assert.equal(createResponse.error, 'tab_create_timeout');
-  assert.equal(terminalResponse.ok, true);
+  assert.equal(
+    terminalResponse.ok,
+    true,
+    JSON.stringify(terminalResponse)
+  );
   assert.equal(terminalResponse.checkpoint.tasks['0'].state, 'terminal');
+  assert.equal(
+    terminalResponse.checkpoint.openingReservations['batch-1:0:1']
+      .cleanupOnly,
+    true
+  );
+  assert.equal(
+    harness.sessionData['batchWorkerOwnershipV1:batch-1:0:1']
+      .ownershipEpoch,
+    'epoch-test'
+  );
 
   createGate.resolve();
   await waitFor(
     () => harness.removedTabs.includes(91),
     'late created tab cleanup'
+  );
+  await waitFor(
+    () => Object.keys(
+      harness.data.batchRuntimeCheckpoint.openingReservations
+    ).length === 0,
+    'durable late-create tombstone cleanup'
+  );
+  assert.equal(
+    Object.hasOwn(
+      harness.sessionData,
+      'batchWorkerOwnershipV1:batch-1:0:1'
+    ),
+    false
+  );
+});
+
+test('a late-create close failure keeps durable proof for startup recovery', async () => {
+  const harness = createHarness({ tabCreateTimeoutMs: 5 });
+  installBatchRuntimeController(harness.chrome, harness.controller);
+  await harness.controller.handleMessage(startMessage(1));
+  const createGate = deferred();
+  harness.chrome.tabs.createGate = createGate;
+  const creating = sendInstalledMessage(
+    harness.listeners.messages[0],
+    {
+      type: 'BATCH_CREATE_WORKER_TAB',
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      requestId: 'batch-1:0:1'
+    },
+    batchPageSender()
+  );
+  await waitFor(
+    () => harness.createdTabs.length === 1,
+    'background tab creation'
+  );
+  const terminal = sendInstalledMessage(
+    harness.listeners.messages[0],
+    {
+      type: 'BATCH_TASK_TERMINAL',
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      result: {
+        result: 'manual_required',
+        errorCode: 'task_timeout',
+        errorMessage: 'timed out'
+      }
+    },
+    batchPageSender()
+  );
+  await Promise.all([creating, terminal]);
+
+  harness.chrome.tabs.removeFailure = new Error('tabs unavailable');
+  createGate.resolve();
+  await waitFor(
+    () => harness.data.batchRuntimeCheckpoint.status === 'paused_recovery',
+    'late cleanup recovery checkpoint'
+  );
+  const reservation =
+    harness.data.batchRuntimeCheckpoint
+      .openingReservations['batch-1:0:1'];
+  assert.equal(reservation.cleanupOnly, true);
+  assert.equal(reservation.tabId, 91);
+  assert.equal(
+    harness.sessionData['batchWorkerOwnershipV1:batch-1:0:1'].tabId,
+    91
+  );
+
+  harness.chrome.tabs.removeFailure = null;
+  const recovered = await harness.controller.loadForPage();
+  assert.equal(recovered.ok, true);
+  assert.deepEqual(recovered.checkpoint.openingReservations, {});
+  assert.equal(harness.tabStore.has(91), false);
+  assert.equal(
+    Object.hasOwn(
+      harness.sessionData,
+      'batchWorkerOwnershipV1:batch-1:0:1'
+    ),
+    false
+  );
+});
+
+test('a cleanup tombstone survives controller restart before tab creation settles', async () => {
+  const harness = createHarness({ tabCreateTimeoutMs: 5 });
+  installBatchRuntimeController(harness.chrome, harness.controller);
+  await harness.controller.handleMessage(startMessage(1));
+  harness.chrome.tabs.createGate = deferred();
+  const creating = sendInstalledMessage(
+    harness.listeners.messages[0],
+    {
+      type: 'BATCH_CREATE_WORKER_TAB',
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      requestId: 'batch-1:0:1'
+    },
+    batchPageSender()
+  );
+  await waitFor(
+    () => harness.createdTabs.length === 1,
+    'background tab creation'
+  );
+  const terminal = sendInstalledMessage(
+    harness.listeners.messages[0],
+    {
+      type: 'BATCH_TASK_TERMINAL',
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      result: {
+        result: 'manual_required',
+        errorCode: 'task_timeout',
+        errorMessage: 'timed out'
+      }
+    },
+    batchPageSender()
+  );
+  await Promise.all([creating, terminal]);
+  assert.equal(
+    harness.data.batchRuntimeCheckpoint
+      .openingReservations['batch-1:0:1'].cleanupOnly,
+    true
+  );
+
+  harness.tabStore.set(123, {
+    id: 123,
+    windowId: 42,
+    openerTabId: 70,
+    url:
+      'chrome-extension://extension-id/worker-pending.html#' +
+      'batch-1%3A0%3A1'
+  });
+  const restarted = createBatchRuntimeController({
+    storageArea: harness.chrome.storage.local,
+    sessionJournal: createBatchSessionJournal(
+      harness.chrome.storage.session
+    ),
+    power: harness.chrome.power,
+    tabs: harness.chrome.tabs,
+    runtime: harness.chrome.runtime,
+    generateOwnershipEpoch: () => 'epoch-restarted',
+    now: () => 9000
+  });
+
+  const recovered = await restarted.loadForPage();
+  assert.equal(recovered.ok, true);
+  assert.deepEqual(recovered.checkpoint.openingReservations, {});
+  assert.equal(harness.tabStore.has(123), false);
+  assert.equal(
+    Object.hasOwn(
+      harness.sessionData,
+      'batchWorkerOwnershipV1:batch-1:0:1'
+    ),
+    false
   );
 });
 
@@ -3157,7 +3324,7 @@ test('submit-context recovery target requires the exact owner page and worker ta
 });
 
 test('a never-settling submit-context hook cannot block terminal persistence', async () => {
-  const harness = createHarness({ proofSideEffectTimeoutMs: 5 });
+  const harness = createHarness();
   await harness.controller.handleMessage(startMessage(1));
   await harness.controller.handleMessage({
     type: 'BATCH_TASK_ACTIVE',
@@ -3205,16 +3372,19 @@ test('a never-settling submit-context hook cannot block terminal persistence', a
       errorMessage: 'submit context recovery timed out'
     }
   }, batchPageSender());
-  const [recoveryResponse, terminalResponse] = await Promise.race([
-    Promise.all([recovery, terminal]),
-    new Promise((resolve) => setTimeout(() => resolve(['hung']), 100))
+  const terminalResponse = await Promise.race([
+    terminal,
+    new Promise((resolve) => setTimeout(() => resolve('hung'), 100))
+  ]);
+  const recoveryState = await Promise.race([
+    recovery.then(() => 'settled'),
+    new Promise((resolve) => setTimeout(() => resolve('pending'), 10))
   ]);
 
-  assert.equal(recoveryResponse.ok, false);
-  assert.equal(recoveryResponse.error, 'proof_side_effect_timeout');
   assert.equal(terminalResponse.ok, true);
   assert.equal(terminalResponse.checkpoint.tasks['0'].state, 'terminal');
   assert.deepEqual(harness.removedTabs, [11]);
+  assert.equal(recoveryState, 'pending');
 });
 
 test('content terminal reporting proves and closes the worker before clearing ownership', async () => {

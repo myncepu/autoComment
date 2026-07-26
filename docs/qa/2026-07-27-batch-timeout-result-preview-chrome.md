@@ -33,8 +33,12 @@ used the local fixture server created by
 - automation Chromium loaded the unpacked worktree's MV3 service worker and
   opened `batch.html`;
 - no password appeared in serialized acceptance output;
-- request auditing covered both browser contexts; no non-loopback web request
-  or third-party submission was observed.
+- the installed-Chrome context was audited for its full lifetime and the
+  automation-Chromium context was audited after launch before `batch.html`
+  opened; no non-loopback web request was observed in those scopes and no
+  third-party submission occurred. Extension-startup traffic before Playwright
+  returned the second context is outside the request-listener scope; both
+  contexts launched with background networking disabled.
 
 Google Chrome 150 cannot be used for command-line unpacked-extension loading:
 Chrome removed `--load-extension` from branded builds starting in Chrome 137.
@@ -81,12 +85,14 @@ settles; any late-created activity waits for terminal persistence and is then
 cleaned up. Dedicated never-settling seal and late-create tests cover both
 liveness paths.
 
-The background controller independently bounds proof-bound storage hooks and
-`chrome.tabs.create`, so a hung Chrome/storage operation cannot retain the
-controller's serialized checkpoint queue. The opening request ID remains the
-durable ownership token; queued terminal persistence clears that exact token,
-and a late `tabs.create` completion closes only the exact tab returned by its
-own operation.
+The background controller runs submit-context recovery sealing outside its
+serialized checkpoint queue, while ordinary save/clear/result hooks remain
+serialized and are never abandoned after a client-side timeout. It separately
+bounds `chrome.tabs.create`. A timed-out opening request becomes a durable
+cleanup-only tombstone when its task terminalizes; the tombstone and exact
+session journal remain until a live tab is proven by request URL, opener,
+window, tab ID and ownership epoch and removal succeeds. A close failure is
+persisted as recovery state and converges on the next startup/page recovery.
 
 The result row reads elapsed time from the terminal result once one exists.
 Only active/submitting tasks derive elapsed time from the current clock.

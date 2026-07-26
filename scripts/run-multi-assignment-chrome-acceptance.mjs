@@ -510,7 +510,11 @@ async function main() {
       submittingInterruption,
       refreshRecovery: 'confirmed',
       extensionSmoke,
-      thirdPartyRequests: 0,
+      requestAudit: {
+        installedChrome: 'context-lifetime',
+        extensionChromium: 'post-launch-page-lifetime',
+        observedThirdPartyRequests: 0
+      },
       thirdPartySubmissions: 0
     };
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
