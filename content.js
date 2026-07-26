@@ -6,13 +6,18 @@
   const DEFAULT_USERNAME = '';
 
   async function fillInputs() {
+    const allInputs = Array.from(document.querySelectorAll('input'));
+    const allTextareas = Array.from(document.querySelectorAll('textarea'));
+    const hasPasswordInput = allInputs.some(
+      (input) => (input.type || '').toLowerCase() === 'password'
+    );
     const WEBSITE = await getWebsiteUrl();
-    const userProfile = await getUserProfile();
+    const userProfile = await getUserProfile({
+      includePassword: hasPasswordInput
+    });
     const EMAIL = userProfile.email;
     const USERNAME = userProfile.name;
     const PASSWORD = userProfile.password;
-    const allInputs = Array.from(document.querySelectorAll('input'));
-    const allTextareas = Array.from(document.querySelectorAll('textarea'));
 
     // 填邮箱（全局优先填第一个看起来像 Email 的输入框）
     const emailCandidates = allInputs.filter((input) => {
@@ -361,7 +366,6 @@
   const WEBSITE_CONTENT_STORAGE_KEY = 'promotion_website_content';
   const USER_NAME_STORAGE_KEY = 'auto_fill_user_name';
   const USER_EMAIL_STORAGE_KEY = 'auto_fill_user_email';
-  const USER_PASSWORD_STORAGE_KEY = 'auto_fill_user_password';
   const PROMPT_FIELD_VALUES_STORAGE_KEY = 'auto_fill_prompt_field_values';
   const SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY = 'show_export_outlinks_floating_button';
 
@@ -388,6 +392,12 @@
 
   function getCurrentDomain() {
     return extractDomain(window.location.href);
+  }
+
+  function getGenerationCacheKey() {
+    const taskKey =
+      globalThis.AutoCommentBatchTaskConfig?.cacheKey?.();
+    return taskKey ? `batch:${taskKey}` : getCurrentDomain();
   }
 
   // 最近一次 AI 生成的推广文案（用于页面自动填充 & 浮动窗口回显）
@@ -442,9 +452,37 @@
     return entry ? String(entry[1] || '').trim() : '';
   }
 
+  let manualDefaultTaskConfigPromise = null;
+
+  function getManualDefaultTaskConfig() {
+    if (!manualDefaultTaskConfigPromise) {
+      manualDefaultTaskConfigPromise =
+        globalThis.AutoCommentBatchTaskConfig.loadManualDefault({
+          async getConfig() {
+            const response = await chrome.runtime.sendMessage({
+              type: 'BATCH_GET_MANUAL_DEFAULT_CONFIG'
+            });
+            if (!response?.ok) {
+              throw new Error(
+                response?.error || 'manual_default_config_unavailable'
+              );
+            }
+            return response.config;
+          }
+        });
+    }
+    return manualDefaultTaskConfigPromise;
+  }
+
   // 从 chrome.storage.sync 中异步获取推广网站地址
   function getWebsiteUrl() {
-    return new Promise((resolve) => {
+    const taskConfig = globalThis.AutoCommentBatchTaskConfig?.getCurrent?.();
+    if (taskConfig) {
+      return Promise.resolve(taskConfig.promotionSite.url);
+    }
+    return getManualDefaultTaskConfig()
+      .then((manual) => manual.promotionSite.url)
+      .catch(() => new Promise((resolve) => {
       if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.sync) {
         resolve('');
         return;
@@ -467,11 +505,17 @@
         ]);
         resolve(savedUrl || legacyUrl);
       });
-    });
+      }));
   }
 
   function getWebsiteContent() {
-    return new Promise((resolve) => {
+    const taskConfig = globalThis.AutoCommentBatchTaskConfig?.getCurrent?.();
+    if (taskConfig) {
+      return Promise.resolve(taskConfig.promotionSite.content);
+    }
+    return getManualDefaultTaskConfig()
+      .then((manual) => manual.promotionSite.content)
+      .catch(() => new Promise((resolve) => {
       if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.sync) {
         resolve('');
         return;
@@ -494,18 +538,39 @@
         ]);
         resolve(savedContent || legacyContent);
       });
-    });
+      }));
   }
 
   // 从 chrome.storage.sync 中异步获取用户的姓名 / 邮箱 / 密码
-  function getUserProfile() {
+  async function getUserProfile({ includePassword = false } = {}) {
+    const taskConfig = globalThis.AutoCommentBatchTaskConfig?.getCurrent?.();
+    if (taskConfig) {
+      const password = includePassword
+        ? await globalThis.AutoCommentBatchTaskConfig.getTaskPassword(
+            chrome.runtime
+          )
+        : '';
+      return {
+        name: taskConfig.profile.name,
+        email: taskConfig.profile.email,
+        password: password || ''
+      };
+    }
+    try {
+      const manual = await getManualDefaultTaskConfig();
+      return {
+        name: manual.profile.name,
+        email: manual.profile.email,
+        password: DEFAULT_PASSWORD
+      };
+    } catch (_) {}
     return new Promise((resolve) => {
       if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.sync) {
         resolve({ name: DEFAULT_USERNAME, email: DEFAULT_EMAIL, password: DEFAULT_PASSWORD });
         return;
       }
       chrome.storage.sync.get(
-        [USER_NAME_STORAGE_KEY, USER_EMAIL_STORAGE_KEY, USER_PASSWORD_STORAGE_KEY],
+        [USER_NAME_STORAGE_KEY, USER_EMAIL_STORAGE_KEY],
         (result) => {
           if (chrome.runtime && chrome.runtime.lastError) {
             console.error('读取用户姓名/邮箱/密码失败：', chrome.runtime.lastError);
@@ -516,14 +581,10 @@
             ? result[USER_NAME_STORAGE_KEY].trim() : '';
           let email = result && typeof result[USER_EMAIL_STORAGE_KEY] === 'string'
             ? result[USER_EMAIL_STORAGE_KEY].trim() : '';
-          let password = result && typeof result[USER_PASSWORD_STORAGE_KEY] === 'string'
-            ? result[USER_PASSWORD_STORAGE_KEY].trim() : '';
-
           if (!name) name = DEFAULT_USERNAME;
           if (!email) email = DEFAULT_EMAIL;
-          if (!password) password = DEFAULT_PASSWORD;
 
-          resolve({ name, email, password });
+          resolve({ name, email, password: DEFAULT_PASSWORD });
         }
       );
     });
@@ -711,7 +772,7 @@
   // 记录当前域名的生成时间戳和内容
   function recordGenerationTime(content) {
     return new Promise((resolve) => {
-      const currentDomain = getCurrentDomain();
+      const currentDomain = getGenerationCacheKey();
 
       if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
         resolve();
@@ -764,7 +825,7 @@
   // 获取缓存的推广文案
   function getCachedPromotionCopy() {
     return new Promise((resolve) => {
-      const currentDomain = getCurrentDomain();
+      const currentDomain = getGenerationCacheKey();
 
       if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
         resolve('');
@@ -804,16 +865,30 @@
   let autoGeneratedOnce = false;
 
   // 批处理模式上下文（由 BATCH_HANDLE 消息注入）
-  let _batchCtx = null; // { batchId, urlIndex, attempt, url }
+  let _batchCtx = null;
   let runningBatchTaskKey = null;
   let historyRevisionSequence = 0;
 
-  function setBatchContext(batchId, urlIndex, attempt, url) {
-    _batchCtx = { batchId, urlIndex, attempt, url };
+  function setBatchContext(taskConfig) {
+    _batchCtx = taskConfig;
   }
 
-  function getBatchTaskKey(batchId, urlIndex, attempt) {
-    return `${batchId}:${urlIndex}:${attempt}`;
+  function getBatchTaskKey(batchIdOrContext, urlIndex, attempt, taskContext) {
+    const context = (
+      batchIdOrContext &&
+      typeof batchIdOrContext === 'object'
+    ) ? batchIdOrContext : taskContext || {
+      batchId: batchIdOrContext,
+      taskId: `${batchIdOrContext}:legacy:${urlIndex}`,
+      promotionSiteId: 'default-promotion-site',
+      attempt
+    };
+    return [
+      context.batchId,
+      context.taskId,
+      context.promotionSiteId,
+      context.attempt
+    ].join(':');
   }
 
   function getBatchHandleValidationError(message) {
@@ -824,7 +899,18 @@
         urlIndex: message?.urlIndex
       };
     }
-    return null;
+    try {
+      const taskConfig =
+        globalThis.AutoCommentBatchTaskConfig?.acceptHandle?.(message);
+      if (!taskConfig) throw new Error('batch_task_config_unavailable');
+      return { taskConfig };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error?.code || 'invalid_task_config',
+        urlIndex: message?.urlIndex
+      };
+    }
   }
 
   async function reportBatchPhase(context, phase) {
@@ -904,10 +990,22 @@
     if (!window.AutoCommentBatchSubmitContext?.save) {
       throw new Error('无法在提交前保存评论历史上下文');
     }
-    await window.AutoCommentBatchSubmitContext.save({
+    const identity = (
+      typeof _batchCtx !== 'undefined'
+      && _batchCtx
+      && _batchCtx.batchId === batchId
+      && _batchCtx.urlIndex === urlIndex
+      && _batchCtx.attempt === attempt
+    ) ? {
       batchId,
+      taskId: _batchCtx.taskId,
       urlIndex,
-      attempt,
+      profileId: _batchCtx.profileId,
+      promotionSiteId: _batchCtx.promotionSiteId,
+      attempt
+    } : { batchId, urlIndex, attempt };
+    await window.AutoCommentBatchSubmitContext.save({
+      ...identity,
       url,
       result,
       aiContent: aiContent || null,
@@ -918,11 +1016,23 @@
 
   async function markBatchTaskSubmitting(batchId, urlIndex, attempt) {
     try {
+      const identity = (
+        typeof _batchCtx !== 'undefined'
+        && _batchCtx
+        && _batchCtx.batchId === batchId
+        && _batchCtx.urlIndex === urlIndex
+        && _batchCtx.attempt === attempt
+      ) ? {
+        batchId,
+        taskId: _batchCtx.taskId,
+        urlIndex,
+        profileId: _batchCtx.profileId,
+        promotionSiteId: _batchCtx.promotionSiteId,
+        attempt
+      } : { batchId, urlIndex, attempt };
       const response = await chrome.runtime.sendMessage({
         type: 'BATCH_TASK_SUBMITTING',
-        batchId,
-        urlIndex,
-        attempt
+        ...identity
       });
       if (!response?.ok) {
         throw new Error(response?.error || '无法保存批处理提交阶段');
@@ -934,7 +1044,21 @@
   }
 
   function clearBatchSubmitContext(match) {
-    return Promise.resolve(window.AutoCommentBatchSubmitContext?.clear?.(match))
+    const identity = (
+      typeof _batchCtx !== 'undefined'
+      && _batchCtx
+      && match?.batchId === _batchCtx.batchId
+      && match?.urlIndex === _batchCtx.urlIndex
+      && match?.attempt === _batchCtx.attempt
+    ) ? {
+      ...match,
+      taskId: _batchCtx.taskId,
+      profileId: _batchCtx.profileId,
+      promotionSiteId: _batchCtx.promotionSiteId
+    } : match;
+    return Promise.resolve(
+      window.AutoCommentBatchSubmitContext?.clear?.(identity)
+    )
       .catch(() => {});
   }
 
@@ -945,6 +1069,8 @@
     'checkpoint_not_found',
     'task_already_terminal',
     'stale_batch',
+    'stale_task_assignment',
+    'invalid_task_identity',
     'invalid_url_index',
     'forbidden_sender'
   ]);
@@ -977,7 +1103,19 @@
     ) {
       let response;
       try {
-        response = await chrome.runtime.sendMessage(message);
+        const outbound = (
+          typeof _batchCtx !== 'undefined'
+          && _batchCtx
+          && message?.batchId === _batchCtx.batchId
+          && message?.urlIndex === _batchCtx.urlIndex
+          && message?.attempt === _batchCtx.attempt
+        ) ? {
+          ...message,
+          taskId: _batchCtx.taskId,
+          profileId: _batchCtx.profileId,
+          promotionSiteId: _batchCtx.promotionSiteId
+        } : message;
+        response = await chrome.runtime.sendMessage(outbound);
       } catch (_) {
         if (attempt === BATCH_PROVEN_MESSAGE_MAX_ATTEMPTS) {
           return {
@@ -1073,7 +1211,10 @@
     const message = {
       type: 'BATCH_HANDLE_CONFIRM',
       batchId: ctx.batchId,
+      taskId: ctx.taskId,
       urlIndex: ctx.urlIndex,
+      profileId: ctx.profileId,
+      promotionSiteId: ctx.promotionSiteId,
       attempt: ctx.attempt,
       url: ctx.url || '',
       aiContent: ctx.aiContent || '',
@@ -1136,7 +1277,12 @@
       return;
     }
     const { batchId, urlIndex, attempt, url } = _batchCtx;
-    console.log('[AutoComment] handleBatchTaskForAutoMode _batchCtx:', _batchCtx);
+    console.log('[AutoComment] handleBatchTaskForAutoMode 任务:', {
+      batchId,
+      taskId: _batchCtx.taskId,
+      urlIndex,
+      attempt
+    });
 
     try {
       // 尝试获取缓存的文案或之前生成的文案
@@ -2988,7 +3134,12 @@
     const EMAIL = userProfile.email || '';
 
     console.log('[AutoComment] ===== ensureAllCommentFormFieldsFilled 开始 =====');
-    console.log('[AutoComment] 将填入 - Name:', USERNAME, '| Email:', EMAIL, '| Website:', WEBSITE, '| skipComment:', skipCommentValidation);
+    console.log('[AutoComment] 评论字段配置已加载:', {
+      hasName: Boolean(USERNAME),
+      hasEmail: Boolean(EMAIL),
+      hasWebsite: Boolean(WEBSITE),
+      skipComment: skipCommentValidation
+    });
 
     // ── 前置检查：配置缺失则直接报错，不静默失败 ─────────────────
     if (!USERNAME || !EMAIL) {
@@ -3506,7 +3657,7 @@
         // ── 步骤A：读取用户配置 ─────────────────────────────────
         console.log('[AutoComment] >>>[2] 即将调用 getUserProfile...');
         const userProfile = await getUserProfile();
-        console.log('[AutoComment] >>>[3] getUserProfile() 完成:', JSON.stringify(userProfile));
+        console.log('[AutoComment] >>>[3] Profile 配置已加载');
 
         console.log('[AutoComment] >>>[4] 检查用户配置是否完整...');
         if (!userProfile.name || !userProfile.email) {
@@ -4036,33 +4187,24 @@
       }
       // 批量处理模式：收到任务后自动执行评论流程（改为 async，等待执行结果再响应）
       if (message && message.type === 'BATCH_HANDLE') {
-        console.log('[content] 收到 BATCH_HANDLE >>>', { batchId: message.batchId, urlIndex: message.urlIndex, url: message.url, time: new Date().toISOString() });
-        const validationError = getBatchHandleValidationError(message);
-        if (validationError) {
-          _sendResponse(validationError);
+        console.log('[content] 收到 BATCH_HANDLE >>>', { batchId: message.batchId, taskId: message.taskId, urlIndex: message.urlIndex, time: new Date().toISOString() });
+        const validation = getBatchHandleValidationError(message);
+        if (!validation.taskConfig) {
+          _sendResponse(validation);
           return;
         }
-        const taskKey = getBatchTaskKey(
-          message.batchId,
-          message.urlIndex,
-          message.attempt
-        );
+        const taskKey = getBatchTaskKey(validation.taskConfig);
         if (runningBatchTaskKey === taskKey) {
           console.warn('[content] 同一批处理任务正在执行，忽略重复 BATCH_HANDLE:', taskKey);
           _sendResponse({ ok: false, error: 'duplicate_batch_task_running', urlIndex: message.urlIndex });
           return;
         }
-        setBatchContext(
-          message.batchId,
-          message.urlIndex,
-          message.attempt,
-          message.url
-        );
+        setBatchContext(validation.taskConfig);
         handleBatchTask(
-          message.batchId,
-          message.urlIndex,
-          message.attempt,
-          message.url
+          validation.taskConfig.batchId,
+          validation.taskConfig.urlIndex,
+          validation.taskConfig.attempt,
+          validation.taskConfig.url
         )
           .then(() => {
             console.log('[content] BATCH_HANDLE 处理完成, 发送响应 {ok:true}');
@@ -4144,9 +4286,23 @@
   }
 
   async function handleBatchTask(batchId, urlIndex, attempt, url) {
-    console.log('[content] handleBatchTask 开始 >>>', { batchId, urlIndex, attempt, url, time: new Date().toISOString() });
-    const context = { batchId, urlIndex, attempt };
-    const taskKey = getBatchTaskKey(batchId, urlIndex, attempt);
+    const context = (
+      typeof _batchCtx !== 'undefined'
+      && _batchCtx
+      && _batchCtx.batchId === batchId
+      && _batchCtx.urlIndex === urlIndex
+      && _batchCtx.attempt === attempt
+    ) ? _batchCtx : {
+      batchId,
+      taskId: `${batchId}:legacy:${urlIndex}`,
+      urlIndex,
+      profileId: 'default-profile',
+      promotionSiteId: 'default-promotion-site',
+      attempt,
+      url
+    };
+    console.log('[content] handleBatchTask 开始 >>>', { batchId, taskId: context.taskId, urlIndex, time: new Date().toISOString() });
+    const taskKey = getBatchTaskKey(batchId, urlIndex, attempt, context);
     if (runningBatchTaskKey === taskKey) {
       console.warn('[content] handleBatchTask 跳过重复执行:', taskKey);
       return;

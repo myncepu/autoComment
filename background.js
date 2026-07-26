@@ -19,6 +19,9 @@ import {
   installBatchRuntimeController
 } from './lib/batch-runtime-controller.mjs';
 import { createDomainConfigRepository } from './lib/domain-config-repository.mjs';
+import {
+  installBatchDomainConfigListener
+} from './lib/batch-domain-config-listener.mjs';
 import { createProfileSecretRepository } from './lib/profile-secret-repository.mjs';
 import { migrateLegacyDomainConfig } from './lib/domain-config-migration.mjs';
 import {
@@ -111,6 +114,7 @@ const commentHistoryService = createCommentHistoryService({
 installCommentHistoryMessageListener(chrome, commentHistoryService);
 void domainConfigReady.then(() => {
   installBatchRuntimeController(chrome, secretAwareBatchRuntimeController);
+  installBatchDomainConfigListener(chrome, domainConfigRepository);
   installBatchSecretVaultListener(chrome, {
     vaultStore: batchSecretVaultStore,
     checkpointReader: async () => {

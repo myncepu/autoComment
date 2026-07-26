@@ -279,20 +279,32 @@ globalThis.handleBatchTask = handleBatchTask;`,
   assert.deepEqual(plain(phases), [
     {
       batchId: 'batch-config',
+      taskId: 'batch-config:legacy:4',
       urlIndex: 4,
+      profileId: 'default-profile',
+      promotionSiteId: 'default-promotion-site',
       attempt: 2,
+      url: 'https://target.test/post',
       phase: 'loading'
     },
     {
       batchId: 'batch-config',
+      taskId: 'batch-config:legacy:4',
       urlIndex: 4,
+      profileId: 'default-profile',
+      promotionSiteId: 'default-promotion-site',
       attempt: 2,
+      url: 'https://target.test/post',
       phase: 'detecting'
     },
     {
       batchId: 'batch-config',
+      taskId: 'batch-config:legacy:4',
       urlIndex: 4,
+      profileId: 'default-profile',
+      promotionSiteId: 'default-promotion-site',
       attempt: 2,
+      url: 'https://target.test/post',
       phase: 'filling'
     }
   ]);
@@ -319,12 +331,18 @@ globalThis.handleBatchTask = handleBatchTask;`,
   assert.equal(clickCount, 0);
 });
 
-test('batch handles reject a missing attempt before accepting task identity', () => {
+test('batch handles reject a missing attempt before accepting frozen task identity', () => {
   const identitySource = sourceBetween(
     'function getBatchTaskKey',
     '\n\n  function createHistoryUniqueId'
   );
-  const context = vm.createContext({});
+  const context = vm.createContext({
+    AutoCommentBatchTaskConfig: {
+      acceptHandle(message) {
+        return message;
+      }
+    }
+  });
   vm.runInContext(
     `${identitySource}
 globalThis.getBatchHandleValidationError = getBatchHandleValidationError;
@@ -340,13 +358,35 @@ globalThis.getBatchTaskKey = getBatchTaskKey;`,
     error: 'invalid_batch_attempt',
     urlIndex: 3
   });
-  assert.equal(context.getBatchHandleValidationError({
+  assert.deepEqual(plain(context.getBatchHandleValidationError({
     batchId: 'batch-a',
+    taskId: 'task-a',
     urlIndex: 3,
+    profileId: 'profile-a',
+    promotionSiteId: 'site-a',
     attempt: 2
-  }), null);
-  assert.equal(context.getBatchTaskKey('batch-a', 3, 1), 'batch-a:3:1');
-  assert.equal(context.getBatchTaskKey('batch-a', 3, 2), 'batch-a:3:2');
+  })), {
+    taskConfig: {
+      batchId: 'batch-a',
+      taskId: 'task-a',
+      urlIndex: 3,
+      profileId: 'profile-a',
+      promotionSiteId: 'site-a',
+      attempt: 2
+    }
+  });
+  assert.equal(context.getBatchTaskKey({
+    batchId: 'batch-a',
+    taskId: 'task-a',
+    promotionSiteId: 'site-a',
+    attempt: 1
+  }), 'batch-a:task-a:site-a:1');
+  assert.equal(context.getBatchTaskKey({
+    batchId: 'batch-a',
+    taskId: 'task-a',
+    promotionSiteId: 'site-a',
+    attempt: 2
+  }), 'batch-a:task-a:site-a:2');
 });
 
 test('a failed submitting phase write clears pre-click context and prevents a click', async () => {
