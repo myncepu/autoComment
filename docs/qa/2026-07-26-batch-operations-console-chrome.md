@@ -59,11 +59,14 @@ tabs. That smoke also exposed the unsafe `autoSubmit` contract described above,
 so no end-to-end extension-host acceptance is claimed from it. A new local-only
 run is required after the runtime fix.
 
-The required safe rerun was completed on 2026-07-27 after the runtime fix. See
+The required safe split-layer rerun was completed on 2026-07-27 after the
+runtime fix. See
 `docs/qa/2026-07-27-batch-timeout-result-preview-chrome.md` for the installed
-Chrome, five-target/concurrency-three, responsive, recovery and privacy results.
+Chrome content-flow, automation Chromium MV3-host, responsive, recovery and
+privacy results.
 
-Completed final observations:
+Original manual follow-up checklist (not claimed as one automated end-to-end
+run):
 
 - reload the unpacked extension from this worktree;
 - save and test `http://127.0.0.1:4173/v1` with a non-secret local fixture key;

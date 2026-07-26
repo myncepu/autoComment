@@ -34,8 +34,10 @@ request. Completion order did not alter ownership.
 
 - A malformed handle missing `profileId` was rejected as
   `invalid_task_config`.
-- A deliberately delayed model request crossed the test deadline; its page was
-  closed and attempt 2 completed with the same Profile/Site assignment.
+- A handle was acknowledged before a deliberately delayed model request
+  completed; its page was then closed during generation and attempt 2
+  completed with the same Profile/Site assignment. This is an interruption
+  test, not proof of the background task-deadline scheduler.
 - A page was closed after the production submit context was saved and the
   `submitting` phase was reached; the safe context remained present at the
   interruption boundary. The runtime’s `submission_uncertain →
@@ -52,10 +54,11 @@ The ordinary target pages load the production scripts in manifest order:
 1. `illegal-site-filter.js`
 2. `lib/llm-content-bridge.js`
 3. `lib/batch-task-config.js`
-4. `lib/batch-submit-context-client.js`
-5. `lib/comment-history-capture.js`
-6. `lib/batch-phase-reporter.js`
-7. `content.js`
+4. `lib/batch-handle-dispatch.js`
+5. `lib/batch-submit-context-client.js`
+6. `lib/comment-history-capture.js`
+7. `lib/batch-phase-reporter.js`
+8. `content.js`
 
 `tests/fixtures/fake-chrome-adapter.js` replaces only the Chrome
 runtime/storage/message boundary. It does not copy field detection, filling,

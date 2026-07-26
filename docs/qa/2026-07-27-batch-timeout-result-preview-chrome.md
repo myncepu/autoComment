@@ -15,12 +15,14 @@ No desktop CSV target was opened during this acceptance. The five-target run
 used the local fixture server created by
 `scripts/run-multi-assignment-chrome-acceptance.mjs`.
 
-## Automated real-Chrome results
+## Automated browser results
 
 `npm run test:chrome:multi-assignment` passed with:
 
-- five local targets completed with maximum concurrency `3`;
-- every worker page was created in one persistent browser context;
+- five local content flows completed while the runner limited active pages to
+  maximum concurrency `3`; this does not claim to exercise the production
+  background scheduler;
+- every target page was created in one installed-Chrome persistent context;
 - each task kept its canonical `profileId` and selected promotion site;
 - `BATCH_HANDLE` was acknowledged synchronously, then allowed to finish before
   the page was closed;
@@ -28,9 +30,22 @@ used the local fixture server created by
   assignment;
 - submitting context survived an interruption and refresh recovery confirmed
   the pending result;
-- the unpacked worktree loaded an MV3 service worker and opened `batch.html`;
+- automation Chromium loaded the unpacked worktree's MV3 service worker and
+  opened `batch.html`;
 - no password appeared in serialized acceptance output;
 - no non-loopback request or third-party submission was observed.
+
+Google Chrome 150 cannot be used for command-line unpacked-extension loading:
+Chrome removed `--load-extension` from branded builds starting in Chrome 137.
+The installed Google Chrome checks and the command-line MV3 host smoke are
+therefore reported as separate evidence instead of labelling Chromium as
+Google Chrome. See the
+[Chrome Extensions June 2025 update](https://developer.chrome.com/blog/extension-news-june-2025).
+The connected-browser safety policy also blocks automation of
+`chrome://extensions`, so the installed extension's reload button was not
+clicked by the acceptance runner. Reloading the user's installed unpacked
+extension remains a manual smoke step; it is not implied by the automated
+results below.
 
 `npm run test:chrome:console` passed with:
 
@@ -56,6 +71,13 @@ The wizard accepts a per-task timeout from 10 to 600 seconds and stores it as
 `timeoutSeconds`. Attempt-scoped deadlines use
 `batchId + urlIndex + attempt`; deadlines are cleared on terminal completion,
 pause, stop and batch completion. The scan remains a recovery fallback.
+
+Deadline finalization also has bounded submit-context sealing. If that boundary
+does not answer, the task becomes `manual_required`, closes its proven worker
+tab and replenishes capacity. A timed-out tab-creation reservation is released
+before the underlying create promise settles; any late-created tab waits for
+terminal persistence and is then cleaned up. Dedicated never-settling seal and
+late-create tests cover both liveness paths.
 
 The result row reads elapsed time from the terminal result once one exists.
 Only active/submitting tasks derive elapsed time from the current clock.

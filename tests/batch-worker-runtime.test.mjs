@@ -450,6 +450,49 @@ test('an attempt deadline expires and closes a task without the scan interval', 
   assert.deepEqual(harness.tabsApi.removeCalls, [100]);
 });
 
+test('timeout finalizes and replenishes when submit-context sealing never settles', async () => {
+  const armed = [];
+  let expire;
+  const harness = createWorkerHarness({
+    concurrency: 1,
+    taskCount: 2,
+    timeoutSeconds: 45,
+    sealTimeoutMs: 5,
+    taskDeadlineFactory({ onExpire }) {
+      expire = onExpire;
+      return {
+        arm(identity) {
+          armed.push(structuredClone(identity));
+        },
+        clear() {
+          return true;
+        },
+        clearAll() {}
+      };
+    }
+  });
+  harness.dependencies.sealSubmitContext = () => new Promise(() => {});
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  await runtime.start(harness.checkpoint);
+
+  const outcome = await Promise.race([
+    expire(armed[0]).then(() => 'finalized'),
+    new Promise((resolve) => setTimeout(() => resolve('hung'), 100))
+  ]);
+
+  assert.equal(outcome, 'finalized');
+  assert.equal(harness.terminalPayloads.length, 1);
+  assert.equal(
+    harness.terminalPayloads[0].result.errorCode,
+    'submission_uncertain'
+  );
+  assert.deepEqual(harness.tabsApi.removeCalls, [100]);
+  assert.deepEqual(
+    harness.sentHandles.map(({ urlIndex }) => urlIndex),
+    [0, 1]
+  );
+});
+
 test('stop seals active work and never replenishes it', async () => {
   const harness = createWorkerHarness({ concurrency: 1, taskCount: 2 });
   const runtime = createBatchWorkerRuntime(harness.dependencies);
@@ -514,7 +557,7 @@ test('focus activates the worker tab and dispose detaches owned resources', asyn
   assert.equal(harness.tabsApi.removedListenerCount(), 0);
 });
 
-test('an opening timeout replenishes capacity and a late tab is only cleaned up', async () => {
+test('an opening timeout releases capacity before a late tab is cleaned up', async () => {
   let now = 0;
   let resolveFirstCreate;
   let createCount = 0;
@@ -547,8 +590,24 @@ test('an opening timeout replenishes capacity and a late tab is only cleaned up'
   await waitFor(() => createCount === 1, 'first tab create');
   now = 1100;
   await harness.intervalCallbacks[0]();
-  assert.equal(harness.sentHandles.length, 0);
-  assert.equal(createCount, 1, 'the timed-out pending create still owns the slot');
+  await waitFor(() => createCount === 2, 'replacement tab create');
+  await waitFor(() => harness.sentHandles.length === 1, 'replacement handle');
+  assert.deepEqual(
+    harness.sentHandles.map(({ urlIndex }) => urlIndex),
+    [1]
+  );
+  assert.deepEqual(
+    harness.terminalPayloads.map(({ urlIndex }) => urlIndex),
+    [0]
+  );
+  assert.equal(
+    await Promise.race([
+      starting.then(() => 'resolved'),
+      new Promise((resolve) => setTimeout(() => resolve('hung'), 100))
+    ]),
+    'resolved'
+  );
+
   resolveFirstCreate({
     id: 100,
     windowId: 42,
@@ -556,18 +615,8 @@ test('an opening timeout replenishes capacity and a late tab is only cleaned up'
     status: 'complete',
     discarded: false
   });
-  await starting;
-  await waitFor(() => harness.sentHandles.length === 1, 'replacement handle');
-
-  assert.deepEqual(
-    harness.sentHandles.map(({ urlIndex }) => urlIndex),
-    [1]
-  );
+  await waitFor(() => harness.tabsApi.removeCalls.length === 1, 'late cleanup');
   assert.deepEqual(harness.tabsApi.removeCalls, [100]);
-  assert.deepEqual(
-    harness.terminalPayloads.map(({ urlIndex }) => urlIndex),
-    [0]
-  );
 });
 
 test('a deferred finalizer cleans only its old tab after a replacement lifecycle starts', async () => {
@@ -1708,6 +1757,7 @@ function createWorkerHarness({
   clock = () => 1000,
   readinessTimeoutMs,
   handleDeliveryTimeoutMs,
+  sealTimeoutMs,
   timeoutSeconds = 60,
   taskDeadlineFactory,
   tabsOptions = {}
@@ -1805,6 +1855,7 @@ function createWorkerHarness({
     ...(handleDeliveryTimeoutMs === undefined
       ? {}
       : { handleDeliveryTimeoutMs }),
+    ...(sealTimeoutMs === undefined ? {} : { sealTimeoutMs }),
     timers: {
       setTimeout,
       clearTimeout,

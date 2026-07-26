@@ -228,6 +228,44 @@ test('publishes selects only on change and deduplicates the same filter payload'
   assert.equal(calls[0].status, 'manual');
 });
 
+test('publishes Profile and Promotion Site filter changes', () => {
+  const document = consoleDocument();
+  const calls = [];
+  const snapshot = runningSnapshotFixture();
+  Object.assign(snapshot.rows[0], {
+    profileId: 'profile-a',
+    profileLabel: '作者 A',
+    promotionSiteId: 'site-a',
+    promotionSiteLabel: '产品 A'
+  });
+  snapshot.filteredRows = snapshot.rows;
+  const view = createBatchConsoleView(document, consoleHandlers({
+    onFilterChange(filters) {
+      calls.push(filters);
+    }
+  }));
+  view.render(snapshot);
+
+  change(document, '[name="queueProfile"]', 'profile-a');
+  change(document, '[name="queuePromotionSite"]', 'site-a');
+
+  assert.deepEqual(calls, [{
+    status: 'all',
+    domain: 'all',
+    profile: 'profile-a',
+    promotionSite: 'all',
+    timeRange: 'all',
+    keyword: ''
+  }, {
+    status: 'all',
+    domain: 'all',
+    profile: 'profile-a',
+    promotionSite: 'site-a',
+    timeRange: 'all',
+    keyword: ''
+  }]);
+});
+
 test('filters queue, opens details, focuses worker tabs and records manual outcomes', () => {
   const document = consoleDocument();
   const calls = [];

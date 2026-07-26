@@ -178,8 +178,9 @@ async function main() {
   const pageErrors = [];
   const outcomes = [];
   let chromeVersion = '';
+  let extensionAutomationVersion = '';
   let extensionSmoke = '';
-  let timeoutRetry = '';
+  let interruptionRetry = '';
   let submittingInterruption = '';
   let active = 0;
   let maxActive = 0;
@@ -305,14 +306,14 @@ async function main() {
       batchId: 'timeout-plan',
       taskId: 'timeout-plan:2'
     };
-    const timed = await Promise.race([
+    const handleAcknowledgement = await Promise.race([
       timeoutPage.evaluate(
         (message) => globalThis.LocalFixtureChrome.dispatchHandle(message),
         timeoutHandle
       ).then((response) => response?.accepted === true ? 'accepted' : 'rejected'),
       new Promise((resolve) => setTimeout(() => resolve('timeout'), 100))
     ]);
-    assert.equal(timed, 'accepted');
+    assert.equal(handleAcknowledgement, 'accepted');
     await timeoutPage.waitForFunction(() => (
       globalThis.LocalFixtureChrome.safeState().phases.some(
         ({ phase }) => phase === 'generating'
@@ -350,7 +351,7 @@ async function main() {
     const retryRecord = retriedRecords.at(-1);
     assert.equal(retryRecord.profileId, timeoutHandle.profileId);
     assert.equal(retryRecord.promotionSiteId, timeoutHandle.promotionSiteId);
-    timeoutRetry = 'same-assignment-success';
+    interruptionRetry = 'same-assignment-success';
 
     const interruptionPage = await context.newPage();
     await interruptionPage.goto(`${origin}/multi/2?interrupt=1`, {
@@ -462,6 +463,7 @@ async function main() {
       });
     }
     assert.match(serviceWorker.url(), /\/background\.js$/);
+    extensionAutomationVersion = await context.browser()?.version();
     const extensionId = new URL(serviceWorker.url()).hostname;
     const smokePage = await context.newPage();
     await smokePage.goto(`chrome-extension://${extensionId}/batch.html`, {
@@ -476,11 +478,12 @@ async function main() {
       1
     );
     await smokePage.close();
-    extensionSmoke = 'service-worker-and-batch-page';
+    extensionSmoke = 'automation-chromium-service-worker-and-batch-page';
 
     const result = {
       ok: true,
       chromeVersion,
+      extensionAutomationVersion,
       fixtureOrigin: origin,
       maxConcurrency: maxActive,
       assignments: sorted.map((record) => ({
@@ -488,8 +491,8 @@ async function main() {
         profileId: record.profileId,
         promotionSiteId: record.promotionSiteId
       })),
-      timeout: timed,
-      timeoutRetry,
+      handleAcknowledgement,
+      interruptionRetry,
       submittingInterruption,
       refreshRecovery: 'confirmed',
       extensionSmoke,
