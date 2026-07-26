@@ -63,6 +63,9 @@ function createChromeHarness() {
     runtime: {
       id: 'extension-id',
       onMessage: runtimeOnMessage,
+      getURL(file) {
+        return `chrome-extension://extension-id/${file}`;
+      },
       async sendMessage(message) {
         runtimeMessages.push(structuredClone(message));
         if (message.type === 'BATCH_RECOVER_SUBMIT_CONTEXT') {
@@ -153,7 +156,29 @@ test('routes runtime requests and accepts only own-extension page events', async
     { id: 'extension-id' }
   );
   harness.runtimeOnMessage.emit(
+    { type: 'BATCH_CONFIRMED', batchId: 'content-forged', attempt: 2 },
+    {
+      id: 'extension-id',
+      tab: { id: 501 },
+      url: 'https://target.test/post'
+    }
+  );
+  harness.runtimeOnMessage.emit(
+    { type: 'BATCH_CONFIRMED', batchId: 'page-forged', attempt: 2 },
+    {
+      id: 'extension-id',
+      url: 'chrome-extension://extension-id/batch.html'
+    }
+  );
+  harness.runtimeOnMessage.emit(
     { type: 'BATCH_CONFIRMED', batchId: 'batch-1', attempt: 2 },
+    {
+      id: 'extension-id',
+      url: 'chrome-extension://extension-id/background.js'
+    }
+  );
+  harness.runtimeOnMessage.emit(
+    { type: 'BATCH_TASK_PHASE', batchId: 'batch-1', attempt: 2 },
     { id: 'extension-id' }
   );
 
@@ -161,11 +186,18 @@ test('routes runtime requests and accepts only own-extension page events', async
     type: 'BATCH_SESSION_GET',
     batchId: 'batch-1'
   });
-  assert.deepEqual(received, [{
-    type: 'BATCH_CONFIRMED',
-    batchId: 'batch-1',
-    attempt: 2
-  }]);
+  assert.deepEqual(received, [
+    {
+      type: 'BATCH_CONFIRMED',
+      batchId: 'batch-1',
+      attempt: 2
+    },
+    {
+      type: 'BATCH_TASK_PHASE',
+      batchId: 'batch-1',
+      attempt: 2
+    }
+  ]);
   unsubscribe();
   assert.equal(harness.runtimeOnMessage.listeners.size, 0);
 });

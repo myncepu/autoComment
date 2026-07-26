@@ -1,7 +1,12 @@
 import { createChromeBatchDependencies } from './lib/batch-chrome-adapter.mjs';
+import { installBatchPageLifecycle } from './lib/batch-entry-lifecycle.mjs';
 import { bootBatchPage } from './lib/batch-page-composition.mjs';
 
-export { bootBatchPage, createChromeBatchDependencies };
+export {
+  bootBatchPage,
+  createChromeBatchDependencies,
+  installBatchPageLifecycle
+};
 
 if (typeof document !== 'undefined' && typeof chrome !== 'undefined') {
   document.addEventListener('DOMContentLoaded', () => {
@@ -15,10 +20,15 @@ if (typeof document !== 'undefined' && typeof chrome !== 'undefined') {
       onlineTarget: globalThis,
       isOnline: () => globalThis.navigator?.onLine !== false
     };
-    void bootBatchPage(document, {
-      ...chromeDependencies,
-      ...webDependencies
-    }).catch((error) => {
+    const lifecycle = installBatchPageLifecycle({
+      document,
+      pageTarget: globalThis,
+      boot: () => bootBatchPage(document, {
+        ...chromeDependencies,
+        ...webDependencies
+      })
+    });
+    void lifecycle.ready.catch((error) => {
       console.error('[batch] boot failed:', error?.code || 'batch_boot_failed');
     });
   }, { once: true });

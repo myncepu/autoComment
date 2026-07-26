@@ -9,6 +9,16 @@ const { JSDOM } = require('jsdom');
 const projectRoot = path.resolve(__dirname, '..');
 const clone = (value) => structuredClone(value);
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 class FakeChromeEvent {
   constructor() {
     this.listeners = new Set();
@@ -169,6 +179,7 @@ function createTabsApi() {
     },
     async remove(tabId) {
       removeCalls.push(tabId);
+      if (this.removeFailure) throw this.removeFailure;
       if (!tabs.delete(tabId)) throw new Error(`No tab with id: ${tabId}`);
       onRemoved.emit(tabId, { windowId: 42, isWindowClosing: false });
     },
@@ -195,8 +206,39 @@ function click(document, selector) {
   assert.ok(element, `missing element: ${selector}`);
   element.dispatchEvent(new document.defaultView.MouseEvent('click', {
     bubbles: true,
-    button: 0
+    button: 0,
+    cancelable: true
   }));
+}
+
+async function prepareWizardForStart(harness) {
+  click(harness.document, '[data-action="new-batch"]');
+  click(harness.document, '[data-action="wizard-next"]');
+  const fileInput = harness.document.querySelector('input[type="file"]');
+  const csv = [
+    '原URL,URL对应域名',
+    'https://first.test/post,first.test',
+    'https://second.test/post,second.test',
+    'https://third.test/post,third.test'
+  ].join('\n');
+  Object.defineProperty(fileInput, 'files', {
+    configurable: true,
+    value: [{
+      name: 'wizard-targets.csv',
+      async arrayBuffer() {
+        return new TextEncoder().encode(csv).buffer;
+      }
+    }]
+  });
+  fileInput.dispatchEvent(new harness.dom.window.Event('change', {
+    bubbles: true
+  }));
+  await waitFor(
+    () => harness.document.querySelectorAll('[data-preflight-row]').length === 3,
+    'three preflight rows'
+  );
+  click(harness.document, '[data-action="wizard-next"]');
+  click(harness.document, '[data-action="wizard-next"]');
 }
 
 async function createProductionHarness(options = {}) {
@@ -225,6 +267,7 @@ async function createProductionHarness(options = {}) {
   const exportCalls = [];
   const draftWrites = [];
   const powerCalls = [];
+  const navigateCalls = [];
   let nextManualWindowId = 700;
   const runtimeController = createBatchRuntimeController({
     storageArea: storageLocal,
@@ -263,6 +306,9 @@ async function createProductionHarness(options = {}) {
   const dependencies = {
     async runtimeRequest(type, payload = {}) {
       runtimeMessages.push({ type, ...clone(payload) });
+      if (options.runtimeGates?.[type]) {
+        await options.runtimeGates[type].promise;
+      }
       return runtimeController.handleMessage({ type, ...clone(payload) });
     },
     tabsApi,
@@ -336,7 +382,14 @@ async function createProductionHarness(options = {}) {
       return { blocked: false };
     },
     onlineTarget: dom.window,
-    isOnline: () => true
+    isOnline: () => options.online !== false,
+    navigate(href) {
+      navigateCalls.push({
+        href,
+        checkpointStatus: storageLocal.data.batchRuntimeCheckpoint?.status,
+        openTabs: tabsApi.tabs.size
+      });
+    }
   };
   if (options.history) {
     dependencies.retryPendingHistoryWrites = async () => (
@@ -365,6 +418,8 @@ async function createProductionHarness(options = {}) {
     exportCalls,
     draftWrites,
     powerCalls,
+    navigateCalls,
+    bootPage: () => bootBatchPage(dom.window.document, dependencies),
     emitRuntime(message) {
       for (const listener of [...runtimePageListeners]) {
         listener(clone(message));
@@ -402,6 +457,89 @@ test('production batch module imports without document or chrome globals', async
     encoding: 'utf8'
   });
   assert.equal(output, 'function');
+});
+
+test('production page lifecycle durably tears down on pagehide', async () => {
+  const imported = await import('../lib/batch-entry-lifecycle.mjs');
+  assert.equal(typeof imported.installBatchPageLifecycle, 'function');
+  const dom = new JSDOM('<!doctype html><p>batch</p>');
+  const calls = [];
+  const lifecycle = imported.installBatchPageLifecycle({
+    document: dom.window.document,
+    pageTarget: dom.window,
+    boot: async () => ({
+      async destroy(options) {
+        calls.push(clone(options));
+      }
+    })
+  });
+  await lifecycle.ready;
+
+  dom.window.dispatchEvent(new dom.window.Event('pagehide'));
+  await waitFor(() => calls.length === 1, 'pagehide teardown');
+
+  assert.deepEqual(calls, [{ reason: 'page_teardown' }]);
+  await lifecycle.destroy();
+  assert.equal(calls.length, 1);
+});
+
+test('production page lifecycle starts teardown when the page becomes hidden', async () => {
+  const imported = await import('../lib/batch-entry-lifecycle.mjs');
+  const dom = new JSDOM('<!doctype html><p>batch</p>');
+  const calls = [];
+  const lifecycle = imported.installBatchPageLifecycle({
+    document: dom.window.document,
+    pageTarget: dom.window,
+    boot: async () => ({
+      async destroy(options) {
+        calls.push(clone(options));
+      }
+    })
+  });
+  await lifecycle.ready;
+  Object.defineProperty(dom.window.document, 'visibilityState', {
+    configurable: true,
+    value: 'hidden'
+  });
+
+  dom.window.document.dispatchEvent(
+    new dom.window.Event('visibilitychange')
+  );
+  await waitFor(() => calls.length === 1, 'hidden-page teardown');
+
+  assert.deepEqual(calls, [{ reason: 'page_teardown' }]);
+});
+
+test('bootBatchPage is a per-document singleton with idempotent teardown', async (t) => {
+  const harness = await createProductionHarness();
+  let secondPage = null;
+  t.after(async () => {
+    await Promise.all([
+      harness.page.destroy(),
+      secondPage?.destroy()
+    ]);
+  });
+
+  secondPage = await harness.bootPage();
+  assert.equal(secondPage, harness.page);
+  assert.equal(harness.runtimePageListeners.size, 1);
+  assert.equal(harness.tabsApi.onRemoved.listeners.size, 0);
+
+  click(harness.document, '[data-action="resume"]');
+  await waitFor(
+    () => harness.tabsApi.createCalls.length === 3,
+    'three singleton worker tabs'
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.tabsApi.createCalls.length, 3);
+  assert.equal(harness.tabsApi.onRemoved.listeners.size, 1);
+
+  const firstDestroy = harness.page.destroy();
+  const secondDestroy = harness.page.destroy();
+  assert.equal(secondDestroy, firstDestroy);
+  await firstDestroy;
+  assert.equal(harness.runtimePageListeners.size, 0);
+  assert.equal(harness.tabsApi.onRemoved.listeners.size, 0);
 });
 
 test('paused production boot creates no tabs and explicit resume creates three same-window slots', async (t) => {
@@ -601,6 +739,23 @@ test('checkpoint results are authoritative for export and history remains naviga
   ));
 });
 
+test('legacy local results remain exportable when no checkpoint exists', async (t) => {
+  const harness = await createProductionHarness({ checkpoint: null });
+  t.after(() => harness.page.destroy());
+
+  const exportButton = harness.document.querySelector('[data-action="export"]');
+  assert.equal(exportButton.disabled, false);
+  click(harness.document, '[data-action="export"]');
+
+  assert.deepEqual(harness.exportCalls, [{
+    checkpoint: null,
+    legacyResults: {
+      batchId: 'legacy',
+      results: [{ originalIndex: 999, result: 'legacy-truncated' }]
+    }
+  }]);
+});
+
 test('history retry and retention status remain visible in the composed console', async (t) => {
   const harness = await createProductionHarness({
     history: {
@@ -632,34 +787,7 @@ test('empty production boot composes profile-ready preflight wizard into a v2 st
   });
   t.after(() => harness.page.destroy());
 
-  click(harness.document, '[data-action="new-batch"]');
-  click(harness.document, '[data-action="wizard-next"]');
-  const fileInput = harness.document.querySelector('input[type="file"]');
-  const csv = [
-    '原URL,URL对应域名',
-    'https://first.test/post,first.test',
-    'https://second.test/post,second.test',
-    'https://third.test/post,third.test'
-  ].join('\n');
-  Object.defineProperty(fileInput, 'files', {
-    configurable: true,
-    value: [{
-      name: 'wizard-targets.csv',
-      async arrayBuffer() {
-        return new TextEncoder().encode(csv).buffer;
-      }
-    }]
-  });
-  fileInput.dispatchEvent(new harness.dom.window.Event('change', {
-    bubbles: true
-  }));
-  await waitFor(
-    () => harness.document.querySelectorAll('[data-preflight-row]').length === 3,
-    'three preflight rows'
-  );
-
-  click(harness.document, '[data-action="wizard-next"]');
-  click(harness.document, '[data-action="wizard-next"]');
+  await prepareWizardForStart(harness);
   click(harness.document, '[data-action="wizard-start"]');
   await waitFor(
     () => harness.storageLocal.data.batchRuntimeCheckpoint?.batchId === 'batch-from-wizard',
@@ -680,6 +808,35 @@ test('empty production boot composes profile-ready preflight wizard into a v2 st
   assert.equal(current.source.parsedUrls.length, 3);
   assert.equal(JSON.stringify(current).includes('test-only-key'), false);
   assert.ok(harness.draftWrites.length > 0);
+});
+
+test('an open wizard disables readiness and start when connectivity drops', async (t) => {
+  const harness = await createProductionHarness({ checkpoint: null });
+  t.after(() => harness.page.destroy());
+  await prepareWizardForStart(harness);
+  const startButton = harness.document.querySelector(
+    '[data-action="wizard-start"]'
+  );
+  assert.equal(startButton.disabled, false);
+
+  harness.dom.window.dispatchEvent(new harness.dom.window.Event('offline'));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(
+    harness.document.querySelector('[data-action="wizard-start"]').disabled,
+    true
+  );
+  assert.match(
+    harness.document.querySelector('[data-batch-wizard]').textContent,
+    /batch_offline/
+  );
+  click(harness.document, '[data-action="wizard-start"]');
+  assert.equal(
+    harness.runtimeMessages.some(
+      (message) => message.type === 'BATCH_SESSION_START'
+    ),
+    false
+  );
 });
 
 test('offline pauses owned tabs and returning online never resumes automatically', async (t) => {
@@ -709,17 +866,207 @@ test('offline pauses owned tabs and returning online never resumes automatically
   );
 });
 
-test('destroy removes page/runtime/timer layers and closes automatic tab ownership', async () => {
+test('empty offline boot cannot open the wizard or start a batch', async (t) => {
+  const harness = await createProductionHarness({
+    checkpoint: null,
+    online: false
+  });
+  t.after(() => harness.page.destroy());
+
+  const createButton = harness.document.querySelector('[data-action="new-batch"]');
+  assert.equal(createButton.disabled, true);
+  click(harness.document, '[data-action="new-batch"]');
+
+  assert.equal(
+    harness.document.querySelector('[data-batch-wizard]').hasAttribute('open'),
+    false
+  );
+  assert.equal(
+    harness.runtimeMessages.some(
+      (message) => message.type === 'BATCH_SESSION_START'
+    ),
+    false
+  );
+  assert.equal(harness.tabsApi.createCalls.length, 0);
+});
+
+test('offline preempts an in-flight resume before any worker tab is created', async (t) => {
+  const resumeGate = deferred();
+  const harness = await createProductionHarness({
+    runtimeGates: { BATCH_SESSION_RESUME: resumeGate }
+  });
+  t.after(() => harness.page.destroy());
+
+  click(harness.document, '[data-action="resume"]');
+  await waitFor(
+    () => harness.runtimeMessages.some(
+      (message) => message.type === 'BATCH_SESSION_RESUME'
+    ),
+    'pending resume'
+  );
+  harness.dom.window.dispatchEvent(new harness.dom.window.Event('offline'));
+  resumeGate.resolve();
+  await waitFor(
+    () => harness.tabsApi.createCalls.length > 0 ||
+      harness.runtimeMessages.some(
+        (message) => message.type === 'BATCH_SESSION_PAUSE'
+      ),
+    'resume cancellation outcome'
+  );
+
+  assert.equal(
+    harness.runtimeMessages.some(
+      (message) => message.type === 'BATCH_SESSION_PAUSE'
+    ),
+    true
+  );
+  assert.equal(
+    harness.storageLocal.data.batchRuntimeCheckpoint.status,
+    'paused_recovery'
+  );
+  assert.equal(harness.tabsApi.createCalls.length, 0);
+  assert.equal(
+    harness.runtimeMessages.some(
+      (message) => message.type === 'BATCH_TASK_ACTIVE'
+    ),
+    false
+  );
+});
+
+test('destroy durably pauses, releases power, and closes automatic tab ownership', async () => {
   const harness = await createProductionHarness();
   click(harness.document, '[data-action="resume"]');
   await waitFor(() => harness.tabsApi.tabs.size === 3, 'owned tabs');
 
-  await harness.page.destroy();
+  await harness.page.destroy({ reason: 'page_teardown' });
 
+  assert.equal(
+    harness.storageLocal.data.batchRuntimeCheckpoint.status,
+    'paused_recovery'
+  );
+  assert.deepEqual(harness.powerCalls.at(-1), ['release']);
+  assert.deepEqual(
+    harness.runtimeMessages.findLast(
+      (message) => message.type === 'BATCH_SESSION_PAUSE'
+    ),
+    {
+      type: 'BATCH_SESSION_PAUSE',
+      batchId: 'batch-1',
+      reason: 'page_teardown'
+    }
+  );
   assert.equal(harness.tabsApi.tabs.size, 0);
   assert.equal(harness.runtimePageListeners.size, 0);
   assert.equal(harness.tabsApi.onRemoved.listeners.size, 0);
   assert.equal(harness.tabsApi.onUpdated.listeners.size, 0);
   assert.equal(harness.document.querySelector('[data-console-layer]'), null);
   assert.equal(harness.document.querySelector('[data-batch-console]').textContent, '');
+});
+
+test('page teardown preempts an in-flight resume before worker creation', async () => {
+  const resumeGate = deferred();
+  const harness = await createProductionHarness({
+    runtimeGates: { BATCH_SESSION_RESUME: resumeGate }
+  });
+  click(harness.document, '[data-action="resume"]');
+  await waitFor(
+    () => harness.runtimeMessages.some(
+      (message) => message.type === 'BATCH_SESSION_RESUME'
+    ),
+    'pending resume'
+  );
+
+  const destroying = harness.page.destroy({ reason: 'pagehide' });
+  resumeGate.resolve();
+  await destroying;
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(
+    harness.storageLocal.data.batchRuntimeCheckpoint.status,
+    'paused_recovery'
+  );
+  assert.equal(harness.tabsApi.createCalls.length, 0);
+  assert.equal(
+    harness.runtimeMessages.findLast(
+      (message) => message.type === 'BATCH_SESSION_PAUSE'
+    )?.reason,
+    'page_teardown'
+  );
+});
+
+test('teardown close failure persists recovery and retains automatic tab ownership', async () => {
+  const harness = await createProductionHarness();
+  click(harness.document, '[data-action="resume"]');
+  await waitFor(() => harness.tabsApi.tabs.size === 3, 'owned tabs');
+  harness.tabsApi.removeFailure = new Error('tab close unavailable');
+
+  await harness.page.destroy({ reason: 'page_teardown' });
+
+  assert.equal(
+    harness.storageLocal.data.batchRuntimeCheckpoint.status,
+    'paused_recovery'
+  );
+  assert.notEqual(
+    harness.storageLocal.data.batchRuntimeCheckpoint.status,
+    'running'
+  );
+  assert.deepEqual(harness.powerCalls.at(-1), ['release']);
+  assert.equal(harness.tabsApi.tabs.size, 3);
+  assert.equal(harness.tabsApi.onRemoved.listeners.size, 1);
+  assert.equal(
+    harness.runtimeMessages.some(
+      (message) => message.type === 'BATCH_SESSION_STOP'
+    ),
+    false
+  );
+});
+
+test('shared-shell navigation waits for durable pause and tab cleanup', async () => {
+  const harness = await createProductionHarness();
+  click(harness.document, '[data-action="resume"]');
+  await waitFor(() => harness.tabsApi.tabs.size === 3, 'owned tabs');
+
+  const historyLink = [...harness.document.querySelectorAll('a')].find(
+    (link) => link.textContent === '评论历史'
+  );
+  historyLink.dispatchEvent(new harness.dom.window.MouseEvent('click', {
+    bubbles: true,
+    button: 0,
+    cancelable: true
+  }));
+  await waitFor(() => harness.navigateCalls.length === 1, 'navigation');
+
+  assert.deepEqual(harness.navigateCalls, [{
+    href: 'history.html',
+    checkpointStatus: 'paused_recovery',
+    openTabs: 0
+  }]);
+  assert.equal(
+    harness.runtimeMessages.findLast(
+      (message) => message.type === 'BATCH_SESSION_PAUSE'
+    )?.reason,
+    'page_teardown'
+  );
+  assert.equal(harness.runtimePageListeners.size, 0);
+});
+
+test('shared-shell brand navigation also waits for durable teardown', async (t) => {
+  const harness = await createProductionHarness();
+  t.after(() => harness.page.destroy());
+  click(harness.document, '[data-action="resume"]');
+  await waitFor(() => harness.tabsApi.tabs.size === 3, 'owned tabs');
+
+  const brand = harness.document.querySelector('.app-shell__brand');
+  brand.dispatchEvent(new harness.dom.window.MouseEvent('click', {
+    bubbles: true,
+    button: 0,
+    cancelable: true
+  }));
+  await waitFor(() => harness.navigateCalls.length === 1, 'brand navigation');
+
+  assert.deepEqual(harness.navigateCalls, [{
+    href: 'batch.html',
+    checkpointStatus: 'paused_recovery',
+    openTabs: 0
+  }]);
 });

@@ -198,6 +198,23 @@ test('classifies a host-permission denial without continuing to BATCH_HANDLE', a
   );
 });
 
+test('missing parsed URL terminalizes the task with safe source defaults', async () => {
+  const harness = createWorkerHarness({ concurrency: 1, taskCount: 1 });
+  harness.checkpoint.source.parsedUrls[0] = null;
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+
+  await runtime.start(harness.checkpoint);
+
+  assert.equal(harness.tabsApi.createCalls.length, 0);
+  assert.equal(harness.terminalPayloads.length, 1);
+  assert.deepEqual(harness.terminalPayloads[0].result, {
+    result: 'fail',
+    aiContent: null,
+    errorCode: 'batch_source_missing',
+    errorMessage: '批次源数据缺失'
+  });
+});
+
 test('refill reclaims a safely retried attempt after current terminal tasks', async () => {
   const harness = createWorkerHarness({ concurrency: 2, taskCount: 3 });
   const runtime = createBatchWorkerRuntime(harness.dependencies);
@@ -280,6 +297,26 @@ test('stop seals active work and never replenishes it', async () => {
     ['close', 100]
   ]);
   assert.equal(harness.tabsApi.createCalls.length, 1);
+});
+
+test('stop reports cleanup failure and retains tab ownership for recovery', async () => {
+  const harness = createWorkerHarness({
+    concurrency: 1,
+    taskCount: 1,
+    tabsOptions: {
+      async remove() {
+        throw new Error('tab close unavailable');
+      }
+    }
+  });
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  await runtime.start(harness.checkpoint);
+
+  const stopped = await runtime.stop();
+
+  assert.equal(stopped, false);
+  assert.equal(harness.tabsApi.removedListenerCount(), 1);
+  assert.equal(harness.tabsApi.removeCalls.length, 1);
 });
 
 test('resume rebuilds scheduling from current task core state', async () => {

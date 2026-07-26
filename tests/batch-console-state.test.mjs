@@ -167,6 +167,7 @@ test('locks derived commands while offline or while another command is in flight
   });
 
   assert.equal(offline.command.canResume, false);
+  assert.equal(offline.command.canCreate, false);
   assert.equal(offline.command.canStop, true);
   assert.match(offline.banners[0].title, /离线/);
   assert.deepEqual(pending.command, {
@@ -178,6 +179,18 @@ test('locks derived commands while offline or while another command is in flight
     canCreate: false,
     resultMessage: ''
   });
+});
+
+test('allows legacy-only result export without treating it as an active batch', () => {
+  const snapshot = createBatchConsoleSnapshot(null, {
+    now: 70000,
+    online: true,
+    hasLegacyResults: true
+  });
+
+  assert.equal(snapshot.status, 'empty');
+  assert.equal(snapshot.command.canExport, true);
+  assert.equal(snapshot.command.canCreate, true);
 });
 
 function createConsoleCheckpointFixture() {

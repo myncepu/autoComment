@@ -21,6 +21,14 @@ function fixtureError(code) {
   return error;
 }
 
+async function waitForCall(calls, predicate, label) {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (calls.some(predicate)) return;
+    await Promise.resolve();
+  }
+  assert.fail(`Timed out waiting for ${label}`);
+}
+
 function createCheckpoint({
   status = 'running',
   attempt = 1,
@@ -165,6 +173,7 @@ function createCommandHarness(options = {}) {
     async stop() {
       calls.push(['worker.stop']);
       if (options.workerFailures?.stop) {
+        if (options.workerFailures.stop === 'reject') return false;
         throw options.workerFailures.stop;
       }
       return checkpoint;
@@ -181,6 +190,9 @@ function createCommandHarness(options = {}) {
 
   const runtimeRequest = async (type, payload) => {
     calls.push(['runtime', type, structuredClone(payload)]);
+    if (options.runtimeGates?.[type]) {
+      await options.runtimeGates[type].promise;
+    }
     const runtimeFailure = options.runtimeFailures?.[type] ||
       (options.runtimeFailure?.type === type
         ? options.runtimeFailure
@@ -366,7 +378,10 @@ test('pauses through worker sealing before the session pause command', async () 
 
   assert.deepEqual(harness.calls, [
     ['worker.pause', 'user'],
-    ['runtime', 'BATCH_SESSION_PAUSE', { batchId: 'batch-1' }]
+    ['runtime', 'BATCH_SESSION_PAUSE', {
+      batchId: 'batch-1',
+      reason: 'user'
+    }]
   ]);
   assert.equal(
     harness.published.at(-1).checkpoint.status,
@@ -533,6 +548,29 @@ test('pauses recoverably when terminal persistence fails after worker stop', asy
     checkpointStatus: 'paused_recovery',
     requiresUserResume: true
   });
+});
+
+test('does not terminate when worker stop cannot close every owned tab', async () => {
+  const harness = createCommandHarness({
+    workerFailures: { stop: 'reject' }
+  });
+
+  await assert.rejects(
+    harness.controller.stop(true),
+    (error) => error?.code === 'worker_stop_rejected'
+  );
+
+  assert.equal(
+    harness.calls.some(
+      ([name, type]) => name === 'runtime' && type === 'BATCH_SESSION_STOP'
+    ),
+    false
+  );
+  assert.deepEqual(
+    harness.calls.filter(([name]) => name === 'runtime').map((call) => call[1]),
+    ['BATCH_SESSION_PAUSE']
+  );
+  assert.equal(harness.checkpoint.status, 'paused_recovery');
 });
 
 test('persists a safe retry before refilling a running worker runtime', async () => {
@@ -1054,7 +1092,10 @@ test('offline detection safely pauses and online detection never auto-resumes', 
 
   assert.deepEqual(harness.calls, [
     ['worker.pause', 'offline'],
-    ['runtime', 'BATCH_SESSION_PAUSE', { batchId: 'batch-1' }]
+    ['runtime', 'BATCH_SESSION_PAUSE', {
+      batchId: 'batch-1',
+      reason: 'offline'
+    }]
   ]);
 
   harness.onlineTarget.emit('online');
@@ -1067,6 +1108,67 @@ test('offline detection safely pauses and online detection never auto-resumes', 
     online: true,
     requiresUserResume: true
   });
+});
+
+test('offline cancels an in-flight persisted start before worker creation', async () => {
+  const startGate = deferred();
+  const harness = createCommandHarness({
+    checkpoint: createCheckpoint({
+      status: 'paused_recovery',
+      taskState: 'queued'
+    }),
+    runtimeGates: { BATCH_SESSION_START: startGate }
+  });
+
+  const starting = harness.controller.start(startDraft());
+  await waitForCall(
+    harness.calls,
+    ([name, type]) => name === 'runtime' && type === 'BATCH_SESSION_START',
+    'persisted start'
+  );
+  const pausing = harness.controller.handleOffline();
+  startGate.resolve();
+  const [started, paused] = await Promise.all([starting, pausing]);
+
+  assert.equal(started.status, 'paused_recovery');
+  assert.equal(paused.status, 'paused_recovery');
+  assert.equal(
+    harness.calls.some(([name]) => name === 'worker.start'),
+    false
+  );
+  assert.equal(
+    harness.calls.some(([name]) => name === 'draft.remove'),
+    false
+  );
+  assert.deepEqual(
+    harness.calls.filter(([name]) => name === 'runtime').map((call) => call[1]),
+    ['BATCH_SESSION_START', 'BATCH_SESSION_PAUSE']
+  );
+});
+
+test('teardown pause persistence failure publishes a local recovery checkpoint', async () => {
+  const harness = createCommandHarness({
+    runtimeFailures: {
+      BATCH_SESSION_PAUSE: {
+        error: 'teardown_pause_persistence_fixture'
+      }
+    }
+  });
+
+  await assert.rejects(
+    harness.controller.pause('page_teardown'),
+    (error) => error?.code === 'teardown_pause_persistence_fixture'
+  );
+
+  const recovery = assertPendingRecoveryProjection(harness);
+  assert.equal(recovery.status, 'paused_recovery');
+  assert.equal(recovery.persistencePending, true);
+  assert.equal(
+    harness.calls.some(
+      ([name, type]) => name === 'runtime' && type === 'BATCH_SESSION_STOP'
+    ),
+    false
+  );
 });
 
 test('detaches old online listeners before attaching a replacement target', async () => {
