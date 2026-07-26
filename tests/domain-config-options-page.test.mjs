@@ -39,11 +39,13 @@ test('options page exposes Profile, Site, Pair, default, quota, and explicit imp
   assert.equal(document.getElementById('applyImportConfigBtn').hidden, true);
 });
 
-test('options composition uses local domain repositories and never writes a Profile password to sync', () => {
+test('options composition uses a restricted background secret client and never writes passwords to storage', () => {
   const source = fs.readFileSync(new URL('options.js', root), 'utf8');
 
   assert.match(source, /createDomainConfigOptionsController/);
-  assert.match(source, /createProfileSecretRepository\(chrome\.storage\.local\)/);
+  assert.match(source, /createProfileSecretClient\(chrome\.runtime\)/);
+  assert.doesNotMatch(source, /createProfileSecretRepository/);
+  assert.doesNotMatch(source, /PROFILE_SECRETS_KEY/);
   assert.doesNotMatch(source, /auto_fill_user_password/);
   assert.doesNotMatch(source, /userPassword[\s\S]{0,160}chrome\.storage\.sync\.set/);
   assert.match(source, /controller\.previewImport/);

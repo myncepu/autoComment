@@ -54,7 +54,9 @@ function createHarness({
   failPower = false,
   existingTabs = [],
   prepareStartStoragePatch,
-  cleanupPreparedStart
+  cleanupPreparedStart,
+  currentConfigRevision = 7,
+  loadRecentSuccessUrls = async () => []
 } = {}) {
   const data = {};
   const setCalls = [];
@@ -233,6 +235,8 @@ function createHarness({
     runtime,
     sessionJournal: createBatchSessionJournal(sessionArea),
     generateOwnershipEpoch: () => 'epoch-test',
+    loadDomainConfig: async () => ({ revision: currentConfigRevision }),
+    loadRecentSuccessUrls,
     prepareStartStoragePatch,
     cleanupPreparedStart,
     now: () => {
@@ -511,6 +515,91 @@ test('rejects a plan changed after confirmation before persistence or power', as
   });
   assert.deepEqual(harness.setCalls, []);
   assert.deepEqual(harness.powerCalls, []);
+});
+
+test('rejects a confirmed plan after domain config changes with zero start effects', async () => {
+  const preparedCalls = [];
+  const harness = createHarness({
+    currentConfigRevision: 8,
+    prepareStartStoragePatch: async (input) => {
+      preparedCalls.push(input);
+      return {};
+    }
+  });
+
+  const response = await harness.controller.handleMessage(
+    await assignmentStartMessage()
+  );
+
+  assert.deepEqual(response, {
+    ok: false,
+    error: 'domain_config_changed'
+  });
+  assert.deepEqual(preparedCalls, []);
+  assert.deepEqual(harness.setCalls, []);
+  assert.deepEqual(harness.powerCalls, []);
+  assert.deepEqual(harness.createdTabs, []);
+});
+
+test('fails closed when recent-success history changes or is unavailable', async () => {
+  const message = await assignmentStartMessage();
+  const changed = createHarness({
+    loadRecentSuccessUrls: async () => [message.plan.tasks[0].targetUrl]
+  });
+  const changedResponse = await changed.controller.handleMessage(message);
+  assert.deepEqual(changedResponse, {
+    ok: false,
+    error: 'recent_success_history_changed'
+  });
+  assert.deepEqual(changed.setCalls, []);
+  assert.deepEqual(changed.powerCalls, []);
+
+  const unavailable = createHarness({
+    loadRecentSuccessUrls: async () => {
+      throw new Error('database unavailable');
+    }
+  });
+  const unavailableResponse = await unavailable.controller.handleMessage(
+    await assignmentStartMessage()
+  );
+  assert.deepEqual(unavailableResponse, {
+    ok: false,
+    error: 'recent_success_history_unavailable'
+  });
+  assert.deepEqual(unavailable.setCalls, []);
+  assert.deepEqual(unavailable.powerCalls, []);
+});
+
+test('reports batch ownership only to the exact active content tab', async () => {
+  const harness = createHarness();
+  const started = await harness.controller.handleMessage(
+    await assignmentStartMessage()
+  );
+  assert.equal(started.ok, true);
+  const active = await harness.controller.handleMessage({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-plan',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 501,
+    windowId: 42
+  });
+  assert.equal(active.ok, true);
+
+  assert.deepEqual(await harness.controller.handleMessage(
+    { type: 'BATCH_GET_TAB_MODE' },
+    { id: 'extension-id', tab: { id: 501, windowId: 42 } }
+  ), {
+    ok: true,
+    batchOwned: true
+  });
+  assert.deepEqual(await harness.controller.handleMessage(
+    { type: 'BATCH_GET_TAB_MODE' },
+    { id: 'extension-id', tab: { id: 502, windowId: 42 } }
+  ), {
+    ok: true,
+    batchOwned: false
+  });
 });
 
 test('atomically persists a confirmed v3 checkpoint with its prepared secret patch', async () => {

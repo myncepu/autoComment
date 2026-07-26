@@ -298,6 +298,10 @@ async function createProductionHarness(options = {}) {
     },
     now: runtimeNow,
     generateOwnershipEpoch: () => `test-epoch-${++nextOwnershipEpoch}`,
+    loadDomainConfig: async () => (
+      options.domainConfig || { revision: 0 }
+    ),
+    loadRecentSuccessUrls: async () => [],
     logger: { warn() {} }
   });
   const dom = new JSDOM(`<!doctype html>

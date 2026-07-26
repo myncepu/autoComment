@@ -442,6 +442,63 @@ globalThis.getBatchTaskKey = getBatchTaskKey;`,
   }), 'batch-a:task-a:site-a:2');
 });
 
+test('owned batch tabs fail closed before any manual default initialization', async () => {
+  const initializationSource = sourceBetween(
+    'async function getInitialPageMode()',
+    '\n\n  async function initOnPageReady()'
+  );
+  const messages = [];
+  const context = vm.createContext({
+    chrome: {
+      runtime: {
+        async sendMessage(message) {
+          messages.push(plain(message));
+          return { ok: true, batchOwned: true };
+        }
+      }
+    }
+  });
+  vm.runInContext(
+    `${initializationSource}
+globalThis.getInitialPageMode = getInitialPageMode;`,
+    context
+  );
+
+  assert.deepEqual(plain(await context.getInitialPageMode()), {
+    batchOwned: true
+  });
+  assert.deepEqual(messages, [{ type: 'BATCH_GET_TAB_MODE' }]);
+
+  context.chrome.runtime.sendMessage = async () => {
+    throw new Error('service worker unavailable');
+  };
+  assert.deepEqual(plain(await context.getInitialPageMode()), {
+    batchOwned: true
+  });
+});
+
+test('dynamic observers start only after ownership establishes manual mode', () => {
+  const initializationSource = sourceBetween(
+    'async function initOnPageReady()',
+    '\n\n  let hasNotifiedCommentBox'
+  );
+  const ownershipIndex = initializationSource.indexOf(
+    'const pageMode = await getInitialPageMode();'
+  );
+  const earlyReturnIndex = initializationSource.indexOf(
+    'if (pageMode.batchOwned) return;'
+  );
+  const observerIndex = initializationSource.indexOf(
+    'observeDynamicElements();'
+  );
+  const fillIndex = initializationSource.indexOf('fillInputs();');
+
+  assert.ok(ownershipIndex >= 0);
+  assert.ok(earlyReturnIndex > ownershipIndex);
+  assert.ok(observerIndex > earlyReturnIndex);
+  assert.ok(fillIndex > earlyReturnIndex);
+});
+
 test('a failed submitting phase write clears pre-click context and prevents a click', async () => {
   const cleared = [];
   let clicked = false;

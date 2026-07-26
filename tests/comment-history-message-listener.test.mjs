@@ -190,6 +190,29 @@ test('accepts the history page filter fields at the message top level', async ()
   });
 });
 
+test('routes a finite recent-success cutoff without page truncation', async () => {
+  let received;
+  const { dispatch } = createFixture({
+    async listRecentSuccessfulTargetUrls(payload) {
+      received = payload;
+      return ['https://target.test/one'];
+    }
+  });
+
+  const result = await dispatch({
+    type: 'HISTORY_RECENT_SUCCESS_URLS',
+    since: 1234,
+    limit: 1,
+    cursor: { submittedAt: 2, id: 'ignored' }
+  });
+
+  assert.deepEqual(received, { since: 1234 });
+  assert.deepEqual(result.response, {
+    ok: true,
+    data: ['https://target.test/one']
+  });
+});
+
 test('accepts only normalized filters at export start and only session cursor at 500-row chunks', async () => {
   const calls = [];
   const { dispatch } = createFixture({

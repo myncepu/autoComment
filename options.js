@@ -15,11 +15,8 @@ import {
   createDomainConfigRepository
 } from './lib/domain-config-repository.mjs';
 import {
-  createProfileSecretRepository
-} from './lib/profile-secret-repository.mjs';
-import {
-  migrateLegacyDomainConfig
-} from './lib/domain-config-migration.mjs';
+  createProfileSecretClient
+} from './lib/profile-secret-message-listener.mjs';
 import {
   createDomainConfigOptionsController
 } from './lib/domain-config-options-controller.mjs';
@@ -127,27 +124,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   const configRepository = createDomainConfigRepository(chrome.storage.local);
-  const secretRepository =
-    createProfileSecretRepository(chrome.storage.local);
+  const secretRepository = createProfileSecretClient(chrome.runtime);
   const controller = createDomainConfigOptionsController({
     configRepository,
     secretRepository
   });
-  try {
-    await migrateLegacyDomainConfig({
-      storage: chrome.storage,
-      configRepository,
-      secretRepository
-    });
-  } catch (_) {
-    showStatus(
-      ui.settingsStatus,
-      '旧配置迁移尚未完成，请检查现有配置',
-      true,
-      5000
-    );
-  }
-
   let snapshot = await controller.snapshot();
   let editingProfileId = snapshot.profiles[0]?.id ?? null;
   let editingSiteId = snapshot.promotionSites[0]?.id ?? null;

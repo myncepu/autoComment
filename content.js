@@ -1201,13 +1201,31 @@
     };
   }
 
+  function restoredContextDiagnostic(ctx) {
+    return {
+      batchId: ctx?.batchId,
+      taskId: ctx?.taskId,
+      urlIndex: ctx?.urlIndex,
+      attempt: ctx?.attempt,
+      profileId: ctx?.profileId,
+      promotionSiteId: ctx?.promotionSiteId,
+      hasHistory: Boolean(ctx?.history),
+      aiContentLength: typeof ctx?.aiContent === 'string'
+        ? ctx.aiContent.length
+        : 0
+    };
+  }
+
   async function confirmRestoredBatchSubmit(ctx) {
     if (!hasCompleteBatchResultIdentity(
       ctx?.batchId,
       ctx?.urlIndex,
       ctx?.attempt
     )) return;
-    console.log('[AutoComment] 恢复提交后上下文，仅补发确认，不重新生成AI:', ctx);
+    console.log(
+      '[AutoComment] 恢复提交后上下文，仅补发确认，不重新生成AI:',
+      restoredContextDiagnostic(ctx)
+    );
     const message = {
       type: 'BATCH_HANDLE_CONFIRM',
       batchId: ctx.batchId,
@@ -1234,7 +1252,9 @@
     try {
       context = await window.AutoCommentBatchSubmitContext.restore();
     } catch (_) {}
-    console.log('[AutoComment] restoreBatchContext batchSubmitCtx:', context);
+    console.log('[AutoComment] restoreBatchContext:', {
+      restored: Boolean(context)
+    });
     if (context) await confirmRestoredBatchSubmit(context);
   }
 
@@ -1370,7 +1390,11 @@
 
       await reportSuccessToBatch(promotionText, history);
     } catch (err) {
-      console.error('[AutoComment] handleBatchTaskForAutoMode 异常:', err);
+      console.error('[AutoComment] handleBatchTaskForAutoMode 异常', {
+        errorCode: typeof err?.code === 'string'
+          ? err.code
+          : 'auto_mode_failed'
+      });
     }
   }
 
@@ -1518,7 +1542,9 @@
           }
         }
       } catch (e) {
-        console.log('[AutoComment] 点击回复链接失败:', e.message);
+        console.log('[AutoComment] 点击回复链接失败', {
+          errorCode: 'reply_click_failed'
+        });
       }
     }
 
@@ -1587,14 +1613,32 @@
     return !!findLikelyCommentTextarea({ allowGenericFallback: false });
   }
 
+  async function getInitialPageMode() {
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'BATCH_GET_TAB_MODE'
+      });
+      if (response?.ok && typeof response.batchOwned === 'boolean') {
+        return { batchOwned: response.batchOwned };
+      }
+    } catch (_) {}
+    // Unknown ownership must never fall through to live manual defaults.
+    return { batchOwned: true };
+  }
+
   async function initOnPageReady() {
     console.log('[AutoComment] initOnPageReady 开始');
     // 只恢复提交后的补确认上下文；正式批处理执行只由 BATCH_HANDLE 触发。
     await restoreBatchContext();
 
-    fillInputs();
     setupFormSubmitListener();
     applyOutlinkFloatingButtonVisibility();
+
+    const pageMode = await getInitialPageMode();
+    if (pageMode.batchOwned) return;
+
+    observeDynamicElements();
+    fillInputs();
 
     getAutoOpenQwenPanelSetting().then((shouldOpen) => {
       if (shouldOpen) {
@@ -1610,7 +1654,6 @@
       }
     });
 
-    observeDynamicElements();
   }
 
   let hasNotifiedCommentBox = false;
@@ -2635,7 +2678,7 @@
         button.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'nearest' });
         return true;
       } catch (e) {
-        console.log('[AutoComment] 滚动失败:', e.message);
+        console.log('[AutoComment] 滚动失败', { errorCode: 'scroll_failed' });
         return false;
       }
     }
@@ -2646,7 +2689,6 @@
   // 点击提交按钮并处理结果
   async function clickCommentSubmitButton() {
     console.log('[AutoComment] ===== 开始自动提交评论 =====');
-    console.log('[AutoComment] 当前URL:', window.location.href);
 
     // 列出页面上所有按钮供调试
     const allButtons = document.querySelectorAll('button, input[type="submit"], input[type="button"], a[class*="submit"], input[type="image"]');
@@ -2656,8 +2698,7 @@
       id: b.id,
       className: b.className,
       name: b.name,
-      value: b.value,
-      text: b.textContent ? b.textContent.trim().substring(0, 50) : ''
+      disabled: Boolean(b.disabled)
     })));
 
     const resolved = resolveCommentFormAndSubmitButton();
@@ -2842,15 +2883,16 @@
       id: button.id,
       className: button.className,
       name: button.name,
-      value: button.value,
-      text: button.textContent ? button.textContent.trim().substring(0, 50) : '',
       disabled: button.disabled
     });
 
     // 获取评论文本框内容用于确认
     const commentTextarea = findLikelyCommentTextarea({ allowGenericFallback: true });
     if (commentTextarea) {
-      console.log('[AutoComment] 评论文本框内容:', commentTextarea.value ? commentTextarea.value.substring(0, 100) + '...' : '(空)');
+      console.log('[AutoComment] 评论文本框状态:', {
+        filled: Boolean(commentTextarea.value),
+        length: commentTextarea.value?.length || 0
+      });
     }
 
     if (!isButtonClickable(button)) {
@@ -2868,7 +2910,9 @@
           formEl.requestSubmit(submitter);
           return true;
         } catch (err) {
-          console.log('[AutoComment] requestSubmit 失败:', err.message);
+          console.log('[AutoComment] requestSubmit 失败', {
+            errorCode: 'request_submit_failed'
+          });
         }
       }
       return false;
@@ -2941,7 +2985,9 @@
         console.log('[AutoComment] waitForSubmitOrNavigate 结果:', submitResult);
         return { success: true, button: button, submitResult: submitResult };
       } catch (e) {
-        console.log('[AutoComment] 合成事件失败，尝试 button.click():', e.message);
+        console.log('[AutoComment] 合成事件失败，尝试 button.click()', {
+          errorCode: 'synthetic_click_failed'
+        });
         try {
           button.click();
           recordFormSubmit();
@@ -2950,7 +2996,9 @@
           console.log('[AutoComment] waitForSubmitOrNavigate 结果:', submitResult);
           return { success: true, button: button, submitResult: submitResult };
         } catch (e2) {
-          console.log('[AutoComment] button.click() 也失败:', e2.message);
+          console.log('[AutoComment] button.click() 也失败', {
+            errorCode: 'button_click_failed'
+          });
 
           const formEl = button.form || button.closest('form');
           if (tryRequestSubmit(formEl, button)) {
@@ -2970,14 +3018,18 @@
               return { success: true, button: button, submitResult: submitResult };
             }
           } catch (e3) {
-            console.log('[AutoComment] 表单提交也失败:', e3.message);
+            console.log('[AutoComment] 表单提交也失败', {
+              errorCode: 'form_submit_failed'
+            });
           }
 
           return { success: false, error: '点击按钮失败: ' + e2.message };
         }
       }
     } catch (e) {
-      console.log('[AutoComment] 直接点击失败:', e.message);
+      console.log('[AutoComment] 直接点击失败', {
+        errorCode: 'direct_click_failed'
+      });
 
       try {
         const event = new MouseEvent('click', {
@@ -2992,7 +3044,9 @@
         console.log('[AutoComment] waitForSubmitOrNavigate 结果:', submitResult);
         return { success: true, button: button, submitResult: submitResult };
       } catch (e2) {
-        console.log('[AutoComment] dispatchEvent 点击也失败:', e2.message);
+        console.log('[AutoComment] dispatchEvent 点击也失败', {
+          errorCode: 'dispatch_click_failed'
+        });
 
         const formEl = button.form || button.closest('form');
         if (tryRequestSubmit(formEl, button)) {
@@ -3012,7 +3066,9 @@
             return { success: true, button: button, submitResult: submitResult };
           }
         } catch (e3) {
-          console.log('[AutoComment] 表单提交失败:', e3.message);
+          console.log('[AutoComment] 表单提交失败', {
+            errorCode: 'form_submit_failed'
+          });
         }
 
         return { success: false, error: '点击按钮失败: ' + e.message };
@@ -3036,7 +3092,8 @@
       name: targetTextarea.name,
       id: targetTextarea.id,
       className: targetTextarea.className,
-      currentValue: targetTextarea.value ? targetTextarea.value.substring(0, 50) + '...' : '(空)'
+      filled: Boolean(targetTextarea.value),
+      currentLength: targetTextarea.value?.length || 0
     });
 
     // 如果文本框已有内容，可以选择覆盖或跳过
@@ -3116,7 +3173,9 @@
         targetTextarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
       }
     } catch (e) {
-      console.log('[AutoComment] 聚焦文本框失败:', e.message);
+      console.log('[AutoComment] 聚焦文本框失败', {
+        errorCode: 'editor_focus_failed'
+      });
     }
   }
 
@@ -3416,7 +3475,7 @@
     // 验证 name（某些网站不强制要求姓名，不影响提交）
     if (nameInput) {
       const nv = (nameInput.value || '').trim();
-      validationLog.name = { filled: nv.length > 0, value: nv.substring(0, 20) };
+      validationLog.name = { filled: nv.length > 0, length: nv.length };
     } else {
       validationLog.name = { found: false, optional: true };
     }
@@ -3424,7 +3483,7 @@
     // 验证 email（某些网站（如 Jetpack、Disqus）不强制要求邮箱，不影响提交）
     if (emailInput) {
       const ev = (emailInput.value || '').trim();
-      validationLog.email = { filled: ev.length > 0, value: ev.substring(0, 20) };
+      validationLog.email = { filled: ev.length > 0, length: ev.length };
     } else {
       validationLog.email = { found: false, optional: true };
     }
@@ -4222,8 +4281,11 @@
             _sendResponse({ ok: true, urlIndex: message.urlIndex });
           })
           .catch((err) => {
-            console.error('[content] BATCH_HANDLE 处理异常:', err);
-            _sendResponse({ ok: false, error: String(err) });
+            const errorCode = typeof err?.code === 'string'
+              ? err.code
+              : 'batch_task_failed';
+            console.error('[content] BATCH_HANDLE 处理异常', { errorCode });
+            _sendResponse({ ok: false, error: errorCode });
           });
         return true;
       }
@@ -4263,7 +4325,11 @@
     check
   ) {
     const reason = (check && check.reason) || '非法网站拦截：命中赌博/色情规则';
-    console.warn('[content] 检测到非法网站，上报 blocked_illegal 并关闭网页:', { batchId, urlIndex, url, reason });
+    console.warn('[content] 检测到非法网站，上报 blocked_illegal 并关闭网页:', {
+      batchId,
+      urlIndex,
+      reasonCode: typeof reason === 'string' ? reason : 'blocked_illegal'
+    });
     await writePendingResult(
       batchId,
       urlIndex,
@@ -4338,7 +4404,11 @@
       console.log('[content] 2/6 检查是否已处理过...');
       const existingResult = await checkExistingBatchResult(batchId, url, urlIndex);
       if (existingResult) {
-        console.log('[content] 该URL已处理过，跳过AI生成，直接上报:', existingResult);
+        console.log('[content] 该任务已处理过，跳过AI生成', {
+          batchId,
+          urlIndex,
+          result: existingResult?.result || 'existing'
+        });
         await reportAlreadyCommented(
           batchId,
           urlIndex,
@@ -4419,7 +4489,7 @@
         await reportBatchPhase(context, 'generating');
         aiContent = await generatePromotionCopyWithLlm();
       }
-      console.log('[content] AI文案生成完成，长度:', aiContent ? aiContent.length : 0, aiContent ? aiContent.substring(0, 80) + '...' : 'null');
+      console.log('[content] AI文案生成完成，长度:', aiContent ? aiContent.length : 0);
       console.log('[content] 5/6 填充表单字段...');
       await reportBatchPhase(context, 'filling');
       const manualFillResult = tryFillCommentTextareaWithPromotion(aiContent);
@@ -4514,7 +4584,11 @@
         await new Promise(resolve => setTimeout(resolve, 3000));
         const ta = findLikelyCommentTextarea({ allowGenericFallback: true });
         const formCleared = !ta || !ta.value.trim();
-        console.log('[content] 超时检测表单状态:', { formCleared, textareaValue: ta ? ta.value.substring(0, 50) : 'not found' });
+        console.log('[content] 超时检测表单状态:', {
+          formCleared,
+          textareaFound: Boolean(ta),
+          textareaLength: ta?.value?.length || 0
+        });
         if (!formCleared) {
           throw new Error('提交超时，表单未被清空');
         }
@@ -4538,7 +4612,15 @@
       console.log('[content] background 响应:', confirmation.acknowledgement);
       console.log('[content] handleBatchTask 完成 <<<', { batchId, urlIndex });
     } catch (err) {
-      console.warn('[content] handleBatchTask 捕获错误:', err.message);
+      console.warn('[content] handleBatchTask 捕获错误', {
+        errorCode: typeof err?.code === 'string'
+          ? err.code
+          : (
+              err?.message === '__NO_COMMENT_BOX__'
+                ? 'no_comment_box'
+                : 'batch_task_failed'
+            )
+      });
 
       // 特殊错误：未找到评论框
       if (err.message === '__NO_COMMENT_BOX__') {
@@ -4877,7 +4959,10 @@
     url,
     aiContent
   ) {
-    console.log('[content] 检测到需手动处理，上报 manual_required 并关闭网页:', { batchId, urlIndex, url });
+    console.log('[content] 检测到需手动处理，上报 manual_required 并关闭网页:', {
+      batchId,
+      urlIndex
+    });
     await writePendingResult(
       batchId,
       urlIndex,
@@ -4919,7 +5004,15 @@
     errorMessage,
     errorCode
   ) {
-    console.log('[content] writePendingResult >>>', { batchId, urlIndex, attempt, url, result, aiContentLen: aiContent ? aiContent.length : 0, errorMessage, errorCode });
+    console.log('[content] writePendingResult >>>', {
+      batchId,
+      urlIndex,
+      attempt,
+      result,
+      aiContentLength: aiContent ? aiContent.length : 0,
+      hasError: Boolean(errorMessage),
+      errorCode
+    });
     const delivery = await sendProvenBatchMessage({
       type: 'BATCH_PERSIST_PENDING_RESULT',
       batchId,

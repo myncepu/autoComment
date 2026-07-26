@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { webcrypto } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import vm from 'node:vm';
 import {
   createBatchPlanDraftController
 } from '../lib/batch-plan-draft-controller.mjs';
@@ -261,4 +263,60 @@ test('runtime password sentinel exists only in the three approved local secret s
   );
   assert.deepEqual(pathsContaining(passwordResponse, sentinel), ['$.password']);
   assert.equal(passwordResponse.password, sentinel);
+});
+
+test('production submit-context diagnostics omit identity and comment values', () => {
+  const source = readFileSync(
+    new URL('../content.js', import.meta.url),
+    'utf8'
+  );
+  const start = source.indexOf('function restoredContextDiagnostic(');
+  const end = source.indexOf(
+    '\n\n  async function confirmRestoredBatchSubmit',
+    start
+  );
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const context = vm.createContext({});
+  vm.runInContext(
+    `${source.slice(start, end)}
+globalThis.restoredContextDiagnostic = restoredContextDiagnostic;`,
+    context
+  );
+  const sentinel = 'PRIVATE-SENTINEL-DO-NOT-LOG';
+  const diagnostic = context.restoredContextDiagnostic({
+    batchId: 'batch-a',
+    taskId: 'task-a',
+    urlIndex: 1,
+    attempt: 2,
+    profileId: 'profile-a',
+    promotionSiteId: 'site-a',
+    name: sentinel,
+    email: `${sentinel}@example.test`,
+    aiContent: sentinel,
+    history: {
+      commentText: sentinel,
+      targetPageUrl: `https://target.test/${sentinel}`
+    }
+  });
+
+  assert.equal(JSON.stringify(diagnostic).includes(sentinel), false);
+  assert.equal(diagnostic.aiContentLength, sentinel.length);
+  assert.equal(diagnostic.hasHistory, true);
+});
+
+test('production content diagnostics never log raw URLs comments or exception messages', () => {
+  const source = readFileSync(
+    new URL('../content.js', import.meta.url),
+    'utf8'
+  );
+  assert.doesNotMatch(source, /console\.(?:log|warn|error)\([^\n]*location\.href/);
+  assert.doesNotMatch(
+    source,
+    /console\.(?:log|warn|error)\([^\n]*(?:substring|slice)\(0,\s*(?:50|80|100)\)/
+  );
+  assert.doesNotMatch(
+    source,
+    /console\.(?:log|warn|error)\([^\n]*\b(?:err|error|e|e2|e3)\.message/
+  );
 });

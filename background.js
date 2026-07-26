@@ -23,6 +23,9 @@ import {
   installBatchDomainConfigListener
 } from './lib/batch-domain-config-listener.mjs';
 import { createProfileSecretRepository } from './lib/profile-secret-repository.mjs';
+import {
+  installProfileSecretMessageListener
+} from './lib/profile-secret-message-listener.mjs';
 import { migrateLegacyDomainConfig } from './lib/domain-config-migration.mjs';
 import {
   createBatchSecretAwareRuntimeController,
@@ -51,6 +54,12 @@ const batchRuntimeController = createBatchRuntimeController({
   tabs: chrome.tabs,
   windows: chrome.windows,
   runtime: chrome.runtime,
+  loadDomainConfig: () => domainConfigRepository.load(),
+  loadRecentSuccessUrls: () => (
+    commentHistoryService.listRecentSuccessfulTargetUrls({
+      since: Date.now() - (24 * 60 * 60 * 1000)
+    })
+  ),
   prepareStartStoragePatch: async ({
     checkpoint,
     eligibleProfileIds
@@ -104,6 +113,11 @@ const domainConfigReady = (async () => {
     secretRepository: profileSecretRepository
   });
 })();
+installProfileSecretMessageListener(
+  chrome,
+  profileSecretRepository,
+  { ready: domainConfigReady }
+);
 
 const commentHistoryService = createCommentHistoryService({
   repository: commentHistoryRepository,
@@ -335,7 +349,12 @@ async function broadcastBatchConfirmed(
 // content.js 确认评论已提交（标签页可能刷新，context 丢失，background 仍活着）
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message && message.type === 'BATCH_HANDLE_CONFIRM') {
-    console.log('[background] 收到 BATCH_HANDLE_CONFIRM >>>', { batchId: message.batchId, urlIndex: message.urlIndex, url: message.url, aiContentLen: message.aiContent ? message.aiContent.length : 0, sender: sender.tab ? sender.tab.id : 'N/A', time: new Date().toISOString() });
+    console.log('[background] 收到 BATCH_HANDLE_CONFIRM >>>', {
+      batchId: message.batchId,
+      urlIndex: message.urlIndex,
+      aiContentLength: message.aiContent ? message.aiContent.length : 0,
+      senderTabId: sender.tab?.id ?? null
+    });
     (async () => {
       try {
         const committed = await broadcastBatchConfirmed(message, {
