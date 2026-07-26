@@ -38,13 +38,33 @@ import { isDurableBatchConfirmation } from './lib/batch-scheduler.mjs';
 installLlmMessageListener(chrome);
 installActionClickHandler(chrome);
 const batchResultStore = createBatchResultStore(chrome.storage.local);
+const domainConfigRepository = createDomainConfigRepository(chrome.storage.local);
+const profileSecretRepository = createProfileSecretRepository(chrome.storage.local);
+const batchSecretVaultStore = createBatchSecretVaultStore(chrome.storage.local);
 const batchRuntimeController = createBatchRuntimeController({
   storageArea: chrome.storage.local,
   sessionJournal: createBatchSessionJournal(chrome.storage.session),
   power: chrome.power,
   tabs: chrome.tabs,
   windows: chrome.windows,
-  runtime: chrome.runtime
+  runtime: chrome.runtime,
+  prepareStartStoragePatch: async ({
+    checkpoint,
+    eligibleProfileIds
+  }) => {
+    const entry = await batchSecretVaultStore.buildPreparedEntry(
+      checkpoint.batchId,
+      eligibleProfileIds,
+      profileSecretRepository
+    );
+    return batchSecretVaultStore.buildStoragePatch(
+      checkpoint.batchId,
+      entry
+    );
+  },
+  cleanupPreparedStart: ({ batchId }) => (
+    batchSecretVaultStore.clear(batchId)
+  )
 });
 const batchSubmitContextStore = createBatchSubmitContextStore(
   chrome.storage.local,
@@ -63,15 +83,12 @@ const commentHistoryRepository = createLazyCloudSyncRepository(
   () => openCommentHistoryDb()
 );
 
-const domainConfigRepository = createDomainConfigRepository(chrome.storage.local);
 const cloudSyncService = createCloudSyncRuntime({
   repository: commentHistoryRepository,
   domainConfigRepository,
   storage: chrome.storage,
   fetchImpl: fetch
 });
-const profileSecretRepository = createProfileSecretRepository(chrome.storage.local);
-const batchSecretVaultStore = createBatchSecretVaultStore(chrome.storage.local);
 const secretAwareBatchRuntimeController = createBatchSecretAwareRuntimeController(
   batchRuntimeController,
   batchSecretVaultStore

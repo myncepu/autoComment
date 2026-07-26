@@ -476,6 +476,14 @@ test('moves one task through active, submitting, and terminal states', () => {
     active.checkpoint.tasks['0'],
     {
       urlIndex: 0,
+      taskId: 'batch-1:legacy:0',
+      profileId: 'default-profile',
+      promotionSiteId: 'default-promotion-site',
+      assignmentPairId: 'default-assignment-pair',
+      assignmentSource: 'legacy_default',
+      attemptCount: 1,
+      lastFailurePhase: null,
+      lastErrorCode: null,
       attempt: 1,
       state: 'active',
       phase: null,
@@ -508,7 +516,18 @@ test('moves one task through active, submitting, and terminal states', () => {
       errorMessage: null,
       timestamp: 1400,
       elapsed: 0,
-      originalRow: ['0', 'https://example.test/0']
+      originalRow: ['0', 'https://example.test/0'],
+      taskId: 'batch-1:legacy:0',
+      profileId: 'default-profile',
+      profileDisplayName: '默认身份',
+      promotionSiteId: 'default-promotion-site',
+      promotionSiteName: '默认推广网站',
+      promotionSiteUrl: '',
+      assignmentPairId: 'default-assignment-pair',
+      assignmentSource: 'legacy_default',
+      configRevision: 0,
+      attemptCount: 1,
+      skipReason: null
     }
   );
   assert.equal(terminal.checkpoint.cursor.nextIndex, 1);
@@ -787,6 +806,14 @@ test('normalizes active and submitting work into one safe paused checkpoint', ()
     normalized.checkpoint.tasks['1'],
     {
       urlIndex: 1,
+      taskId: 'batch-1:legacy:1',
+      profileId: 'default-profile',
+      promotionSiteId: 'default-promotion-site',
+      assignmentPairId: 'default-assignment-pair',
+      assignmentSource: 'legacy_default',
+      attemptCount: 1,
+      lastFailurePhase: null,
+      lastErrorCode: null,
       attempt: 1,
       state: 'queued',
       phase: null,
@@ -822,7 +849,18 @@ test('normalizes active and submitting work into one safe paused checkpoint', ()
       errorMessage: '任务在提交确认前中断，评论可能已提交，请人工确认',
       timestamp: 2000,
       elapsed: 1,
-      originalRow: ['2', 'https://example.test/2']
+      originalRow: ['2', 'https://example.test/2'],
+      taskId: 'batch-1:legacy:2',
+      profileId: 'default-profile',
+      profileDisplayName: '默认身份',
+      promotionSiteId: 'default-promotion-site',
+      promotionSiteName: '默认推广网站',
+      promotionSiteUrl: '',
+      assignmentPairId: 'default-assignment-pair',
+      assignmentSource: 'legacy_default',
+      configRevision: 0,
+      attemptCount: 1,
+      skipReason: null
     }
   );
   assert.equal(repeated.changed, false);
@@ -857,13 +895,13 @@ test('deduplicates repeated worker tab IDs during interruption recovery', () => 
   assert.equal('orphanWindowIds' in normalized, false);
 });
 
-test('migrates a version 1 checkpoint to attempt-aware version 2', () => {
+test('migrates a version 1 checkpoint to assignment-aware version 3', () => {
   const version1 = createVersion1CheckpointFixture();
   const migrated = migrateBatchRuntimeCheckpoint(version1, 2000);
 
   assert.equal(migrated.ok, true);
   assert.equal(migrated.changed, true);
-  assert.equal(migrated.checkpoint.version, 2);
+  assert.equal(migrated.checkpoint.version, 3);
   assert.equal(migrated.checkpoint.tasks['0'].attempt, 1);
   assert.deepEqual(migrated.checkpoint.tasks['0'].manualResolution, {
     status: 'idle',
@@ -1048,6 +1086,99 @@ test('retries a safe terminal attempt without deleting attempt history', () => {
   assert.equal(retried.checkpoint.results[0].attempt, 1);
 });
 
+test('automatic retry is one-time, pre-submit, allowlisted, and assignment-stable', () => {
+  const terminal = createTerminalCheckpoint({
+    result: 'fail',
+    errorCode: 'content_script_unavailable'
+  });
+  terminal.tasks['0'].lastFailurePhase = 'loading';
+  const retried = applyBatchRuntimeEvent(terminal, {
+    type: 'task_retried',
+    batchId: 'batch-1',
+    taskId: 'batch-1:legacy:0',
+    urlIndex: 0,
+    attempt: 1,
+    automatic: true,
+    retryable: true,
+    hasSubmitContext: false
+  }, 2200);
+
+  assert.equal(retried.ok, true);
+  assert.equal(retried.checkpoint.tasks['0'].attempt, 2);
+  assert.equal(retried.checkpoint.tasks['0'].profileId, 'default-profile');
+  assert.equal(
+    retried.checkpoint.tasks['0'].promotionSiteId,
+    'default-promotion-site'
+  );
+
+  const secondTerminal = structuredClone(retried.checkpoint);
+  secondTerminal.tasks['0'].state = 'terminal';
+  secondTerminal.tasks['0'].lastFailurePhase = 'loading';
+  secondTerminal.tasks['0'].lastErrorCode = 'content_script_unavailable';
+  secondTerminal.results.push({
+    ...secondTerminal.results[0],
+    attempt: 2,
+    attemptCount: 2,
+    timestamp: 2300
+  });
+  const blocked = applyBatchRuntimeEvent(secondTerminal, {
+    type: 'task_retried',
+    batchId: 'batch-1',
+    taskId: 'batch-1:legacy:0',
+    urlIndex: 0,
+    attempt: 2,
+    automatic: true,
+    retryable: true,
+    hasSubmitContext: false
+  }, 2400);
+
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.error, 'automatic_retry_blocked');
+});
+
+test('automatic retry rejects submit-risk, non-retryable, and unknown failures', () => {
+  const cases = [{
+    phase: 'submitting',
+    errorCode: 'task_timeout',
+    retryable: true,
+    hasSubmitContext: false
+  }, {
+    phase: 'loading',
+    errorCode: 'task_timeout',
+    retryable: false,
+    hasSubmitContext: false
+  }, {
+    phase: 'loading',
+    errorCode: 'unknown_failure',
+    retryable: true,
+    hasSubmitContext: false
+  }, {
+    phase: 'loading',
+    errorCode: 'task_timeout',
+    retryable: true,
+    hasSubmitContext: true
+  }];
+
+  for (const entry of cases) {
+    const terminal = createTerminalCheckpoint({
+      result: 'fail',
+      errorCode: entry.errorCode
+    });
+    terminal.tasks['0'].lastFailurePhase = entry.phase;
+    const response = applyBatchRuntimeEvent(terminal, {
+      type: 'task_retried',
+      batchId: 'batch-1',
+      taskId: 'batch-1:legacy:0',
+      urlIndex: 0,
+      attempt: 1,
+      automatic: true,
+      retryable: entry.retryable,
+      hasSubmitContext: entry.hasSubmitContext
+    }, 2200);
+    assert.equal(response.error, 'automatic_retry_blocked');
+  }
+});
+
 test('requires confirmation for uncertain submissions and rejects stale attempts', () => {
   const terminal = createTerminalCheckpoint({
     result: 'manual_required',
@@ -1138,6 +1269,280 @@ test('assigns deterministic error codes when the legacy property is absent', () 
     assert.equal(migrated.ok, true);
     assert.equal(migrated.checkpoint.results[0].errorCode, expectedErrorCode);
   }
+});
+
+function assignmentPlanFixture() {
+  return {
+    version: 2,
+    planId: 'batch-plan',
+    planFingerprint: 'a'.repeat(64),
+    configRevision: 7,
+    createdAt: 900,
+    illegalSiteRulesVersion: 'fixture-v1',
+    quotas: {
+      batch: 10,
+      perProfile: 10,
+      perPromotionSite: 10,
+      perTargetDomain: 10
+    },
+    repeatOverrides: [],
+    profiles: {
+      'profile-a': {
+        id: 'profile-a',
+        displayName: '作者 A',
+        name: 'Alice',
+        email: 'alice@example.test'
+      },
+      'profile-b': {
+        id: 'profile-b',
+        displayName: '作者 B',
+        name: 'Bob',
+        email: 'bob@example.test'
+      }
+    },
+    promotionSites: {
+      'site-a': {
+        id: 'site-a',
+        name: '站点 A',
+        url: 'https://promo-a.test/',
+        content: 'Promotion A'
+      },
+      'site-b': {
+        id: 'site-b',
+        name: '站点 B',
+        url: 'https://promo-b.test/',
+        content: 'Promotion B'
+      }
+    },
+    tasks: [{
+      taskId: 'batch-plan:1',
+      urlIndex: 0,
+      rowNumber: 1,
+      targetUrl: 'https://target.test/one',
+      canonicalTargetUrl: 'https://target.test/one',
+      targetDomain: 'target.test',
+      sourceDomain: 'target.test',
+      profileId: 'profile-a',
+      promotionSiteId: 'site-a',
+      assignmentPairId: 'pair-a',
+      assignmentSource: 'weighted',
+      state: 'eligible',
+      blockReason: null,
+      recentSuccessOverride: false
+    }, {
+      taskId: 'batch-plan:2',
+      urlIndex: 1,
+      rowNumber: 2,
+      targetUrl: 'https://blocked.test/two',
+      canonicalTargetUrl: 'https://blocked.test/two',
+      targetDomain: 'blocked.test',
+      sourceDomain: 'blocked.test',
+      profileId: 'profile-b',
+      promotionSiteId: 'site-b',
+      assignmentPairId: 'pair-b',
+      assignmentSource: 'default_blocked',
+      state: 'blocked',
+      blockReason: 'blocked_illegal',
+      recentSuccessOverride: false
+    }],
+    warnings: [],
+    confirmationRequirements: ['multiple_assignments']
+  };
+}
+
+function planConfirmationFixture() {
+  return {
+    version: 1,
+    planFingerprint: 'a'.repeat(64),
+    normalConfirmed: true,
+    requiredRisks: ['multiple_assignments'],
+    highRiskConfirmed: true,
+    confirmedAt: 950
+  };
+}
+
+function consoleVersion2Fixture() {
+  const checkpoint = createVersion1CheckpointFixture();
+  checkpoint.version = 2;
+  checkpoint.status = 'paused_recovery';
+  checkpoint.settings.assignment = {
+    identityId: 'default-identity',
+    promotionSiteId: 'default-promotion-site',
+    identitySnapshot: {
+      displayName: 'Legacy Alice',
+      email: 'legacy@example.test'
+    },
+    promotionSiteSnapshot: {
+      label: 'promo.test',
+      url: 'https://promo.test/',
+      contentSummary: 'Legacy promotion'
+    }
+  };
+  checkpoint.openingReservations = {};
+  checkpoint.tasks['0'] = {
+    ...checkpoint.tasks['0'],
+    attempt: 2,
+    requestId: null,
+    ownerPageTabId: null,
+    ownershipEpoch: null,
+    manualResolution: {
+      status: 'unresolved',
+      updatedAt: 1450
+    }
+  };
+  checkpoint.results[0].attempt = 2;
+  return checkpoint;
+}
+
+test('migrates v1 directly to v3 with a canonical default assignment', () => {
+  const legacy = createVersion1CheckpointFixture();
+  legacy.status = 'paused_recovery';
+  const migrated = migrateBatchRuntimeCheckpoint(
+    legacy,
+    2000
+  );
+
+  assert.equal(migrated.ok, true);
+  assert.equal(migrated.checkpoint.version, 3);
+  assert.equal(migrated.checkpoint.tasks['0'].attempt, 1);
+  assert.equal(migrated.checkpoint.tasks['0'].profileId, 'default-profile');
+  assert.equal(
+    migrated.checkpoint.tasks['0'].promotionSiteId,
+    'default-promotion-site'
+  );
+  assert.equal(migrated.checkpoint.status, 'paused_recovery');
+});
+
+test('migrates console v2 to v3 without losing attempt or manual resolution', () => {
+  const migrated = migrateBatchRuntimeCheckpoint(
+    consoleVersion2Fixture(),
+    2000
+  );
+
+  assert.equal(migrated.ok, true);
+  assert.equal(migrated.checkpoint.version, 3);
+  assert.equal(migrated.checkpoint.tasks['0'].attempt, 2);
+  assert.equal(
+    migrated.checkpoint.tasks['0'].manualResolution.status,
+    'unresolved'
+  );
+  assert.equal(migrated.checkpoint.tasks['0'].profileId, 'default-profile');
+  assert.equal(
+    migrated.checkpoint.tasks['0'].promotionSiteId,
+    'default-promotion-site'
+  );
+});
+
+test('creates a frozen assignment checkpoint and terminalizes blocked plan rows', () => {
+  const checkpoint = createBatchRuntimeCheckpoint({
+    batchId: 'batch-plan',
+    plan: assignmentPlanFixture(),
+    confirmation: planConfirmationFixture(),
+    settings: {
+      autoOpenPanel: true,
+      autoGenerate: true,
+      autoSubmit: false,
+      concurrency: 3,
+      timeoutSeconds: 60
+    }
+  }, 1000);
+
+  assert.equal(checkpoint.version, 3);
+  assert.equal(checkpoint.planFingerprint, 'a'.repeat(64));
+  assert.deepEqual(checkpoint.profiles['profile-a'], {
+    id: 'profile-a',
+    displayName: '作者 A',
+    name: 'Alice',
+    email: 'alice@example.test'
+  });
+  assert.equal(checkpoint.promotionSites['site-a'].content, 'Promotion A');
+  assert.deepEqual(
+    {
+      taskId: checkpoint.tasks['0'].taskId,
+      profileId: checkpoint.tasks['0'].profileId,
+      promotionSiteId: checkpoint.tasks['0'].promotionSiteId,
+      assignmentPairId: checkpoint.tasks['0'].assignmentPairId,
+      assignmentSource: checkpoint.tasks['0'].assignmentSource,
+      state: checkpoint.tasks['0'].state
+    },
+    {
+      taskId: 'batch-plan:1',
+      profileId: 'profile-a',
+      promotionSiteId: 'site-a',
+      assignmentPairId: 'pair-a',
+      assignmentSource: 'weighted',
+      state: 'queued'
+    }
+  );
+  assert.equal(checkpoint.tasks['1'].state, 'terminal');
+  assert.equal(checkpoint.results[0].result, 'blocked_illegal');
+  assert.equal(checkpoint.results[0].profileId, 'profile-b');
+  assert.equal(checkpoint.results[0].promotionSiteId, 'site-b');
+  assert.equal(validateBatchRuntimeCheckpoint(checkpoint).ok, true);
+});
+
+test('rejects secrets recursively and keeps assignment stable through retry', () => {
+  const secret = `runtime-secret-${crypto.randomUUID()}`;
+  const unsafePlan = assignmentPlanFixture();
+  unsafePlan.profiles['profile-a'].password = secret;
+  assert.throws(() => createBatchRuntimeCheckpoint({
+    batchId: 'batch-plan',
+    plan: unsafePlan,
+    confirmation: planConfirmationFixture(),
+    settings: { concurrency: 1, timeoutSeconds: 60 }
+  }, 1000), /sensitive_field_forbidden/);
+
+  let checkpoint = createBatchRuntimeCheckpoint({
+    batchId: 'batch-plan',
+    plan: assignmentPlanFixture(),
+    confirmation: planConfirmationFixture(),
+    settings: { concurrency: 1, timeoutSeconds: 60 }
+  }, 1000);
+  checkpoint = applyBatchRuntimeEvent(checkpoint, {
+    type: 'session_started',
+    batchId: 'batch-plan'
+  }, 1100).checkpoint;
+  checkpoint = applyBatchRuntimeEvent(checkpoint, {
+    type: 'task_terminal',
+    batchId: 'batch-plan',
+    taskId: 'batch-plan:1',
+    urlIndex: 0,
+    attempt: 1,
+    result: {
+      result: 'fail',
+      errorCode: 'content_script_timeout',
+      errorMessage: 'timeout'
+    }
+  }, 1200).checkpoint;
+  checkpoint = applyBatchRuntimeEvent(checkpoint, {
+    type: 'task_retried',
+    batchId: 'batch-plan',
+    taskId: 'batch-plan:1',
+    urlIndex: 0,
+    attempt: 1
+  }, 1300).checkpoint;
+
+  assert.deepEqual(
+    {
+      taskId: checkpoint.tasks['0'].taskId,
+      profileId: checkpoint.tasks['0'].profileId,
+      promotionSiteId: checkpoint.tasks['0'].promotionSiteId,
+      assignmentPairId: checkpoint.tasks['0'].assignmentPairId,
+      assignmentSource: checkpoint.tasks['0'].assignmentSource,
+      attempt: checkpoint.tasks['0'].attempt,
+      state: checkpoint.tasks['0'].state
+    },
+    {
+      taskId: 'batch-plan:1',
+      profileId: 'profile-a',
+      promotionSiteId: 'site-a',
+      assignmentPairId: 'pair-a',
+      assignmentSource: 'weighted',
+      attempt: 2,
+      state: 'queued'
+    }
+  );
+  assert.equal(JSON.stringify(checkpoint).includes(secret), false);
 });
 
 function createVersion1CheckpointFixture() {

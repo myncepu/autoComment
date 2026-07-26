@@ -950,7 +950,7 @@ test('history retry and retention status remain visible in the composed console'
   );
 });
 
-test('empty production boot composes profile-ready preflight wizard into a v2 start', async (t) => {
+test('empty production boot composes profile-ready preflight wizard into a v3 start', async (t) => {
   const harness = await createProductionHarness({
     checkpoint: null,
     createBatchId: () => 'batch-from-wizard'
@@ -969,7 +969,7 @@ test('empty production boot composes profile-ready preflight wizard into a v2 st
   );
 
   const current = harness.storageLocal.data.batchRuntimeCheckpoint;
-  assert.equal(current.version, 2);
+  assert.equal(current.version, 3);
   assert.equal(current.settings.assignment.identityId, 'default-identity');
   assert.equal(
     current.settings.assignment.promotionSiteId,
