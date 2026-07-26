@@ -76,6 +76,26 @@ test('pause stops replenishment and seals each activity before closing its tab',
   assert.equal(harness.tabsApi.createCalls.length, 3);
 });
 
+test('dispose propagates cleanup failure and retains reachable tab ownership', async () => {
+  const harness = createWorkerHarness({
+    concurrency: 1,
+    taskCount: 1,
+    tabsOptions: {
+      async remove() {
+        throw new Error('tab cleanup unavailable');
+      }
+    }
+  });
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  await runtime.start(harness.checkpoint);
+
+  const disposed = await runtime.dispose();
+
+  assert.equal(disposed, false);
+  assert.equal(harness.tabsApi.removedListenerCount(), 1);
+  assert.deepEqual(harness.tabsApi.removeCalls, [100]);
+});
+
 test('waits for a slow content script beyond the former fixed retry window', async () => {
   let now = 0;
   let pingCount = 0;
@@ -452,6 +472,71 @@ test('a deferred finalizer cleans only its old tab after a replacement lifecycle
   assert.deepEqual(
     harness.sentHandles.map(({ batchId }) => batchId),
     ['batch-1', 'batch-2']
+  );
+});
+
+test('a deferred completion cannot stop or clear its replacement lifecycle', async () => {
+  const harness = createWorkerHarness({ concurrency: 1, taskCount: 1 });
+  const replacement = structuredClone(harness.checkpoint);
+  replacement.batchId = 'batch-2';
+  let releaseCompletion;
+  const originalRequest = harness.dependencies.runtimeRequest;
+  harness.dependencies.runtimeRequest = async (type, payload) => {
+    if (payload.batchId === 'batch-1' && type === 'BATCH_SESSION_COMPLETE') {
+      return new Promise((resolve) => {
+        releaseCompletion = async () => resolve(
+          await originalRequest(type, payload)
+        );
+      });
+    }
+    if (payload.batchId === 'batch-2') {
+      if (type === 'BATCH_TASK_ACTIVE') {
+        Object.assign(replacement.tasks['0'], {
+          state: 'active',
+          tabId: payload.tabId,
+          windowId: payload.windowId,
+          startedAt: payload.startedAt
+        });
+      }
+      return { ok: true, checkpoint: replacement };
+    }
+    return originalRequest(type, payload);
+  };
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  await runtime.start(harness.checkpoint);
+
+  const confirming = runtime.handleConfirmation({
+    type: 'BATCH_CONFIRMED',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    sourceTabId: 100,
+    result: 'success',
+    historySaveStatus: 'saved'
+  });
+  await waitFor(
+    () => typeof releaseCompletion === 'function',
+    'deferred old completion'
+  );
+  const replacing = runtime.start(replacement);
+  await waitFor(
+    () => harness.sentHandles.some(({ batchId }) => batchId === 'batch-2'),
+    'replacement worker'
+  );
+  await releaseCompletion();
+  await Promise.all([confirming, replacing]);
+
+  assert.deepEqual(
+    harness.sentHandles.map(({ batchId }) => batchId),
+    ['batch-1', 'batch-2']
+  );
+  assert.equal(harness.tabsApi.removedListenerCount(), 1);
+  assert.equal(
+    harness.calls.some(
+      ([name, type]) => name === 'runtime' &&
+        ['BATCH_SESSION_STOP', 'BATCH_SESSION_CLEAR'].includes(type)
+    ),
+    false
   );
 });
 

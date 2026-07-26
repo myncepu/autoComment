@@ -2,7 +2,7 @@
 
 ## Outcome
 
-- Replaced the legacy page-local implementation with a 35-line module entry
+- Replaced the legacy page-local implementation with a 38-line module entry
   point and a 20-line semantic, CSP-safe HTML shell.
 - Added `bootBatchPage(document, dependencies) -> { destroy }` as an
   importable pure-Web composition root. It boots the shared shell, restores
@@ -32,8 +32,8 @@
 
 - `batch.js`: guarded extension auto-boot and public module exports only.
 - `batch.html`: app-shell, console, and wizard mounts plus local resources.
-- `lib/batch-entry-lifecycle.mjs`: pagehide/hidden-page teardown binding that
-  retains the boot handle without a product global.
+- `lib/batch-entry-lifecycle.mjs`: pagehide background-handoff binding that
+  does not depend on page boot or page-local async cleanup.
 - `lib/batch-page-composition.mjs`: pure-Web page lifecycle and composition.
 - `lib/batch-chrome-adapter.mjs`: Chrome runtime/storage/tabs/manual-window
   adapters with sender filtering and sensitive-field scrubbing.
@@ -61,8 +61,9 @@
   loaded through an explicit public-field allowlist; passwords are not
   requested or projected into checkpoint, `BATCH_HANDLE`, history, draft,
   diagnostics, or DOM.
-- Destroy removes runtime/online/tab listeners, timers, overlays, view/shell
-  DOM, and automatic tab ownership.
+- Successful destroy removes runtime/online/tab listeners, timers, overlays,
+  view/shell DOM, and automatic tab ownership. Failed durable cleanup leaves
+  the projection, page handle, singleton, and retry path mounted.
 
 The previous page-level race harness depended on the removed monolith and its
 global test hook. Its race, lifecycle, and durable-history guarantees remain
@@ -94,13 +95,9 @@ responsibility was copied back into the page entry.
 
 ## Round 1 Review Hardening
 
-- Page lifecycle teardown is now semantic and durable. Pagehide,
-  `visibilityState === "hidden"`, shared-shell links, and the brand link all
-  request `commandController.pause("page_teardown")` before teardown or
-  navigation. The persisted checkpoint becomes `paused_recovery`, background
-  power is released, owned tabs are closed, then listeners/views are disposed.
-  A close failure keeps the recovery checkpoint and exact tab ownership
-  instead of presenting a false running or terminated state.
+- Page lifecycle teardown was made semantic in round 1. Round 2 moved its
+  durable authority from the page command chain into the background runtime
+  controller; the current behavior is described below.
 - Offline is a synchronous scheduling barrier, not a best-effort command.
   Empty/offline state cannot create or open a wizard. An already-open wizard
   rerenders with `batch_offline` readiness and a disabled start action.
@@ -129,6 +126,48 @@ secret CSV values; duplicate page boots; and content/page forged
 confirmations. Every focused case was observed failing for that specific
 production gap before the corresponding implementation.
 
+## Round 2 Background Ownership and Race Hardening
+
+- Ordinary `visibilitychange` events are non-destructive. Moving the batch page
+  through hidden and visible states preserves the full UI and handle. Only
+  `pagehide` and explicit shared-shell navigation request teardown.
+- `pagehide` synchronously hands `BATCH_PAGE_TEARDOWN` to the background and
+  does not await page boot, page destroy, or another page-local promise. The
+  service-worker promise continues after the page is simulated as unloaded.
+- The background runtime controller is the teardown authority and serializes:
+  persist `paused_recovery` with every orphan tab ID; close each tab; persist
+  the residual orphan IDs and diagnostic; then release system wakefulness.
+  Missing tabs count as already cleaned. Startup recovery uses the same path.
+- A tab-close failure persists `recoveryCleanup.orphanTabIds` and
+  `tab_close_failed` for the next cleanup attempt. A checkpoint-write failure
+  performs no destructive cleanup. Navigation succeeds only after background
+  cleanup and local disposal both report success; otherwise the page,
+  singleton, listeners, local recovery projection, and retry path remain.
+- Page-owned start/resume cancellation no longer writes a competing teardown
+  pause. It blocks the continuation and waits for the serialized background
+  teardown. A missing-attempt or late post-teardown ACTIVE message is safely
+  paused/cancelled and its unclaimed tab is durably cleaned.
+- Batch CSV now reuses the history exporter `escapeCsvCell` standard for both
+  headers and cells. Leading control characters followed by `=`, `+`, `-`, or
+  `@` are neutralized while UTF-8 BOM and CSV quoting remain intact.
+- Content `BATCH_TASK_PHASE` is accepted only from the actual active
+  `sender.tab.id`. After the controller successfully persists it, background
+  broadcasts `BATCH_TASK_PHASE_UPDATED` with `sourceTabId`, `attempt`, and
+  `phase`. The page adapter accepts only that trusted background event, never
+  the raw content payload.
+
+Round-2 RED evidence was observed for: hidden state destroying the page;
+pagehide waiting on unresolved page boot; unsupported background teardown;
+wrong persist/close/power ownership; cleanup failure being swallowed; storage
+failure destroying the page projection; navigation proceeding after failed
+cleanup; CSV formulas remaining executable; missing phase broadcast and page
+sender rejection; missing-attempt ACTIVE leaving the checkpoint running; late
+ACTIVE restarting after teardown; and page teardown issuing a competing local
+pause. Each production correction was made after its focused failure. The
+explicit draft-write, immutable snapshot, old queued-row reconciliation, and
+deferred-completion tests document invariants that already belonged to their
+new modules and therefore passed without a production change.
+
 ## Legacy Race Coverage Map
 
 The removed monolith fixture is not retained. Each former integration
@@ -149,8 +188,9 @@ guarantee is owned and tested by the production module that now implements it:
    worker-runtime “opens no more than three attempt-aware background worker
    tabs in the console window”.
 6. `running batch rejects preview replacement/removal and records from its
-   start snapshot` → checkpoint “creates…complete dataset” plus
-   command-controller sanitized persisted-start ordering.
+   start snapshot` → the old preview replacement/removal UI no longer exists.
+   Its surviving invariant is covered explicitly by command-controller
+   “Start owns an immutable upload snapshot after the editable draft changes”.
 7. `terminated batch retains its start snapshot and cannot resume` →
    checkpoint “terminal session states cannot be restarted” plus composition
    permanent-stop coverage.
@@ -160,7 +200,8 @@ guarantee is owned and tested by the production module that now implements it:
 9. `Start durably creates the complete runtime session before scheduling` →
    command-controller “persists a sanitized session before starting workers”.
 10. `Start safely pauses a runtime checkpoint with a missing task attempt` →
-    runtime-controller missing-attempt rejection plus command recovery tests.
+    runtime-controller “missing-attempt worker activation safely pauses and
+    closes the unclaimed tab”.
 11. `a keep-awake failure preserves the uploaded dataset and stays idle` →
     runtime-controller “a power acquisition failure leaves a new checkpoint
     safely paused”.
@@ -170,12 +211,14 @@ guarantee is owned and tested by the production module that now implements it:
     → composition paused boot/resume test.
 14. `paused checkpoint hydration rejects a task without an attempt identity` →
     checkpoint malformed-version-2 validation tests.
-15. `Clear during deferred Start invalidates the old continuation` →
-    command cancellation barrier plus worker “concurrent starts dispose every
-    intermediate manager before the last owner wins”.
+15. `Clear during deferred Start invalidates the old continuation` → the old
+    page-local Clear command no longer exists. Its cancellation invariant is
+    covered by composition “page teardown preempts an in-flight resume before
+    worker creation” and runtime-controller “late activation after page
+    teardown is cancelled and cleaned without restart”.
 16. `settings persistence failure restores the claimed Start lifecycle to
-    safe idle state` → command-controller persisted-start recovery and stable
-    runtime-error tests.
+    safe idle state` → command-controller “draft storage failure leaves Start
+    safely unclaimed with no runtime side effects”.
 17. `terminal paths close a worker window before replenishing the queue` →
     worker-runtime durable confirmation close-before-refill test.
 18. `terminal checkpoint messages carry the active attempt and stable error
@@ -194,7 +237,8 @@ guarantee is owned and tested by the production module that now implements it:
     worker-runtime “missing parsed URL terminalizes the task with safe source
     defaults”.
 25. `a zero pending count reconciles earlier queued history rows` →
-    history-page startup retry/pending-count tests.
+    history-page “zero post-retry pending count clears an earlier queued-row
+    warning”.
 26. `a durable confirmation from an old tab cannot close a replacement worker`
     → worker-runtime deferred-finalizer replacement test.
 27. `a durable confirmation must match the current tab and attempt` →
@@ -208,13 +252,15 @@ guarantee is owned and tested by the production module that now implements it:
 31. `Stop recovers an unresolved submit context before closing its worker` →
     worker-runtime stop seal-before-close test.
 32. `deferred completion cannot stop or clear a replacement lifecycle` →
-    worker-runtime completion-adapter recovery and concurrent-owner tests.
+    worker-runtime “a deferred completion cannot stop or clear its replacement
+    lifecycle”.
 
 ## Verification
 
-- Affected composition/runtime/view/history suite:
-  `node --test ...` passed 209/209 with zero failures.
-- Full repository: `npm test` passed 428/428 with zero failures.
+- Affected composition/runtime/history command:
+  `node --test tests/batch-multi-window-integration.test.js tests/batch-runtime-controller.test.mjs tests/batch-runtime-checkpoint.test.mjs tests/batch-command-controller.test.mjs tests/batch-worker-runtime.test.mjs tests/batch-window-manager.test.mjs tests/batch-chrome-adapter.test.mjs tests/batch-export.test.mjs tests/comment-history-page.test.mjs`
+  passed 189/189 with zero failures.
+- Full repository: `npm test` passed 446/446 with zero failures.
 - `node --check` passed for every changed JavaScript module and test.
 - `manifest.json` parsed successfully.
 - `batch.js` dynamically imported without DOM or Chrome globals.
@@ -243,5 +289,7 @@ guarantee is owned and tested by the production module that now implements it:
 - Mergeable commit subject: `feat: ship batch operations console`.
 - Round-1 hardening commit subject:
   `fix: harden batch console teardown and races`.
+- Round-2 hardening commit subject:
+  `fix: move batch teardown ownership to background`.
 - The final commit SHA is reported in the task `DONE` handoff because a file
   cannot contain the hash of the commit that contains itself.

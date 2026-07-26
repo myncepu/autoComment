@@ -94,3 +94,29 @@ test('checkpoint export redacts sensitive original-row columns', async () => {
   assert.equal(csv.includes('password-must-not-export'), false);
   assert.equal(csv.includes('token-must-not-export'), false);
 });
+
+test('batch export neutralizes spreadsheet formulas in headers and cells', async () => {
+  const harness = createExportHarness();
+  const checkpoint = {
+    batchId: 'formula-batch',
+    source: {
+      headers: ['=Injected Header', '+Second', 'Safe']
+    },
+    results: [{
+      originalIndex: 0,
+      originalRow: ['\t=SUM(A1:A2)', '\r@cmd', '-1'],
+      result: 'success'
+    }]
+  };
+
+  assert.equal(
+    exportBatchResultsCsv(harness.document, checkpoint, null),
+    true
+  );
+
+  assert.equal(
+    await harness.blobs[0].text(),
+    "'=Injected Header,'+Second,Safe,运行结果\n"
+      + `'\t=SUM(A1:A2),"'\r@cmd",'-1,√`
+  );
+});

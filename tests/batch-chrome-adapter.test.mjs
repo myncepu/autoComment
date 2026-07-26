@@ -181,6 +181,20 @@ test('routes runtime requests and accepts only own-extension page events', async
     { type: 'BATCH_TASK_PHASE', batchId: 'batch-1', attempt: 2 },
     { id: 'extension-id' }
   );
+  harness.runtimeOnMessage.emit(
+    {
+      type: 'BATCH_TASK_PHASE_UPDATED',
+      batchId: 'batch-1',
+      urlIndex: 3,
+      attempt: 2,
+      phase: 'generating',
+      sourceTabId: 503
+    },
+    {
+      id: 'extension-id',
+      url: 'chrome-extension://extension-id/background.js'
+    }
+  );
 
   assert.deepEqual(harness.runtimeMessages[0], {
     type: 'BATCH_SESSION_GET',
@@ -193,9 +207,12 @@ test('routes runtime requests and accepts only own-extension page events', async
       attempt: 2
     },
     {
-      type: 'BATCH_TASK_PHASE',
+      type: 'BATCH_TASK_PHASE_UPDATED',
       batchId: 'batch-1',
-      attempt: 2
+      urlIndex: 3,
+      attempt: 2,
+      phase: 'generating',
+      sourceTabId: 503
     }
   ]);
   unsubscribe();

@@ -231,6 +231,7 @@ function createCommandHarness(options = {}) {
     draftStorage: {
       async set(draft) {
         calls.push(['draft.set', structuredClone(draft)]);
+        if (options.draftSetFailure) throw options.draftSetFailure;
       },
       async remove() {
         calls.push(['draft.remove']);
@@ -367,6 +368,65 @@ test('persists a sanitized session before starting workers and clears the draft 
   }
   assert.equal(
     runtimePayload.settings.assignment.identityId,
+    'default-identity'
+  );
+});
+
+test('draft storage failure leaves Start safely unclaimed with no runtime side effects', async () => {
+  const checkpoint = createCheckpoint({
+    status: 'paused_recovery',
+    taskState: 'queued'
+  });
+  const failure = new Error('draft storage unavailable');
+  failure.code = 'draft_storage_failed';
+  const harness = createCommandHarness({
+    checkpoint,
+    draftSetFailure: failure
+  });
+
+  await assert.rejects(
+    harness.controller.start(startDraft()),
+    (error) => error?.code === 'draft_storage_failed'
+  );
+
+  assert.deepEqual(harness.calls.map(([name]) => name), ['draft.set']);
+  assert.equal(harness.checkpoint.status, 'paused_recovery');
+  assert.equal(
+    harness.calls.some(([name]) => name === 'worker.start'),
+    false
+  );
+});
+
+test('Start owns an immutable upload snapshot after the editable draft changes', async () => {
+  const startGate = deferred();
+  const harness = createCommandHarness({
+    checkpoint: createCheckpoint({
+      status: 'paused_recovery',
+      taskState: 'queued'
+    }),
+    runtimeGates: { BATCH_SESSION_START: startGate }
+  });
+  const draft = startDraft();
+
+  const starting = harness.controller.start(draft);
+  await waitForCall(
+    harness.calls,
+    ([name, type]) => name === 'runtime' && type === 'BATCH_SESSION_START',
+    'claimed Start snapshot'
+  );
+  draft.source.parsedUrls[0].url = 'https://replacement.test/';
+  draft.source.parsedUrls.length = 0;
+  draft.settings.assignment.identityId = 'replacement-identity';
+  startGate.resolve();
+  await starting;
+
+  const payload = harness.calls.find(
+    ([name, type]) => name === 'runtime' && type === 'BATCH_SESSION_START'
+  )[2];
+  assert.equal(payload.source.parsedUrls.length, 1);
+  assert.equal(payload.source.parsedUrls[0].url, 'https://target.test/page');
+  assert.equal(
+    payload.settings.assignment.identityId,
     'default-identity'
   );
 });

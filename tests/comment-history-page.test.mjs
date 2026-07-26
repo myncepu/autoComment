@@ -221,6 +221,33 @@ test('history startup retries a live worker queue before loading and displays re
   assert.match(document.getElementById('historyPendingBanner').textContent, /2/);
 });
 
+test('zero post-retry pending count clears an earlier queued-row warning', async () => {
+  const document = historyDocument();
+  const banner = document.getElementById('historyPendingBanner');
+  banner.hidden = false;
+  banner.textContent = '旧队列仍有 1 条等待保存';
+  const requestMessage = async (message) => {
+    if (message.type === 'HISTORY_RETRY_PENDING') {
+      return { retried: 1, saved: 1, pending: 0 };
+    }
+    if (message.type === 'HISTORY_SUMMARY') return {};
+    if (message.type === 'HISTORY_ARCHIVE_EVENTS') return [];
+    if (message.type === 'HISTORY_LIST') return { records: [], nextCursor: null };
+    throw new Error(`Unexpected request: ${message.type}`);
+  };
+
+  bootHistoryPage(document, {
+    requestMessage,
+    search: '',
+    estimateStorage: async () => 0
+  });
+  await nextTurn();
+  await nextTurn();
+
+  assert.equal(banner.hidden, true);
+  assert.equal(banner.textContent, '');
+});
+
 test('history keeps a warning visible when the post-retry count is unknown', async () => {
   const document = historyDocument();
   const requestMessage = async (message) => {

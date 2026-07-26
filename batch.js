@@ -23,6 +23,9 @@ if (typeof document !== 'undefined' && typeof chrome !== 'undefined') {
     const lifecycle = installBatchPageLifecycle({
       document,
       pageTarget: globalThis,
+      requestPageTeardown: ({ reason }) => (
+        chromeDependencies.runtimeRequest('BATCH_PAGE_TEARDOWN', { reason })
+      ),
       boot: () => bootBatchPage(document, {
         ...chromeDependencies,
         ...webDependencies

@@ -5,6 +5,9 @@ import {
   createBatchRuntimeController,
   installBatchRuntimeController
 } from '../lib/batch-runtime-controller.mjs';
+import {
+  createChromeBatchDependencies
+} from '../lib/batch-chrome-adapter.mjs';
 
 function createItems(count) {
   return Array.from({ length: count }, (_, originalIndex) => ({
@@ -25,6 +28,8 @@ function createHarness({ failPower = false, existingTabs = [] } = {}) {
   const removedTabs = [];
   const removedWindows = [];
   const createdTabs = [];
+  const broadcasts = [];
+  const operationLog = [];
   const listeners = {
     messages: [],
     startup: []
@@ -42,8 +47,16 @@ function createHarness({ failPower = false, existingTabs = [] } = {}) {
     },
     async set(values) {
       await new Promise((resolve) => setImmediate(resolve));
+      if (storageArea.setFailure) throw storageArea.setFailure;
       setCalls.push(structuredClone(values));
       Object.assign(data, structuredClone(values));
+      operationLog.push([
+        'persist',
+        values.batchRuntimeCheckpoint?.status,
+        structuredClone(
+          values.batchRuntimeCheckpoint?.recoveryCleanup?.orphanTabIds || []
+        )
+      ]);
     },
     async remove(keys) {
       const requested = Array.isArray(keys) ? keys : [keys];
@@ -57,6 +70,7 @@ function createHarness({ failPower = false, existingTabs = [] } = {}) {
     },
     releaseKeepAwake() {
       powerCalls.push(['release']);
+      operationLog.push(['power-release']);
     }
   };
   const tabs = {
@@ -68,7 +82,10 @@ function createHarness({ failPower = false, existingTabs = [] } = {}) {
       return { id: 91, ...details };
     },
     async remove(tabIds) {
-      removedTabs.push(...(Array.isArray(tabIds) ? tabIds : [tabIds]));
+      const ids = Array.isArray(tabIds) ? tabIds : [tabIds];
+      removedTabs.push(...ids);
+      operationLog.push(['tabs-remove', ...ids]);
+      if (tabs.removeFailure) throw tabs.removeFailure;
     }
   };
   const windows = {
@@ -81,9 +98,16 @@ function createHarness({ failPower = false, existingTabs = [] } = {}) {
     getURL(path) {
       return `chrome-extension://extension-id/${path}`;
     },
+    async sendMessage(message) {
+      broadcasts.push(structuredClone(message));
+    },
     onMessage: {
       addListener(listener) {
         listeners.messages.push(listener);
+      },
+      removeListener(listener) {
+        const index = listeners.messages.indexOf(listener);
+        if (index >= 0) listeners.messages.splice(index, 1);
       }
     },
     onStartup: {
@@ -112,7 +136,9 @@ function createHarness({ failPower = false, existingTabs = [] } = {}) {
     removedTabs,
     removedWindows,
     createdTabs,
-    listeners
+    listeners,
+    operationLog,
+    broadcasts
   };
 }
 
@@ -207,16 +233,239 @@ test('returns the checkpoint updated by a task phase command', async () => {
     windowId: 21
   });
 
-  const response = await controller.handleMessage({
+  const response = await controller.handleMessage(
+    {
+      type: 'BATCH_TASK_PHASE',
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      phase: 'generating'
+    },
+    { id: 'extension-id', tab: { id: 11 } }
+  );
+
+  assert.equal(response.ok, true);
+  assert.equal(response.checkpoint.tasks['0'].phase, 'generating');
+});
+
+test('content task phase persists before a background-owned page broadcast', async () => {
+  const harness = createHarness();
+  installBatchRuntimeController(harness.chrome, harness.controller);
+  await harness.controller.handleMessage(startMessage(1));
+  await harness.controller.handleMessage({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 11,
+    windowId: 21
+  });
+  harness.operationLog.length = 0;
+
+  const response = await new Promise((resolve) => {
+    harness.listeners.messages[0](
+      {
+        type: 'BATCH_TASK_PHASE',
+        batchId: 'batch-1',
+        urlIndex: 0,
+        attempt: 1,
+        phase: 'generating'
+      },
+      {
+        id: 'extension-id',
+        tab: { id: 11 },
+        url: 'https://target.test/post'
+      },
+      resolve
+    );
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(
+    harness.data.batchRuntimeCheckpoint.tasks['0'].phase,
+    'generating'
+  );
+  assert.deepEqual(harness.broadcasts, [{
+    type: 'BATCH_TASK_PHASE_UPDATED',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    phase: 'generating',
+    sourceTabId: 11
+  }]);
+});
+
+test('task phase rejects page senders and mismatched content tabs', async () => {
+  const harness = createHarness();
+  installBatchRuntimeController(harness.chrome, harness.controller);
+  await harness.controller.handleMessage(startMessage(1));
+  await harness.controller.handleMessage({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 11,
+    windowId: 21
+  });
+  const phaseMessage = {
     type: 'BATCH_TASK_PHASE',
     batchId: 'batch-1',
     urlIndex: 0,
     attempt: 1,
     phase: 'generating'
+  };
+
+  const pageResponse = await new Promise((resolve) => {
+    harness.listeners.messages[0](
+      phaseMessage,
+      {
+        id: 'extension-id',
+        url: 'chrome-extension://extension-id/batch.html'
+      },
+      resolve
+    );
+  });
+  const wrongTabResponse = await new Promise((resolve) => {
+    harness.listeners.messages[0](
+      phaseMessage,
+      {
+        id: 'extension-id',
+        tab: { id: 12 },
+        url: 'https://target.test/forged'
+      },
+      resolve
+    );
+  });
+
+  assert.equal(pageResponse.error, 'forbidden_sender');
+  assert.equal(wrongTabResponse.error, 'stale_worker_tab');
+  assert.equal(harness.data.batchRuntimeCheckpoint.tasks['0'].phase, null);
+  assert.deepEqual(harness.broadcasts, []);
+});
+
+test('content phase flows through background persistence into the trusted page adapter', async () => {
+  const harness = createHarness();
+  installBatchRuntimeController(harness.chrome, harness.controller);
+  const event = {
+    addListener() {},
+    removeListener() {}
+  };
+  const adapterChrome = {
+    ...harness.chrome,
+    storage: {
+      local: harness.chrome.storage.local,
+      sync: { async get() { return {}; } }
+    },
+    tabs: {
+      ...harness.chrome.tabs,
+      onRemoved: event,
+      onUpdated: event,
+      async getCurrent() { return { id: 90, windowId: 21 }; },
+      async get() {},
+      async sendMessage() {},
+      async update() {}
+    },
+    windows: {
+      async create() { return { id: 30, tabs: [{ id: 31 }] }; },
+      async remove() {}
+    }
+  };
+  harness.chrome.runtime.sendMessage = async (message) => {
+    harness.broadcasts.push(structuredClone(message));
+    for (const listener of [...harness.listeners.messages]) {
+      listener(
+        message,
+        {
+          id: 'extension-id',
+          url: 'chrome-extension://extension-id/background.js'
+        },
+        () => {}
+      );
+    }
+  };
+  const dependencies = createChromeBatchDependencies(adapterChrome);
+  const pageEvents = [];
+  const unsubscribe = dependencies.subscribeRuntimeMessages(
+    (message) => pageEvents.push(structuredClone(message))
+  );
+  await harness.controller.handleMessage(startMessage(1));
+  await harness.controller.handleMessage({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 11,
+    windowId: 21
+  });
+
+  const response = await new Promise((resolve) => {
+    harness.listeners.messages[0](
+      {
+        type: 'BATCH_TASK_PHASE',
+        batchId: 'batch-1',
+        urlIndex: 0,
+        attempt: 1,
+        phase: 'filling'
+      },
+      {
+        id: 'extension-id',
+        tab: { id: 11 },
+        url: 'https://target.test/post'
+      },
+      resolve
+    );
   });
 
   assert.equal(response.ok, true);
-  assert.equal(response.checkpoint.tasks['0'].phase, 'generating');
+  assert.equal(harness.data.batchRuntimeCheckpoint.tasks['0'].phase, 'filling');
+  assert.deepEqual(pageEvents, [{
+    type: 'BATCH_TASK_PHASE_UPDATED',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    phase: 'filling',
+    sourceTabId: 11
+  }]);
+  unsubscribe();
+});
+
+test('installed teardown listener accepts only the extension batch page', async () => {
+  const harness = createHarness();
+  installBatchRuntimeController(harness.chrome, harness.controller);
+  await harness.controller.handleMessage(startMessage(1));
+  const message = {
+    type: 'BATCH_PAGE_TEARDOWN',
+    batchId: 'batch-1',
+    reason: 'navigation'
+  };
+
+  const contentResponse = await new Promise((resolve) => {
+    harness.listeners.messages[0](
+      message,
+      {
+        id: 'extension-id',
+        tab: { id: 11 },
+        url: 'https://target.test/post'
+      },
+      resolve
+    );
+  });
+  assert.equal(contentResponse.error, 'forbidden_sender');
+  assert.equal(harness.data.batchRuntimeCheckpoint.status, 'running');
+
+  const pageResponse = await new Promise((resolve) => {
+    harness.listeners.messages[0](
+      message,
+      {
+        id: 'extension-id',
+        url: 'chrome-extension://extension-id/batch.html'
+      },
+      resolve
+    );
+  });
+  assert.equal(pageResponse.ok, true);
+  assert.equal(pageResponse.cleanupComplete, true);
+  assert.equal(harness.data.batchRuntimeCheckpoint.status, 'paused_recovery');
 });
 
 test('returns the checkpoint advanced by a task retry command', async () => {
@@ -490,6 +739,211 @@ test('loading a stale running batch closes only worker tabs in their shared wind
     ['request', 'system'],
     ['release']
   ]);
+});
+
+test('startup recovery retains failed orphan cleanup for the next retry', async () => {
+  const harness = createHarness();
+  await harness.controller.handleMessage(startMessage(1));
+  await harness.controller.handleMessage({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 11,
+    windowId: 21
+  });
+  harness.chrome.tabs.removeFailure = new Error('tabs unavailable');
+
+  const failed = await harness.controller.loadForPage();
+
+  assert.equal(failed.ok, false);
+  assert.equal(failed.error, 'batch_teardown_cleanup_failed');
+  assert.equal(harness.data.batchRuntimeCheckpoint.status, 'paused_recovery');
+  assert.deepEqual(
+    harness.data.batchRuntimeCheckpoint.recoveryCleanup.orphanTabIds,
+    [11]
+  );
+
+  harness.chrome.tabs.removeFailure = null;
+  const retried = await harness.controller.loadForPage();
+  assert.equal(retried.ok, true);
+  assert.deepEqual(retried.checkpoint.recoveryCleanup.orphanTabIds, []);
+  assert.deepEqual(harness.removedTabs, [11, 11]);
+});
+
+test('page teardown persists recovery ownership before closing tabs and releasing power', async () => {
+  const harness = createHarness();
+  await harness.controller.handleMessage(startMessage());
+  await Promise.all([
+    harness.controller.handleMessage({
+      type: 'BATCH_TASK_ACTIVE',
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      tabId: 11,
+      windowId: 21
+    }),
+    harness.controller.handleMessage({
+      type: 'BATCH_TASK_ACTIVE',
+      batchId: 'batch-1',
+      urlIndex: 1,
+      attempt: 1,
+      tabId: 12,
+      windowId: 21
+    })
+  ]);
+  harness.operationLog.length = 0;
+
+  const response = await harness.controller.handleMessage({
+    type: 'BATCH_PAGE_TEARDOWN',
+    batchId: 'batch-1',
+    reason: 'navigation'
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.cleanupComplete, true);
+  assert.equal(response.checkpoint.status, 'paused_recovery');
+  assert.deepEqual(response.checkpoint.recoveryCleanup.orphanTabIds, []);
+  assert.deepEqual(harness.operationLog, [
+    ['persist', 'paused_recovery', [11, 12]],
+    ['tabs-remove', 11],
+    ['tabs-remove', 12],
+    ['persist', 'paused_recovery', []],
+    ['power-release']
+  ]);
+});
+
+test('failed page teardown retains orphan ownership and succeeds on retry', async () => {
+  const harness = createHarness();
+  await harness.controller.handleMessage(startMessage(1));
+  await harness.controller.handleMessage({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 11,
+    windowId: 21
+  });
+  harness.chrome.tabs.removeFailure = new Error('tabs unavailable');
+
+  const failed = await harness.controller.handleMessage({
+    type: 'BATCH_PAGE_TEARDOWN',
+    batchId: 'batch-1',
+    reason: 'navigation'
+  });
+
+  assert.equal(failed.ok, false);
+  assert.equal(failed.error, 'batch_teardown_cleanup_failed');
+  assert.equal(failed.cleanupComplete, false);
+  assert.deepEqual(
+    {
+      reason: harness.data.batchRuntimeCheckpoint.recoveryCleanup.reason,
+      orphanTabIds:
+        harness.data.batchRuntimeCheckpoint.recoveryCleanup.orphanTabIds,
+      diagnostic:
+        harness.data.batchRuntimeCheckpoint.recoveryCleanup.diagnostic
+    },
+    {
+      reason: 'navigation',
+      orphanTabIds: [11],
+      diagnostic: 'tab_close_failed'
+    }
+  );
+  assert.equal(
+    Number.isFinite(
+      harness.data.batchRuntimeCheckpoint.recoveryCleanup.updatedAt
+    ),
+    true
+  );
+
+  harness.chrome.tabs.removeFailure = new Error('No tab with id: 11');
+  const retried = await harness.controller.handleMessage({
+    type: 'BATCH_PAGE_TEARDOWN',
+    batchId: 'batch-1',
+    reason: 'navigation'
+  });
+
+  assert.equal(retried.ok, true);
+  assert.equal(retried.cleanupComplete, true);
+  assert.deepEqual(retried.checkpoint.recoveryCleanup.orphanTabIds, []);
+  assert.deepEqual(harness.removedTabs, [11, 11]);
+});
+
+test('page teardown storage failure leaves running ownership untouched', async () => {
+  const harness = createHarness();
+  await harness.controller.handleMessage(startMessage(1));
+  await harness.controller.handleMessage({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 11,
+    windowId: 21
+  });
+  harness.operationLog.length = 0;
+  harness.chrome.storage.local.setFailure = new Error('storage unavailable');
+
+  const response = await harness.controller.handleMessage({
+    type: 'BATCH_PAGE_TEARDOWN',
+    batchId: 'batch-1',
+    reason: 'navigation'
+  });
+
+  assert.equal(response.ok, false);
+  assert.equal(response.error, 'checkpoint_write_failed');
+  assert.equal(response.checkpoint.status, 'running');
+  assert.equal(harness.data.batchRuntimeCheckpoint.status, 'running');
+  assert.deepEqual(harness.operationLog, []);
+  assert.deepEqual(harness.removedTabs, []);
+});
+
+test('missing-attempt worker activation safely pauses and closes the unclaimed tab', async () => {
+  const harness = createHarness();
+  await harness.controller.handleMessage(startMessage(1));
+
+  const response = await harness.controller.handleMessage({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    tabId: 11,
+    windowId: 21
+  });
+
+  assert.equal(response.ok, false);
+  assert.equal(response.error, 'stale_attempt');
+  assert.equal(response.checkpoint.status, 'paused_recovery');
+  assert.deepEqual(response.checkpoint.recoveryCleanup.orphanTabIds, []);
+  assert.deepEqual(harness.removedTabs, [11]);
+});
+
+test('late activation after page teardown is cancelled and cleaned without restart', async () => {
+  const harness = createHarness();
+  await harness.controller.handleMessage(startMessage(1));
+  const teardown = await harness.controller.handleMessage({
+    type: 'BATCH_PAGE_TEARDOWN',
+    batchId: 'batch-1',
+    reason: 'navigation'
+  });
+  assert.equal(teardown.ok, true);
+
+  const late = await harness.controller.handleMessage({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 11,
+    windowId: 21
+  });
+
+  assert.equal(late.ok, false);
+  assert.equal(late.error, 'batch_teardown_cancelled');
+  assert.equal(late.checkpoint.status, 'paused_recovery');
+  assert.deepEqual(late.checkpoint.recoveryCleanup.orphanTabIds, []);
+  assert.deepEqual(harness.removedTabs, [11]);
+  assert.equal(
+    harness.powerCalls.filter(([name]) => name === 'request').length,
+    1
+  );
 });
 
 test('startup opens one paused recovery page and never reacquires power', async () => {

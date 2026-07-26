@@ -126,6 +126,7 @@ function createStorageArea(initial = {}) {
       )));
     },
     async set(values) {
+      if (this.setFailure) throw this.setFailure;
       Object.assign(data, clone(values));
     },
     async remove(keys) {
@@ -459,31 +460,68 @@ test('production batch module imports without document or chrome globals', async
   assert.equal(output, 'function');
 });
 
-test('production page lifecycle durably tears down on pagehide', async () => {
+test('pagehide hands teardown directly to background without awaiting page boot', async () => {
   const imported = await import('../lib/batch-entry-lifecycle.mjs');
   assert.equal(typeof imported.installBatchPageLifecycle, 'function');
+  const dom = new JSDOM('<!doctype html><p>batch</p>');
+  const bootGate = deferred();
+  const backgroundGate = deferred();
+  const pageDestroyCalls = [];
+  const backgroundCalls = [];
+  let backgroundFinished = false;
+  const lifecycle = imported.installBatchPageLifecycle({
+    document: dom.window.document,
+    pageTarget: dom.window,
+    boot: () => bootGate.promise,
+    requestPageTeardown(options) {
+      backgroundCalls.push(clone(options));
+      return backgroundGate.promise.then(() => {
+        backgroundFinished = true;
+      });
+    }
+  });
+
+  dom.window.dispatchEvent(new dom.window.Event('pagehide'));
+  assert.deepEqual(backgroundCalls, [{ reason: 'pagehide' }]);
+  assert.deepEqual(pageDestroyCalls, []);
+
+  dom.window.close();
+  backgroundGate.resolve();
+  await waitFor(() => backgroundFinished, 'background teardown completion');
+  assert.equal(backgroundFinished, true);
+
+  bootGate.resolve({
+      async destroy(options) {
+        pageDestroyCalls.push(clone(options));
+      }
+    });
+  await lifecycle.ready;
+  await lifecycle.destroy();
+  assert.deepEqual(pageDestroyCalls, [{ reason: 'page_teardown' }]);
+});
+
+test('pagehide background handoff is idempotent', async () => {
+  const imported = await import('../lib/batch-entry-lifecycle.mjs');
   const dom = new JSDOM('<!doctype html><p>batch</p>');
   const calls = [];
   const lifecycle = imported.installBatchPageLifecycle({
     document: dom.window.document,
     pageTarget: dom.window,
-    boot: async () => ({
-      async destroy(options) {
-        calls.push(clone(options));
-      }
-    })
+    boot: async () => ({ async destroy() {} }),
+    async requestPageTeardown(options) {
+      calls.push(clone(options));
+    }
   });
   await lifecycle.ready;
 
   dom.window.dispatchEvent(new dom.window.Event('pagehide'));
-  await waitFor(() => calls.length === 1, 'pagehide teardown');
-
-  assert.deepEqual(calls, [{ reason: 'page_teardown' }]);
-  await lifecycle.destroy();
+  dom.window.dispatchEvent(new dom.window.Event('pagehide'));
+  await waitFor(() => calls.length === 1, 'pagehide background handoff');
+  assert.deepEqual(calls, [{ reason: 'pagehide' }]);
   assert.equal(calls.length, 1);
 });
 
-test('production page lifecycle starts teardown when the page becomes hidden', async () => {
+test('production page lifecycle keeps the page mounted across hidden and visible changes', async () => {
   const imported = await import('../lib/batch-entry-lifecycle.mjs');
   const dom = new JSDOM('<!doctype html><p>batch</p>');
   const calls = [];
@@ -505,8 +543,21 @@ test('production page lifecycle starts teardown when the page becomes hidden', a
   dom.window.document.dispatchEvent(
     new dom.window.Event('visibilitychange')
   );
-  await waitFor(() => calls.length === 1, 'hidden-page teardown');
+  await new Promise((resolve) => setImmediate(resolve));
 
+  assert.deepEqual(calls, []);
+
+  Object.defineProperty(dom.window.document, 'visibilityState', {
+    configurable: true,
+    value: 'visible'
+  });
+  dom.window.document.dispatchEvent(
+    new dom.window.Event('visibilitychange')
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(calls, []);
+  await lifecycle.destroy();
   assert.deepEqual(calls, [{ reason: 'page_teardown' }]);
 });
 
@@ -933,7 +984,7 @@ test('offline preempts an in-flight resume before any worker tab is created', as
   );
 });
 
-test('destroy durably pauses, releases power, and closes automatic tab ownership', async () => {
+test('destroy delegates durable cleanup to background before local disposal', async () => {
   const harness = await createProductionHarness();
   click(harness.document, '[data-action="resume"]');
   await waitFor(() => harness.tabsApi.tabs.size === 3, 'owned tabs');
@@ -947,13 +998,19 @@ test('destroy durably pauses, releases power, and closes automatic tab ownership
   assert.deepEqual(harness.powerCalls.at(-1), ['release']);
   assert.deepEqual(
     harness.runtimeMessages.findLast(
-      (message) => message.type === 'BATCH_SESSION_PAUSE'
+      (message) => message.type === 'BATCH_PAGE_TEARDOWN'
     ),
     {
-      type: 'BATCH_SESSION_PAUSE',
+      type: 'BATCH_PAGE_TEARDOWN',
       batchId: 'batch-1',
       reason: 'page_teardown'
     }
+  );
+  assert.equal(
+    harness.runtimeMessages.some(
+      (message) => message.type === 'BATCH_SESSION_PAUSE'
+    ),
+    false
   );
   assert.equal(harness.tabsApi.tabs.size, 0);
   assert.equal(harness.runtimePageListeners.size, 0);
@@ -987,20 +1044,38 @@ test('page teardown preempts an in-flight resume before worker creation', async 
   );
   assert.equal(harness.tabsApi.createCalls.length, 0);
   assert.equal(
-    harness.runtimeMessages.findLast(
+    harness.runtimeMessages.some(
       (message) => message.type === 'BATCH_SESSION_PAUSE'
+    ),
+    false
+  );
+  assert.equal(
+    harness.runtimeMessages.findLast(
+      (message) => message.type === 'BATCH_PAGE_TEARDOWN'
     )?.reason,
-    'page_teardown'
+    'pagehide'
   );
 });
 
-test('teardown close failure persists recovery and retains automatic tab ownership', async () => {
+test('navigation cleanup failure retains UI, singleton, and retryable ownership', async () => {
   const harness = await createProductionHarness();
   click(harness.document, '[data-action="resume"]');
   await waitFor(() => harness.tabsApi.tabs.size === 3, 'owned tabs');
   harness.tabsApi.removeFailure = new Error('tab close unavailable');
 
-  await harness.page.destroy({ reason: 'page_teardown' });
+  const historyLink = [...harness.document.querySelectorAll('a')].find(
+    (link) => link.textContent === '评论历史'
+  );
+  historyLink.dispatchEvent(new harness.dom.window.MouseEvent('click', {
+    bubbles: true,
+    button: 0,
+    cancelable: true
+  }));
+  await waitFor(
+    () => harness.storageLocal.data.batchRuntimeCheckpoint
+      ?.recoveryCleanup?.diagnostic === 'tab_close_failed',
+    'persisted cleanup diagnostic'
+  );
 
   assert.equal(
     harness.storageLocal.data.batchRuntimeCheckpoint.status,
@@ -1013,12 +1088,66 @@ test('teardown close failure persists recovery and retains automatic tab ownersh
   assert.deepEqual(harness.powerCalls.at(-1), ['release']);
   assert.equal(harness.tabsApi.tabs.size, 3);
   assert.equal(harness.tabsApi.onRemoved.listeners.size, 1);
+  assert.equal(harness.navigateCalls.length, 0);
+  assert.notEqual(
+    harness.document.querySelector('[data-batch-console]').textContent,
+    ''
+  );
+  assert.equal(await harness.bootPage(), harness.page);
   assert.equal(
     harness.runtimeMessages.some(
       (message) => message.type === 'BATCH_SESSION_STOP'
     ),
     false
   );
+
+  harness.tabsApi.removeFailure = null;
+  historyLink.dispatchEvent(new harness.dom.window.MouseEvent('click', {
+    bubbles: true,
+    button: 0,
+    cancelable: true
+  }));
+  await waitFor(() => harness.navigateCalls.length === 1, 'retry navigation');
+  assert.equal(harness.tabsApi.tabs.size, 0);
+  assert.equal(harness.runtimePageListeners.size, 0);
+});
+
+test('navigation storage failure keeps the local recovery projection and handle', async () => {
+  const harness = await createProductionHarness();
+  click(harness.document, '[data-action="resume"]');
+  await waitFor(() => harness.tabsApi.tabs.size === 3, 'owned tabs');
+  harness.storageLocal.setFailure = new Error('storage unavailable');
+
+  const historyLink = [...harness.document.querySelectorAll('a')].find(
+    (link) => link.textContent === '评论历史'
+  );
+  historyLink.dispatchEvent(new harness.dom.window.MouseEvent('click', {
+    bubbles: true,
+    button: 0,
+    cancelable: true
+  }));
+  await waitFor(
+    () => /checkpoint_write_failed/.test(harness.document.body.textContent),
+    'local persistence failure projection'
+  );
+
+  assert.equal(harness.storageLocal.data.batchRuntimeCheckpoint.status, 'running');
+  assert.equal(harness.navigateCalls.length, 0);
+  assert.equal(harness.tabsApi.tabs.size, 3);
+  assert.notEqual(
+    harness.document.querySelector('[data-batch-console]').textContent,
+    ''
+  );
+  assert.equal(await harness.bootPage(), harness.page);
+
+  harness.storageLocal.setFailure = null;
+  historyLink.dispatchEvent(new harness.dom.window.MouseEvent('click', {
+    bubbles: true,
+    button: 0,
+    cancelable: true
+  }));
+  await waitFor(() => harness.navigateCalls.length === 1, 'storage retry navigation');
+  assert.equal(harness.tabsApi.tabs.size, 0);
 });
 
 test('shared-shell navigation waits for durable pause and tab cleanup', async () => {
@@ -1043,9 +1172,9 @@ test('shared-shell navigation waits for durable pause and tab cleanup', async ()
   }]);
   assert.equal(
     harness.runtimeMessages.findLast(
-      (message) => message.type === 'BATCH_SESSION_PAUSE'
+      (message) => message.type === 'BATCH_PAGE_TEARDOWN'
     )?.reason,
-    'page_teardown'
+    'navigation'
   );
   assert.equal(harness.runtimePageListeners.size, 0);
 });
