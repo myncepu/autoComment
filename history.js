@@ -6,6 +6,7 @@ import {
 } from './lib/comment-history-csv.mjs';
 import { createCloudHistoryDataSource } from './lib/cloud-history-data-source.mjs';
 import { createCloudHistoryController } from './lib/cloud-history-controller.mjs';
+import { bootAppShell } from './lib/app-shell.mjs';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const EXPIRY_DAYS = 90;
@@ -804,5 +805,8 @@ export function bootHistoryPage(documentRef = document, {
 }
 
 if (typeof document !== 'undefined') {
-  document.addEventListener('DOMContentLoaded', () => bootHistoryPage(document));
+  document.addEventListener('DOMContentLoaded', () => {
+    bootAppShell(document, { currentUrl: window.location.href });
+    bootHistoryPage(document);
+  });
 }

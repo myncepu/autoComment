@@ -17,11 +17,15 @@ const cloudDataSourceModuleUrl = pathToFileURL(
 const cloudControllerModuleUrl = pathToFileURL(
   path.join(projectRoot, 'lib/cloud-history-controller.mjs')
 ).href;
+const appShellModuleUrl = pathToFileURL(
+  path.join(projectRoot, 'lib/app-shell.mjs')
+).href;
 const historyModuleSource = fs
   .readFileSync(path.join(projectRoot, 'history.js'), 'utf8')
   .replace("'./lib/comment-history-csv.mjs'", `'${csvModuleUrl}'`)
   .replace("'./lib/cloud-history-data-source.mjs'", `'${cloudDataSourceModuleUrl}'`)
-  .replace("'./lib/cloud-history-controller.mjs'", `'${cloudControllerModuleUrl}'`);
+  .replace("'./lib/cloud-history-controller.mjs'", `'${cloudControllerModuleUrl}'`)
+  .replace("'./lib/app-shell.mjs'", `'${appShellModuleUrl}'`);
 const {
   advancePagination,
   buildAnchorsRequest,
@@ -412,6 +416,33 @@ test('history startup retries a live worker queue before loading and displays re
   );
   assert.equal(document.getElementById('historyPendingBanner').hidden, false);
   assert.match(document.getElementById('historyPendingBanner').textContent, /2/);
+});
+
+test('zero post-retry pending count clears an earlier queued-row warning', async () => {
+  const document = historyDocument();
+  const banner = document.getElementById('historyPendingBanner');
+  banner.hidden = false;
+  banner.textContent = '旧队列仍有 1 条等待保存';
+  const requestMessage = async (message) => {
+    if (message.type === 'HISTORY_RETRY_PENDING') {
+      return { retried: 1, saved: 1, pending: 0 };
+    }
+    if (message.type === 'HISTORY_SUMMARY') return {};
+    if (message.type === 'HISTORY_ARCHIVE_EVENTS') return [];
+    if (message.type === 'HISTORY_LIST') return { records: [], nextCursor: null };
+    throw new Error(`Unexpected request: ${message.type}`);
+  };
+
+  bootHistoryPage(document, {
+    requestMessage,
+    search: '',
+    estimateStorage: async () => 0
+  });
+  await nextTurn();
+  await nextTurn();
+
+  assert.equal(banner.hidden, true);
+  assert.equal(banner.textContent, '');
 });
 
 test('history keeps a warning visible when the post-retry count is unknown', async () => {
@@ -1098,16 +1129,21 @@ test('history layout includes summaries, indexed filters, pagination, archive an
   assert.match(html, /<option value="100"/);
 });
 
-test('entry pages expose comment history links and batch requests retention status', () => {
+test('entry pages expose comment history through the shared application shell', async () => {
   const optionsHtml = fs.readFileSync(path.join(projectRoot, 'options.html'), 'utf8');
   const optionsJs = fs.readFileSync(path.join(projectRoot, 'options.js'), 'utf8');
   const batchHtml = fs.readFileSync(path.join(projectRoot, 'batch.html'), 'utf8');
-  const batchJs = fs.readFileSync(path.join(projectRoot, 'batch.js'), 'utf8');
+  const { bootAppShell } = await import(appShellModuleUrl);
+  const document = new JSDOM(batchHtml, {
+    url: 'chrome-extension://extension-id/batch.html'
+  }).window.document;
+  bootAppShell(document, { currentUrl: document.location.href });
 
   assert.match(optionsHtml, /id="openHistoryBtn"[^>]*>[^<]*评论历史/);
   assert.match(optionsJs, /chrome\.tabs\.create\(\{ url: 'history\.html' \}\)/);
-  assert.match(batchHtml, /id="openHistoryBtn"[^>]*>[^<]*评论历史/);
-  assert.match(batchHtml, /id="historyRetentionBanner"/);
-  assert.match(batchJs, /type:\s*'HISTORY_RETENTION_STATUS'/);
-  assert.match(batchJs, /type:\s*'HISTORY_RETRY_PENDING'/);
+  const historyLink = [...document.querySelectorAll('a')].find(
+    (link) => link.textContent === '评论历史'
+  );
+  assert.ok(historyLink);
+  assert.equal(historyLink.getAttribute('href'), 'history.html');
 });

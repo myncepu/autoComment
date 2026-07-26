@@ -27,6 +27,9 @@ import {
   installBatchSecretVaultListener
 } from './lib/batch-secret-vault.mjs';
 import {
+  createBatchSessionJournal
+} from './lib/batch-session-journal.mjs';
+import {
   createBatchSubmitContextStore,
   installBatchSubmitContextListener
 } from './lib/batch-submit-context-store.mjs';
@@ -37,6 +40,7 @@ installActionClickHandler(chrome);
 const batchResultStore = createBatchResultStore(chrome.storage.local);
 const batchRuntimeController = createBatchRuntimeController({
   storageArea: chrome.storage.local,
+  sessionJournal: createBatchSessionJournal(chrome.storage.session),
   power: chrome.power,
   tabs: chrome.tabs,
   windows: chrome.windows,
@@ -46,7 +50,14 @@ const batchSubmitContextStore = createBatchSubmitContextStore(
   chrome.storage.local,
   { maxAgeMs: Number.POSITIVE_INFINITY }
 );
-installBatchSubmitContextListener(chrome, batchSubmitContextStore);
+installBatchSubmitContextListener(chrome, batchSubmitContextStore, {
+  runProofBoundTaskHook: (...args) => (
+    batchRuntimeController.runProofBoundTaskHook(...args)
+  ),
+  runOwnerPageRecoveryHook: (...args) => (
+    batchRuntimeController.runOwnerPageRecoveryHook(...args)
+  )
+});
 
 const commentHistoryRepository = createLazyCloudSyncRepository(
   () => openCommentHistoryDb()
@@ -146,31 +157,140 @@ async function persistBatchReport(message) {
   await batchResultStore.save(message);
 }
 
+function batchIngressError(code) {
+  const error = new Error(code);
+  error.code = code;
+  return error;
+}
+
+function submitContextMatches(context, message) {
+  return Boolean(
+    context &&
+    context.batchId === message.batchId &&
+    context.urlIndex === message.urlIndex &&
+    context.attempt === message.attempt
+  );
+}
+
+async function clearExactSubmitContext(message, sender) {
+  const result = message.result ?? 'success';
+  if (result !== 'success') return;
+  if (!Number.isInteger(sender?.tab?.id)) {
+    throw batchIngressError('missing_sender_tab');
+  }
+  let released = false;
+  try {
+    released = await batchSubmitContextStore.clearIfMatches(
+      sender.tab.id,
+      {
+        batchId: message.batchId,
+        urlIndex: message.urlIndex,
+        attempt: message.attempt,
+        historyRevision: message.history?.historyRevision
+      }
+    );
+    if (!released) {
+      released = await batchSubmitContextStore.get(sender.tab.id) === null;
+    }
+  } catch (_) {
+    console.warn('[background] Durable history saved but submit context cleanup deferred');
+  }
+  if (!released) {
+    throw batchIngressError('submit_context_not_released');
+  }
+}
+
+async function saveDurableHistory(message, sender) {
+  const {
+    historySaveStatus,
+    pendingCount: historyPendingCount,
+    cloudQueueStatus
+  } = await commentHistoryService.saveConfirmedSuccess({
+    ...message,
+    result: message.result ?? 'success'
+  });
+  if (!isDurableBatchConfirmation({
+    ...message,
+    historySaveStatus,
+    historyPendingCount
+  })) {
+    throw batchIngressError('history_save_failed');
+  }
+  await clearExactSubmitContext(message, sender);
+  return {
+    historySaveStatus,
+    ...cloudQueueStatusFields(cloudQueueStatus),
+    ...(cloudQueueStatus ? { cloudQueueStatus } : {}),
+    ...(Number.isInteger(historyPendingCount) ||
+      historyPendingCount === null
+      ? { historyPendingCount }
+      : {})
+  };
+}
+
 async function broadcastBatchConfirmed(
   message,
   {
     historySaveStatus,
     historyPendingCount,
     cloudQueueStatus,
-    sourceTabId
+    sourceTabId,
+    sender,
+    terminalSideEffect
   } = {}
 ) {
-  const checkpoint = await batchRuntimeController.markTerminal(message);
+  const checkpoint = await batchRuntimeController.markTerminal(
+    message,
+    sender,
+    terminalSideEffect
+  );
   if (!checkpoint.ok) {
-    throw new Error(`checkpoint_write_failed:${checkpoint.error}`);
+    const error = new Error(
+      `checkpoint_write_failed:${checkpoint.error}`
+    );
+    error.code = checkpoint.error;
+    throw error;
+  }
+  const sideEffect = checkpoint.sideEffect || {};
+  const effectiveHistorySaveStatus =
+    sideEffect.historySaveStatus ?? historySaveStatus;
+  const effectiveHistoryPendingCount =
+    Object.hasOwn(sideEffect, 'historyPendingCount')
+      ? sideEffect.historyPendingCount
+      : historyPendingCount;
+  const effectiveCloudQueueStatus =
+    sideEffect.cloudQueueStatus ?? cloudQueueStatus;
+  if (
+    checkpoint.changed === false &&
+    typeof terminalSideEffect === 'function'
+  ) {
+    return {
+      checkpoint,
+      historySaveStatus: effectiveHistorySaveStatus,
+      historyPendingCount: effectiveHistoryPendingCount,
+      ...(effectiveCloudQueueStatus
+        ? { cloudQueueStatus: effectiveCloudQueueStatus }
+        : {})
+    };
   }
   await chrome.runtime.sendMessage({
     type: 'BATCH_CONFIRMED',
     batchId: message.batchId,
     urlIndex: message.urlIndex,
+    attempt: message.attempt,
     result: message.result ?? 'success',
     aiContent: message.aiContent || null,
+    errorCode: message.errorCode || null,
     errorMessage: message.errorMessage || null,
-    ...(historySaveStatus ? { historySaveStatus } : {}),
-    ...(Number.isInteger(historyPendingCount) || historyPendingCount === null
-      ? { historyPendingCount }
+    ...(effectiveHistorySaveStatus
+      ? { historySaveStatus: effectiveHistorySaveStatus }
       : {}),
-    ...cloudQueueStatusFields(cloudQueueStatus),
+    ...(
+      Number.isInteger(effectiveHistoryPendingCount) ||
+      effectiveHistoryPendingCount === null
+      ? { historyPendingCount: effectiveHistoryPendingCount }
+      : {}),
+    ...cloudQueueStatusFields(effectiveCloudQueueStatus),
     ...(Number.isInteger(sourceTabId) ? { sourceTabId } : {})
   }).then(() => {
     console.log('[background] BATCH_CONFIRMED 发送成功');
@@ -181,6 +301,14 @@ async function broadcastBatchConfirmed(
       console.error('[background] BATCH_CONFIRMED 发送失败:', e);
     }
   });
+  return {
+    checkpoint,
+    historySaveStatus: effectiveHistorySaveStatus,
+    historyPendingCount: effectiveHistoryPendingCount,
+    ...(effectiveCloudQueueStatus
+      ? { cloudQueueStatus: effectiveCloudQueueStatus }
+      : {})
+  };
 }
 
 // content.js 确认评论已提交（标签页可能刷新，context 丢失，background 仍活着）
@@ -189,69 +317,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     console.log('[background] 收到 BATCH_HANDLE_CONFIRM >>>', { batchId: message.batchId, urlIndex: message.urlIndex, url: message.url, aiContentLen: message.aiContent ? message.aiContent.length : 0, sender: sender.tab ? sender.tab.id : 'N/A', time: new Date().toISOString() });
     (async () => {
       try {
-        await persistBatchReport({
-          batchId: message.batchId,
-          urlIndex: message.urlIndex,
-          url: message.url || '',
-          result: message.result ?? 'success',
-          aiContent: message.aiContent || null,
-          errorMessage: message.errorMessage || null
+        const committed = await broadcastBatchConfirmed(message, {
+          sourceTabId: sender?.tab?.id,
+          sender,
+          async terminalSideEffect() {
+            await persistBatchReport({
+              batchId: message.batchId,
+              urlIndex: message.urlIndex,
+              attempt: message.attempt,
+              url: message.url || '',
+              result: message.result ?? 'success',
+              aiContent: message.aiContent || null,
+              errorCode: message.errorCode || null,
+              errorMessage: message.errorMessage || null
+            });
+            console.log('[background] persistBatchReport 完成，准备发送 BATCH_CONFIRMED');
+            return saveDurableHistory(message, sender);
+          }
         });
-        console.log('[background] persistBatchReport 完成，准备发送 BATCH_CONFIRMED');
-
         const {
           historySaveStatus,
-          pendingCount: historyPendingCount,
-          cloudQueueStatus
-        } = await commentHistoryService.saveConfirmedSuccess({
-          ...message,
-          result: message.result ?? 'success'
-        });
-
-        // 关键：先通知 batch.js（popup）落盘已完成，batch.js 等到确认后才关闭标签页
-        const confirmedMessage = {
-          ...message,
-          historySaveStatus,
           historyPendingCount,
-          ...cloudQueueStatusFields(cloudQueueStatus)
-        };
-        if (isDurableBatchConfirmation(confirmedMessage)) {
-          const result = message.result ?? 'success';
-          let submitContextReleased = result !== 'success';
-          if (result === 'success' && Number.isInteger(sender?.tab?.id)) {
-            try {
-              submitContextReleased = await batchSubmitContextStore.clearIfMatches(
-                sender.tab.id,
-                {
-                  batchId: message.batchId,
-                  urlIndex: message.urlIndex,
-                  historyRevision: message.history?.historyRevision
-                }
-              );
-            } catch (_) {
-              console.warn('[background] Durable history saved but submit context cleanup deferred');
-            }
-          }
-          if (submitContextReleased) {
-            await broadcastBatchConfirmed(message, {
-              historySaveStatus,
-              historyPendingCount,
-              cloudQueueStatus,
-              sourceTabId: sender?.tab?.id
-            });
-          } else {
-            sendResponse({
-              ok: false,
-              error: 'submit_context_not_released',
-              historySaveStatus,
-              ...cloudQueueStatusFields(cloudQueueStatus),
-              ...(Number.isInteger(historyPendingCount) || historyPendingCount === null
-                ? { historyPendingCount }
-                : {})
-            });
-            return;
-          }
-        }
+          cloudQueueStatus
+        } = committed;
 
         sendResponse({
           ok: true,
@@ -264,51 +352,46 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         console.log('[background] BATCH_HANDLE_CONFIRM <<< sendResponse({ok:true})');
       } catch (e) {
         console.error('[background] BATCH_HANDLE_CONFIRM 错误:', e);
-        sendResponse({ ok: false, error: String(e) });
+        if (e?.code === 'history_save_failed') {
+          sendResponse({
+            ok: true,
+            historySaveStatus: 'failed'
+          });
+          return;
+        }
+        sendResponse({
+          ok: false,
+          error: e?.code || String(e)
+        });
       }
     })();
     return true;
   }
 });
 
-// content.js 已把精确历史写入不可变 pending 队列，可以安全释放对应窗口。
+// background 在 ownership-proven terminal hook 内保存精确历史并释放窗口。
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message && message.type === 'BATCH_HISTORY_FALLBACK_DURABLE') {
-    if (!Number.isInteger(sender?.tab?.id)) {
-      sendResponse({ ok: false, error: 'missing_sender_tab' });
-      return false;
-    }
+  if (message && message.type === 'BATCH_HISTORY_PENDING_FALLBACK') {
     (async () => {
       try {
-        let submitContextReleased = false;
-        submitContextReleased = await batchSubmitContextStore.clearIfMatches(
-          sender.tab.id,
-          {
-            batchId: message.batchId,
-            urlIndex: message.urlIndex,
-            historyRevision: message.historyRevision
-          }
-        );
-        if (!submitContextReleased) {
-          sendResponse({
-            ok: false,
-            error: 'submit_context_not_released'
-          });
-          return;
-        }
-        await broadcastBatchConfirmed(message, {
-          historySaveStatus: 'queued',
-          historyPendingCount: null,
-          sourceTabId: sender.tab.id
+        const committed = await broadcastBatchConfirmed(message, {
+          sourceTabId: sender?.tab?.id,
+          sender,
+          terminalSideEffect: () => saveDurableHistory(message, sender)
         });
-        sendResponse({ ok: true });
+        sendResponse({
+          ok: true,
+          historySaveStatus: committed.historySaveStatus,
+          ...cloudQueueStatusFields(committed.cloudQueueStatus),
+          ...(Number.isInteger(committed.historyPendingCount) ||
+            committed.historyPendingCount === null
+            ? { historyPendingCount: committed.historyPendingCount }
+            : {})
+        });
       } catch (error) {
-        console.warn('[background] Fallback history handoff deferred');
         sendResponse({
           ok: false,
-          error: error?.message?.startsWith('checkpoint_write_failed:')
-            ? 'checkpoint_write_failed'
-            : 'submit_context_not_released'
+          error: error?.code || 'history_pending_fallback_failed'
         });
       }
     })();
@@ -321,11 +404,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message && message.type === 'BATCH_PERSIST_PENDING_RESULT') {
     (async () => {
       try {
-        await batchResultStore.save(message);
+        const response = await batchRuntimeController.runProofBoundTaskHook(
+          message,
+          sender,
+          () => batchResultStore.save(message)
+        );
+        if (!response.ok) {
+          sendResponse({
+            ok: false,
+            error: response.error
+          });
+          return;
+        }
         sendResponse({ ok: true });
       } catch (e) {
         console.error('[background] BATCH_PERSIST_PENDING_RESULT 错误:', e);
-        sendResponse({ ok: false, error: String(e) });
+        sendResponse({
+          ok: false,
+          error: e?.code || 'pending_result_write_failed'
+        });
       }
     })();
     return true;
@@ -338,27 +435,39 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     console.log('[background] 收到 BATCH_REPORT_RESULT >>>', { batchId: message.batchId, urlIndex: message.urlIndex, result: message.result, sender: sender.tab ? sender.tab.id : 'N/A', time: new Date().toISOString() });
     (async () => {
       try {
-        await persistBatchReport(message);
         const tabId = sender?.tab?.id;
-        const submitContext = Number.isInteger(tabId)
-          ? await batchSubmitContextStore.get(tabId)
-          : null;
-        const hasUnacknowledgedSubmission = Boolean(
-          message.result === 'fail'
-          && submitContext
-          && submitContext.batchId === message.batchId
-          && submitContext.urlIndex === message.urlIndex
-        );
-        if (hasUnacknowledgedSubmission) {
-          sendResponse({ ok: true, deferred: true });
-          return;
-        }
-        await broadcastBatchConfirmed(message, { sourceTabId: tabId });
+        await broadcastBatchConfirmed(message, {
+          sourceTabId: tabId,
+          sender,
+          async terminalSideEffect() {
+            const submitContext = Number.isInteger(tabId)
+              ? await batchSubmitContextStore.get(tabId)
+              : null;
+            if (
+              message.result === 'fail' &&
+              submitContextMatches(submitContext, message)
+            ) {
+              throw batchIngressError('submit_context_unresolved');
+            }
+            if (submitContext) {
+              throw batchIngressError('submit_context_not_released');
+            }
+            await persistBatchReport(message);
+            return saveDurableHistory(message, sender);
+          }
+        });
         console.log('[background] BATCH_REPORT_RESULT <<< sendResponse({ok:true})');
         sendResponse({ ok: true });
       } catch (e) {
         console.error('[background] BATCH_REPORT_RESULT 错误:', e);
-        sendResponse({ ok: false, error: String(e) });
+        if (e?.code === 'submit_context_unresolved') {
+          sendResponse({ ok: true, deferred: true });
+          return;
+        }
+        sendResponse({
+          ok: false,
+          error: e?.code || 'batch_report_failed'
+        });
       }
     })();
     return true;

@@ -39,6 +39,24 @@ test('does not take work while stopped and resumes only unfinished indices', () 
   assert.deepEqual(scheduler.takeAvailable(), [1, 3]);
 });
 
+test('reconciles a retried terminal task without releasing current active slots', () => {
+  const scheduler = new BatchScheduler({ totalCount: 4, concurrency: 2 });
+  scheduler.start();
+  assert.deepEqual(scheduler.takeAvailable(), [0, 1]);
+  scheduler.settle(0);
+  assert.deepEqual(scheduler.takeAvailable(), [2]);
+
+  scheduler.reconcile({
+    processedIndices: [],
+    activeIndices: [1, 2]
+  });
+  assert.deepEqual(scheduler.takeAvailable(), []);
+
+  scheduler.settle(1);
+  assert.deepEqual(scheduler.takeAvailable(), [0]);
+  assert.deepEqual(scheduler.activeIndices, [2, 0]);
+});
+
 test('settling the same index twice is idempotent', () => {
   const scheduler = new BatchScheduler({ totalCount: 1, concurrency: 1 });
   scheduler.start();

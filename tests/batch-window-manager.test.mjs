@@ -1,239 +1,362 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { BatchWindowManager } from '../lib/batch-window-manager.mjs';
+import { BatchTabManager } from '../lib/batch-window-manager.mjs';
 
-function createFakeWindowsApi() {
+function createFakeTabsApi() {
   const listeners = new Set();
   const createCalls = [];
   const removeCalls = [];
-  let nextId = 10;
+  const updateCalls = [];
+  let nextId = 110;
   return {
     createCalls,
     removeCalls,
+    updateCalls,
     onRemoved: {
       addListener(listener) { listeners.add(listener); },
       removeListener(listener) { listeners.delete(listener); },
-      emit(windowId) {
-        for (const listener of [...listeners]) listener(windowId);
+      emit(tabId, removeInfo = {
+        windowId: 10,
+        isWindowClosing: false
+      }) {
+        for (const listener of [...listeners]) listener(tabId, removeInfo);
       }
     },
     async create(details) {
       createCalls.push(details);
-      const windowId = nextId++;
-      return { id: windowId, tabs: [{ id: windowId + 100 }] };
+      return {
+        id: nextId++,
+        windowId: details.windowId,
+        url: details.url,
+        status: 'loading',
+        discarded: false
+      };
     },
-    async remove(windowId) {
-      removeCalls.push(windowId);
-      this.onRemoved.emit(windowId);
+    async remove(tabId) {
+      removeCalls.push(tabId);
+      this.onRemoved.emit(tabId);
+    },
+    async update(tabId, changes) {
+      updateCalls.push([tabId, changes]);
+      return { id: tabId, windowId: 10, active: changes.active };
     }
   };
 }
 
-test('creates one non-focused normal window and indexes its first tab', async () => {
-  const windowsApi = createFakeWindowsApi();
-  const manager = new BatchWindowManager({
-    windowsApi,
+test('creates background tabs in one configured window and indexes each by tab identity', async () => {
+  const tabsApi = createFakeTabsApi();
+  const manager = new BatchTabManager({
+    tabsApi,
+    windowId: 10,
+    now: () => 1234
+  });
+
+  const first = await manager.create({
+    batchId: 'batch-a',
+    urlIndex: 2,
+    attempt: 1,
+    url: 'https://example.test/comments'
+  });
+  const second = await manager.create({
+    batchId: 'batch-a',
+    urlIndex: 3,
+    attempt: 1,
+    url: 'https://second.test/comments'
+  });
+
+  assert.deepEqual(tabsApi.createCalls, [{
+    windowId: 10,
+    url: 'https://example.test/comments',
+    active: false
+  }, {
+    windowId: 10,
+    url: 'https://second.test/comments',
+    active: false
+  }]);
+  assert.deepEqual(first, {
+    batchId: 'batch-a',
+    urlIndex: 2,
+    attempt: 1,
+    url: 'https://example.test/comments',
+    tabId: 110,
+    windowId: 10,
+    startTime: 1234
+  });
+  assert.equal(second.tabId, 111);
+  assert.equal(manager.getByTabId(110), first);
+  assert.equal(manager.getByTabId(111), second);
+  assert.equal(manager.getByIndex(2), first);
+  assert.equal(manager.getByIndex(3), second);
+});
+
+test('propagates background checkpoint ownership with the task identity', async () => {
+  const tabsApi = createFakeTabsApi();
+  const runtimeCheckpoint = {
+    version: 2,
+    batchId: 'batch-a',
+    status: 'running'
+  };
+  let receivedIdentity = null;
+  tabsApi.create = async (details, identity) => {
+    tabsApi.createCalls.push(details);
+    receivedIdentity = identity;
+    return {
+      id: 210,
+      windowId: details.windowId,
+      url: 'https://checkpoint.test/comments',
+      backgroundCheckpointed: true,
+      runtimeCheckpoint
+    };
+  };
+  const manager = new BatchTabManager({
+    tabsApi,
+    windowId: 10,
     now: () => 1234
   });
 
   const activity = await manager.create({
     batchId: 'batch-a',
     urlIndex: 2,
-    url: 'https://example.test/comments'
+    attempt: 3,
+    url: 'https://untrusted-page-value.test/comments'
   });
 
-  assert.deepEqual(windowsApi.createCalls, [{
-    url: 'https://example.test/comments',
-    focused: false,
-    type: 'normal'
-  }]);
-  assert.deepEqual(activity, {
+  assert.deepEqual(receivedIdentity, {
     batchId: 'batch-a',
     urlIndex: 2,
-    url: 'https://example.test/comments',
-    tabId: 110,
-    windowId: 10,
-    startTime: 1234
+    attempt: 3,
+    requestId: 'batch-a:2:3'
   });
-  assert.equal(manager.getByTabId(110), activity);
-  assert.equal(manager.getByIndex(2), activity);
+  assert.equal(activity.backgroundCheckpointed, true);
+  assert.equal(activity.runtimeCheckpoint, runtimeCheckpoint);
+  assert.equal(activity.url, 'https://checkpoint.test/comments');
 });
 
-test('expected close removes mappings without reporting an unexpected close', async () => {
-  const windowsApi = createFakeWindowsApi();
+test('expected close removes one tab without disturbing another worker in the shared window', async () => {
+  const tabsApi = createFakeTabsApi();
   const unexpected = [];
-  const manager = new BatchWindowManager({
-    windowsApi,
+  const manager = new BatchTabManager({
+    tabsApi,
+    windowId: 10,
     onUnexpectedClose: (activity) => unexpected.push(activity)
   });
-  await manager.create({ batchId: 'a', urlIndex: 0, url: 'https://a.test' });
+  const first = await manager.create({
+    batchId: 'a',
+    urlIndex: 0,
+    attempt: 1,
+    url: 'https://a.test'
+  });
+  const second = await manager.create({
+    batchId: 'a',
+    urlIndex: 1,
+    attempt: 1,
+    url: 'https://b.test'
+  });
 
   await manager.closeByIndex(0);
 
-  assert.deepEqual(windowsApi.removeCalls, [10]);
+  assert.deepEqual(tabsApi.removeCalls, [first.tabId]);
   assert.equal(manager.getByIndex(0), null);
+  assert.equal(manager.getByIndex(1), second);
+  assert.equal(manager.getByTabId(second.tabId), second);
   assert.deepEqual(unexpected, []);
 });
 
-test('user window closure reports exactly the matching activity', async () => {
-  const windowsApi = createFakeWindowsApi();
+test('user tab closure reports exactly the matching activity', async () => {
+  const tabsApi = createFakeTabsApi();
   const unexpected = [];
-  const manager = new BatchWindowManager({
-    windowsApi,
+  const manager = new BatchTabManager({
+    tabsApi,
+    windowId: 10,
     onUnexpectedClose: (activity) => unexpected.push(activity)
   });
   const activity = await manager.create({
     batchId: 'a',
     urlIndex: 0,
+    attempt: 1,
     url: 'https://a.test'
   });
 
-  windowsApi.onRemoved.emit(activity.windowId);
+  tabsApi.onRemoved.emit(activity.tabId);
 
   assert.deepEqual(unexpected, [activity]);
   assert.equal(manager.getByIndex(0), null);
 });
 
-test('rejects a task from another batch without creating another window', async () => {
-  const windowsApi = createFakeWindowsApi();
-  const manager = new BatchWindowManager({ windowsApi });
+test('rejects another batch and duplicate attempt without creating tabs', async () => {
+  const tabsApi = createFakeTabsApi();
+  const manager = new BatchTabManager({ tabsApi, windowId: 10 });
   const activity = await manager.create({
     batchId: 'batch-a',
     urlIndex: 0,
+    attempt: 1,
     url: 'https://a.test'
   });
 
   await assert.rejects(
-    manager.create({ batchId: 'batch-b', urlIndex: 1, url: 'https://b.test' }),
+    manager.create({
+      batchId: 'batch-b',
+      urlIndex: 1,
+      attempt: 1,
+      url: 'https://b.test'
+    }),
     /批次/
   );
-
-  assert.deepEqual(windowsApi.createCalls, [{
-    url: 'https://a.test',
-    focused: false,
-    type: 'normal'
-  }]);
-  assert.equal(manager.getByIndex(0), activity);
-  assert.equal(manager.getByIndex(1), null);
-});
-
-test('rejects a duplicate URL index without creating another window', async () => {
-  const windowsApi = createFakeWindowsApi();
-  const manager = new BatchWindowManager({ windowsApi });
-  const activity = await manager.create({
-    batchId: 'batch-a',
-    urlIndex: 0,
-    url: 'https://a.test'
-  });
-
   await assert.rejects(
-    manager.create({ batchId: 'batch-a', urlIndex: 0, url: 'https://b.test' }),
+    manager.create({
+      batchId: 'batch-a',
+      urlIndex: 0,
+      attempt: 1,
+      url: 'https://b.test'
+    }),
     /URL 索引/
   );
 
-  assert.equal(windowsApi.createCalls.length, 1);
+  assert.equal(tabsApi.createCalls.length, 1);
   assert.equal(manager.getByIndex(0), activity);
 });
 
-test('removes a created window when Chrome returns no usable first tab', async () => {
-  const windowsApi = createFakeWindowsApi();
-  windowsApi.create = async (details) => {
-    windowsApi.createCalls.push(details);
-    return { id: 10, tabs: [] };
+test('a newer same-index attempt supersedes a pending create without overwriting its tab', async () => {
+  const tabsApi = createFakeTabsApi();
+  const pendingCreates = [];
+  tabsApi.create = (details) => {
+    tabsApi.createCalls.push(details);
+    return new Promise((resolve) => pendingCreates.push(resolve));
   };
-  const manager = new BatchWindowManager({ windowsApi });
+  const manager = new BatchTabManager({ tabsApi, windowId: 10 });
+
+  const oldCreate = manager.create({
+    batchId: 'batch-a',
+    urlIndex: 0,
+    attempt: 1,
+    url: 'https://old.test'
+  });
+  const newCreate = manager.create({
+    batchId: 'batch-a',
+    urlIndex: 0,
+    attempt: 2,
+    url: 'https://new.test'
+  });
+  pendingCreates[1]({ id: 111, windowId: 10 });
+  const replacement = await newCreate;
+  pendingCreates[0]({ id: 110, windowId: 10 });
+
+  await assert.rejects(oldCreate, /已被更新尝试替代/);
+  assert.deepEqual(tabsApi.removeCalls, [110]);
+  assert.equal(manager.getByIndex(0), replacement);
+  assert.equal(manager.getByTabId(111), replacement);
+  assert.equal(manager.getByTabId(110), null);
+});
+
+test('removes a returned tab when Chrome creates it outside the configured window', async () => {
+  const tabsApi = createFakeTabsApi();
+  tabsApi.create = async (details) => {
+    tabsApi.createCalls.push(details);
+    return { id: 110, windowId: 99 };
+  };
+  const manager = new BatchTabManager({ tabsApi, windowId: 10 });
 
   await assert.rejects(
-    manager.create({ batchId: 'batch-a', urlIndex: 0, url: 'https://a.test' }),
-    /浏览器窗口创建成功但未返回可用标签页/
+    manager.create({
+      batchId: 'batch-a',
+      urlIndex: 0,
+      attempt: 1,
+      url: 'https://a.test'
+    }),
+    /目标浏览器窗口/
   );
 
-  assert.deepEqual(windowsApi.removeCalls, [10]);
+  assert.deepEqual(tabsApi.removeCalls, [110]);
   assert.equal(manager.getByIndex(0), null);
 });
 
-test('closeAll closes every tracked window and clears their mappings', async () => {
-  const windowsApi = createFakeWindowsApi();
-  const manager = new BatchWindowManager({ windowsApi });
-  await manager.create({ batchId: 'batch-a', urlIndex: 0, url: 'https://a.test' });
-  await manager.create({ batchId: 'batch-a', urlIndex: 1, url: 'https://b.test' });
-
-  await manager.closeAll();
-
-  assert.deepEqual(windowsApi.removeCalls, [10, 11]);
-  assert.equal(manager.getByIndex(0), null);
-  assert.equal(manager.getByIndex(1), null);
-});
-
-test('already-absent window removal clears the tracked activity without routing an unexpected close', async () => {
-  const windowsApi = createFakeWindowsApi();
-  windowsApi.remove = async (windowId) => {
-    windowsApi.removeCalls.push(windowId);
-    throw new Error(`No window with id: ${windowId}.`);
+test('already-absent tab removal clears the activity without routing an unexpected close', async () => {
+  const tabsApi = createFakeTabsApi();
+  tabsApi.remove = async (tabId) => {
+    tabsApi.removeCalls.push(tabId);
+    throw new Error(`No tab with id: ${tabId}.`);
   };
   const unexpected = [];
-  const manager = new BatchWindowManager({
-    windowsApi,
+  const manager = new BatchTabManager({
+    tabsApi,
+    windowId: 10,
     onUnexpectedClose: (activity) => unexpected.push(activity)
   });
-  await manager.create({ batchId: 'batch-a', urlIndex: 0, url: 'https://a.test' });
+  await manager.create({
+    batchId: 'batch-a',
+    urlIndex: 0,
+    attempt: 1,
+    url: 'https://a.test'
+  });
 
   await manager.closeByIndex(0);
 
-  assert.deepEqual(windowsApi.removeCalls, [10]);
+  assert.deepEqual(tabsApi.removeCalls, [110]);
   assert.equal(manager.getByIndex(0), null);
   assert.equal(manager.getByTabId(110), null);
   assert.deepEqual(unexpected, []);
 });
 
-test('transient window removal failure retains mappings and a later close remains unexpected', async () => {
-  const windowsApi = createFakeWindowsApi();
-  windowsApi.remove = async (windowId) => {
-    windowsApi.removeCalls.push(windowId);
-    throw new Error('Permission denied while removing window');
+test('transient tab removal failure retains mappings and a later close remains unexpected', async () => {
+  const tabsApi = createFakeTabsApi();
+  tabsApi.remove = async (tabId) => {
+    tabsApi.removeCalls.push(tabId);
+    throw new Error('Permission denied while removing tab');
   };
   const unexpected = [];
-  const manager = new BatchWindowManager({
-    windowsApi,
+  const manager = new BatchTabManager({
+    tabsApi,
+    windowId: 10,
     onUnexpectedClose: (activity) => unexpected.push(activity)
   });
   const activity = await manager.create({
     batchId: 'batch-a',
     urlIndex: 0,
+    attempt: 1,
     url: 'https://a.test'
   });
 
-  await assert.rejects(
-    manager.closeByIndex(0),
-    /Permission denied/
-  );
+  await assert.rejects(manager.closeByIndex(0), /Permission denied/);
 
-  assert.deepEqual(windowsApi.removeCalls, [10]);
   assert.equal(manager.getByIndex(0), activity);
   assert.equal(manager.getByTabId(110), activity);
-
-  windowsApi.onRemoved.emit(activity.windowId);
-
+  tabsApi.onRemoved.emit(activity.tabId);
   assert.deepEqual(unexpected, [activity]);
-  assert.equal(manager.getByIndex(0), null);
 });
 
-test('dispose detaches the window-removed listener', async () => {
-  const windowsApi = createFakeWindowsApi();
+test('focus activates only the requested worker tab', async () => {
+  const tabsApi = createFakeTabsApi();
+  const manager = new BatchTabManager({ tabsApi, windowId: 10 });
+  const activity = await manager.create({
+    batchId: 'batch-a',
+    urlIndex: 0,
+    attempt: 1,
+    url: 'https://a.test'
+  });
+
+  await manager.focusByIndex(0);
+
+  assert.deepEqual(tabsApi.updateCalls, [[activity.tabId, { active: true }]]);
+});
+
+test('dispose detaches the tab-removed listener', async () => {
+  const tabsApi = createFakeTabsApi();
   const unexpected = [];
-  const manager = new BatchWindowManager({
-    windowsApi,
+  const manager = new BatchTabManager({
+    tabsApi,
+    windowId: 10,
     onUnexpectedClose: (activity) => unexpected.push(activity)
   });
   const activity = await manager.create({
     batchId: 'batch-a',
     urlIndex: 0,
+    attempt: 1,
     url: 'https://a.test'
   });
 
   manager.dispose();
-  windowsApi.onRemoved.emit(activity.windowId);
+  tabsApi.onRemoved.emit(activity.tabId);
 
   assert.deepEqual(unexpected, []);
   assert.equal(manager.getByIndex(0), activity);

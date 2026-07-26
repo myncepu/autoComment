@@ -5,6 +5,7 @@ import {
   BATCH_RUNTIME_VERSION,
   applyBatchRuntimeEvent,
   createBatchRuntimeCheckpoint,
+  migrateBatchRuntimeCheckpoint,
   normalizeInterruptedBatch,
   validateBatchRuntimeCheckpoint
 } from '../lib/batch-runtime-checkpoint.mjs';
@@ -58,6 +59,97 @@ test('creates a versioned checkpoint with the complete dataset', () => {
   assert.equal(checkpoint.source.parsedUrls[0].originalRow[0], '0');
 });
 
+test('checkpoint creation rejects URL credentials before persistence', () => {
+  const item = {
+    originalIndex: 0,
+    url: 'https://alice:hunter2@example.test/post',
+    sourceDomain: 'example.test',
+    originalRow: ['https://alice:hunter2@example.test/post']
+  };
+
+  assert.throws(
+    () => createBatchRuntimeCheckpoint({
+      batchId: 'batch-secret',
+      source: {
+        fileName: 'secret.csv',
+        headers: ['URL'],
+        rows: [item.originalRow],
+        parsedUrls: [item]
+      },
+      settings: { timeoutSeconds: 60, concurrency: 1 }
+    }, 1000),
+    /batch_url_credentials_forbidden/
+  );
+});
+
+test('checkpoint creation redacts sensitive query values across source copies and results', () => {
+  const item = {
+    originalIndex: 0,
+    url: 'https://example.test/post?view=full&token=secret-token',
+    sourceDomain: 'example.test',
+    originalRow: [
+      'https://example.test/post?view=full&token=secret-token'
+    ]
+  };
+  let checkpoint = createBatchRuntimeCheckpoint({
+    batchId: 'batch-safe',
+    source: {
+      fileName: 'safe.csv',
+      headers: ['URL'],
+      rows: [item.originalRow],
+      parsedUrls: [item]
+    },
+    settings: { timeoutSeconds: 60, concurrency: 1 }
+  }, 1000);
+  checkpoint = applyBatchRuntimeEvent(checkpoint, {
+    type: 'session_started',
+    batchId: 'batch-safe'
+  }, 1100).checkpoint;
+  checkpoint = applyBatchRuntimeEvent(checkpoint, {
+    type: 'task_terminal',
+    batchId: 'batch-safe',
+    urlIndex: 0,
+    attempt: 1,
+    result: { result: 'fail', errorMessage: 'safe failure' }
+  }, 1200).checkpoint;
+
+  const serialized = JSON.stringify(checkpoint);
+  assert.doesNotMatch(serialized, /secret-token/);
+  assert.match(serialized, /view=full/);
+  assert.match(serialized, /token=REDACTED/);
+});
+
+test('task terminal events redact secrets before checkpoint history persistence', () => {
+  let checkpoint = applyBatchRuntimeEvent(createCheckpoint(1), {
+    type: 'session_started',
+    batchId: 'batch-1'
+  }, 1100).checkpoint;
+  const rawError = [
+    'Authorization: Bearer event-bearer-secret',
+    '{"client_secret":"event-client-secret"}',
+    'https://target.test/final#route?access_token=event-hash-secret'
+  ].join('; ');
+
+  checkpoint = applyBatchRuntimeEvent(checkpoint, {
+    type: 'task_terminal',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    result: {
+      result: 'fail',
+      errorCode: 'task_failed',
+      errorMessage: rawError
+    }
+  }, 1200).checkpoint;
+
+  const serialized = JSON.stringify(checkpoint);
+  assert.doesNotMatch(
+    serialized,
+    /event-bearer-secret|event-client-secret|event-hash-secret/
+  );
+  assert.match(serialized, /REDACTED/);
+});
+
 test('rejects malformed and unsupported checkpoints', () => {
   assert.deepEqual(
     validateBatchRuntimeCheckpoint(null),
@@ -66,6 +158,260 @@ test('rejects malformed and unsupported checkpoints', () => {
   assert.deepEqual(
     validateBatchRuntimeCheckpoint({ version: 99 }),
     { ok: false, error: 'unsupported_version' }
+  );
+});
+
+test('version 2 migration adds request and reservation defaults exactly once', () => {
+  const legacyVersion2 = createCheckpoint(1);
+  delete legacyVersion2.tasks['0'].requestId;
+  delete legacyVersion2.openingReservations;
+
+  const migrated = migrateBatchRuntimeCheckpoint(legacyVersion2, 2000);
+  const stable = migrateBatchRuntimeCheckpoint(migrated.checkpoint, 2100);
+
+  assert.equal(migrated.ok, true);
+  assert.equal(migrated.changed, true);
+  assert.equal(migrated.checkpoint.tasks['0'].requestId, null);
+  assert.deepEqual(migrated.checkpoint.openingReservations, {});
+  assert.equal(stable.ok, true);
+  assert.equal(stable.changed, false);
+});
+
+test('rejects malformed opening reservations and inconsistent task request identities', () => {
+  const malformed = createCheckpoint(1);
+  malformed.openingReservations = {
+    forged: {
+      requestId: 'different-key',
+      batchId: 'batch-1',
+      urlIndex: 7,
+      attempt: 3,
+      windowId: 42,
+      tabId: 777,
+      updatedAt: 2000
+    }
+  };
+  const invalidTask = createCheckpoint(1);
+  invalidTask.tasks['0'].requestId = 42;
+
+  assert.equal(validateBatchRuntimeCheckpoint(malformed).ok, false);
+  assert.equal(validateBatchRuntimeCheckpoint(invalidTask).ok, false);
+});
+
+test('enforces the task ownership matrix and canonical active request identity', () => {
+  const active = applyBatchRuntimeEvent(
+    applyBatchRuntimeEvent(createCheckpoint(1), {
+      type: 'session_started',
+      batchId: 'batch-1'
+    }, 1100).checkpoint,
+    {
+      type: 'task_activated',
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      requestId: 'batch-1:0:1',
+      tabId: 41,
+      windowId: 51,
+      ownerPageTabId: 61,
+      ownershipEpoch: 'epoch-1',
+      startedAt: 1200
+    },
+    1200
+  ).checkpoint;
+  const mutations = [
+    (checkpoint) => { checkpoint.tasks['0'].requestId = 'forged-request'; },
+    (checkpoint) => { checkpoint.tasks['0'].requestId = 'batch-1:0:2'; },
+    (checkpoint) => { checkpoint.tasks['0'].tabId = 0; },
+    (checkpoint) => { checkpoint.tasks['0'].windowId = null; },
+    (checkpoint) => { checkpoint.tasks['0'].startedAt = null; },
+    (checkpoint) => {
+      Object.assign(checkpoint.tasks['0'], {
+        state: 'queued',
+        requestId: null,
+        tabId: 777,
+        windowId: 42,
+        startedAt: 1200
+      });
+    }
+  ];
+
+  assert.equal(validateBatchRuntimeCheckpoint(active).ok, true);
+  for (const mutate of mutations) {
+    const malformed = structuredClone(active);
+    mutate(malformed);
+    assert.equal(validateBatchRuntimeCheckpoint(malformed).ok, false);
+  }
+});
+
+test('migrates only canonical legacy reservations that are missing batchId', () => {
+  const safe = createCheckpoint(1);
+  safe.openingReservations = {
+    'batch-1:0:1': {
+      requestId: 'batch-1:0:1',
+      urlIndex: 0,
+      attempt: 1,
+      windowId: 42,
+      tabId: null,
+      updatedAt: 2000
+    }
+  };
+  const unsafe = structuredClone(safe);
+  unsafe.openingReservations = {
+    forged: {
+      requestId: 'forged',
+      urlIndex: 0,
+      attempt: 1,
+      windowId: 42,
+      tabId: 777,
+      updatedAt: 2000
+    }
+  };
+
+  const migratedSafe = migrateBatchRuntimeCheckpoint(safe, 2100);
+  const migratedUnsafe = migrateBatchRuntimeCheckpoint(unsafe, 2100);
+
+  assert.equal(migratedSafe.ok, true);
+  assert.equal(migratedSafe.changed, true);
+  assert.equal(
+    migratedSafe.checkpoint.openingReservations['batch-1:0:1'].batchId,
+    'batch-1'
+  );
+  assert.equal(migratedUnsafe.ok, true);
+  assert.equal(migratedUnsafe.changed, true);
+  assert.deepEqual(migratedUnsafe.checkpoint.openingReservations, {});
+});
+
+test('migrates valid legacy ACTIVE ownership to canonical identity and rejects incomplete ownership', () => {
+  const legacy = createCheckpoint(1);
+  Object.assign(legacy.tasks['0'], {
+    state: 'active',
+    requestId: null,
+    tabId: 41,
+    windowId: 51,
+    startedAt: 1200
+  });
+  const incomplete = structuredClone(legacy);
+  incomplete.tasks['0'].windowId = null;
+
+  const migrated = migrateBatchRuntimeCheckpoint(legacy, 2000);
+  const rejected = migrateBatchRuntimeCheckpoint(incomplete, 2000);
+
+  assert.equal(migrated.ok, true);
+  assert.equal(migrated.changed, true);
+  assert.equal(migrated.checkpoint.tasks['0'].requestId, 'batch-1:0:1');
+  assert.equal(rejected.ok, false);
+});
+
+test('task activation events reject every non-positive ownership field', () => {
+  const running = applyBatchRuntimeEvent(createCheckpoint(1), {
+    type: 'session_started',
+    batchId: 'batch-1'
+  }, 1100).checkpoint;
+  for (const patch of [
+    { tabId: 0 },
+    { windowId: 0 },
+    { startedAt: 0 },
+    { startedAt: Number.NaN }
+  ]) {
+    const result = applyBatchRuntimeEvent(running, {
+      type: 'task_activated',
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      requestId: 'batch-1:0:1',
+      tabId: 41,
+      windowId: 51,
+      ownerPageTabId: 61,
+      ownershipEpoch: 'epoch-1',
+      startedAt: 1200,
+      ...patch
+    }, 1200);
+    assert.equal(result.ok, false);
+  }
+});
+
+test('task activation requires a positive owner page and a non-empty ownership epoch', () => {
+  const running = applyBatchRuntimeEvent(createCheckpoint(1), {
+    type: 'session_started',
+    batchId: 'batch-1'
+  }, 1100).checkpoint;
+  const baseEvent = {
+    type: 'task_activated',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    requestId: 'batch-1:0:1',
+    tabId: 41,
+    windowId: 51,
+    ownerPageTabId: 61,
+    ownershipEpoch: 'epoch-1',
+    startedAt: 1200
+  };
+
+  for (const patch of [
+    { ownerPageTabId: 0 },
+    { ownerPageTabId: -1 },
+    { ownershipEpoch: '' },
+    { ownershipEpoch: null }
+  ]) {
+    const rejected = applyBatchRuntimeEvent(
+      running,
+      { ...baseEvent, ...patch },
+      1200
+    );
+    assert.equal(rejected.ok, false);
+  }
+
+  const accepted = applyBatchRuntimeEvent(running, baseEvent, 1200);
+  assert.equal(accepted.ok, true);
+  assert.equal(accepted.checkpoint.tasks['0'].ownerPageTabId, 61);
+  assert.equal(accepted.checkpoint.tasks['0'].ownershipEpoch, 'epoch-1');
+});
+
+test('legacy active ownership remains visible but becomes unverified paused recovery', () => {
+  const legacy = createCheckpoint(1);
+  Object.assign(legacy, {
+    status: 'running'
+  });
+  Object.assign(legacy.tasks['0'], {
+    state: 'active',
+    requestId: 'batch-1:0:1',
+    tabId: 41,
+    windowId: 51,
+    ownerPageTabId: 61,
+    ownershipEpoch: 'epoch-1',
+    startedAt: 1200
+  });
+  delete legacy.tasks['0'].ownerPageTabId;
+  delete legacy.tasks['0'].ownershipEpoch;
+
+  const migrated = migrateBatchRuntimeCheckpoint(legacy, 2000);
+
+  assert.equal(migrated.ok, true);
+  assert.equal(migrated.changed, true);
+  assert.equal(migrated.checkpoint.status, 'paused_recovery');
+  assert.deepEqual(
+    {
+      requestId: migrated.checkpoint.tasks['0'].requestId,
+      tabId: migrated.checkpoint.tasks['0'].tabId,
+      windowId: migrated.checkpoint.tasks['0'].windowId,
+      startedAt: migrated.checkpoint.tasks['0'].startedAt,
+      ownerPageTabId: migrated.checkpoint.tasks['0'].ownerPageTabId,
+      ownershipEpoch: migrated.checkpoint.tasks['0'].ownershipEpoch,
+      reason: migrated.checkpoint.recoveryCleanup.reason
+    },
+    {
+      requestId: 'batch-1:0:1',
+      tabId: 41,
+      windowId: 51,
+      startedAt: 1200,
+      ownerPageTabId: null,
+      ownershipEpoch: null,
+      reason: 'ownership_unverified'
+    }
+  );
+  assert.equal(
+    validateBatchRuntimeCheckpoint(migrated.checkpoint).ok,
+    true
   );
 });
 
@@ -99,19 +445,24 @@ test('moves one task through active, submitting, and terminal states', () => {
     type: 'task_activated',
     batchId: 'batch-1',
     urlIndex: 0,
-    tabId: 41,
-    windowId: 51,
-    startedAt: 1200
+    attempt: 1,
+      tabId: 41,
+      windowId: 51,
+      ownerPageTabId: 61,
+      ownershipEpoch: 'epoch-1',
+      startedAt: 1200
   }, 1200);
   const submitting = applyBatchRuntimeEvent(active.checkpoint, {
     type: 'task_submitting',
     batchId: 'batch-1',
-    urlIndex: 0
+    urlIndex: 0,
+    attempt: 1
   }, 1300);
   const terminal = applyBatchRuntimeEvent(submitting.checkpoint, {
     type: 'task_terminal',
     batchId: 'batch-1',
     urlIndex: 0,
+    attempt: 1,
     result: {
       result: 'success',
       aiContent: 'saved comment',
@@ -125,12 +476,20 @@ test('moves one task through active, submitting, and terminal states', () => {
     active.checkpoint.tasks['0'],
     {
       urlIndex: 0,
+      attempt: 1,
       state: 'active',
       phase: null,
       tabId: 41,
       windowId: 51,
+      ownerPageTabId: 61,
+      ownershipEpoch: 'epoch-1',
       startedAt: 1200,
-      updatedAt: 1200
+      updatedAt: 1200,
+      requestId: 'batch-1:0:1',
+      manualResolution: {
+        status: 'idle',
+        updatedAt: null
+      }
     }
   );
   assert.equal(submitting.checkpoint.tasks['0'].state, 'submitting');
@@ -140,10 +499,12 @@ test('moves one task through active, submitting, and terminal states', () => {
     terminal.checkpoint.results[0],
     {
       originalIndex: 0,
+      attempt: 1,
       url: 'https://example.test/0',
       sourceDomain: 'example.test',
       result: 'success',
       aiContent: 'saved comment',
+      errorCode: null,
       errorMessage: null,
       timestamp: 1400,
       elapsed: 0,
@@ -155,6 +516,87 @@ test('moves one task through active, submitting, and terminal states', () => {
   assert.equal(initial.tasks['0'].state, 'queued');
 });
 
+test('paused terminal convergence is limited to internally proven cleanup ownership', () => {
+  const started = applyBatchRuntimeEvent(createCheckpoint(1), {
+    type: 'session_started',
+    batchId: 'batch-1'
+  }, 1100).checkpoint;
+  const active = applyBatchRuntimeEvent(started, {
+    type: 'task_activated',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 41,
+    windowId: 51,
+    ownerPageTabId: 61,
+    ownershipEpoch: 'epoch-1',
+    startedAt: 1200
+  }, 1200).checkpoint;
+  const terminalEvent = {
+    type: 'task_terminal',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    terminalCleanupRetry: true,
+    result: {
+      result: 'fail',
+      errorCode: 'task_failed',
+      errorMessage: 'closed after retry'
+    }
+  };
+
+  const navigation = structuredClone(active);
+  navigation.status = 'paused_recovery';
+  navigation.recoveryCleanup = {
+    reason: 'navigation',
+    diagnostic: 'tab_close_failed',
+    updatedAt: 1300
+  };
+  assert.equal(
+    applyBatchRuntimeEvent(navigation, terminalEvent, 1400).ok,
+    false
+  );
+
+  const eligible = structuredClone(active);
+  eligible.status = 'paused_recovery';
+  eligible.recoveryCleanup = {
+    reason: 'terminal_cleanup_failed',
+    diagnostic: 'tab_close_failed',
+    updatedAt: 1300
+  };
+  assert.equal(
+    applyBatchRuntimeEvent(eligible, {
+      ...terminalEvent,
+      terminalCleanupRetry: false
+    }, 1400).ok,
+    false
+  );
+
+  for (
+    const reason of ['terminal_cleanup_failed', 'ownership_unverified']
+  ) {
+    for (const state of ['active', 'submitting']) {
+      const paused = structuredClone(eligible);
+      paused.recoveryCleanup.reason = reason;
+      paused.tasks['0'].state = state;
+      if (state === 'submitting') paused.tasks['0'].phase = 'submitting';
+      const converged = applyBatchRuntimeEvent(
+        paused,
+        terminalEvent,
+        1400
+      );
+
+      assert.equal(converged.ok, true);
+      assert.equal(converged.checkpoint.tasks['0'].state, 'terminal');
+      assert.equal(converged.checkpoint.results.length, 1);
+      assert.equal(
+        validateBatchRuntimeCheckpoint(converged.checkpoint).ok,
+        true
+      );
+    }
+  }
+});
+
 test('rejects stale identities, skipped states, and conflicting terminal results', () => {
   const initial = createCheckpoint(1);
   const stale = applyBatchRuntimeEvent(initial, {
@@ -164,14 +606,19 @@ test('rejects stale identities, skipped states, and conflicting terminal results
   const skipped = applyBatchRuntimeEvent(initial, {
     type: 'task_submitting',
     batchId: 'batch-1',
-    urlIndex: 0
+    urlIndex: 0,
+    attempt: 1
   }, 1100);
   const outOfRange = applyBatchRuntimeEvent(initial, {
     type: 'task_activated',
     batchId: 'batch-1',
     urlIndex: 7,
+    attempt: 1,
     tabId: 1,
-    windowId: 2
+    windowId: 2,
+    ownerPageTabId: 3,
+    ownershipEpoch: 'epoch-1',
+    startedAt: 1200
   }, 1100);
 
   assert.deepEqual(
@@ -195,25 +642,32 @@ test('rejects stale identities, skipped states, and conflicting terminal results
     type: 'task_activated',
     batchId: 'batch-1',
     urlIndex: 0,
+    attempt: 1,
     tabId: 1,
-    windowId: 2
+    windowId: 2,
+    ownerPageTabId: 3,
+    ownershipEpoch: 'epoch-1',
+    startedAt: 1200
   }, 1200);
   const terminal = applyBatchRuntimeEvent(active.checkpoint, {
     type: 'task_terminal',
     batchId: 'batch-1',
     urlIndex: 0,
+    attempt: 1,
     result: { result: 'fail', errorMessage: 'first' }
   }, 1300);
   const duplicate = applyBatchRuntimeEvent(terminal.checkpoint, {
     type: 'task_terminal',
     batchId: 'batch-1',
     urlIndex: 0,
+    attempt: 1,
     result: { result: 'fail', errorMessage: 'first' }
   }, 1400);
   const conflict = applyBatchRuntimeEvent(terminal.checkpoint, {
     type: 'task_terminal',
     batchId: 'batch-1',
     urlIndex: 0,
+    attempt: 1,
     result: { result: 'success' }
   }, 1400);
 
@@ -256,6 +710,7 @@ test('a queued task can terminate locally before a worker window opens', () => {
     type: 'task_terminal',
     batchId: 'batch-1',
     urlIndex: 0,
+    attempt: 1,
     result: {
       result: 'blocked_illegal',
       errorMessage: 'blocked before opening'
@@ -277,35 +732,46 @@ test('normalizes active and submitting work into one safe paused checkpoint', ()
     type: 'task_activated',
     batchId: 'batch-1',
     urlIndex: 1,
+    attempt: 1,
     tabId: 21,
     windowId: 31,
+    ownerPageTabId: 41,
+    ownershipEpoch: 'epoch-1',
     startedAt: 1200
   }, 1200).checkpoint;
   checkpoint = applyBatchRuntimeEvent(checkpoint, {
     type: 'task_activated',
     batchId: 'batch-1',
     urlIndex: 2,
+    attempt: 1,
     tabId: 22,
-    windowId: 32,
+    windowId: 31,
+    ownerPageTabId: 41,
+    ownershipEpoch: 'epoch-2',
     startedAt: 1200
   }, 1200).checkpoint;
   checkpoint = applyBatchRuntimeEvent(checkpoint, {
     type: 'task_submitting',
     batchId: 'batch-1',
-    urlIndex: 2
+    urlIndex: 2,
+    attempt: 1
   }, 1300).checkpoint;
   checkpoint = applyBatchRuntimeEvent(checkpoint, {
     type: 'task_activated',
     batchId: 'batch-1',
     urlIndex: 3,
+    attempt: 1,
     tabId: 23,
     windowId: 33,
+    ownerPageTabId: 43,
+    ownershipEpoch: 'epoch-3',
     startedAt: 1200
   }, 1200).checkpoint;
   checkpoint = applyBatchRuntimeEvent(checkpoint, {
     type: 'task_terminal',
     batchId: 'batch-1',
     urlIndex: 3,
+    attempt: 1,
     result: { result: 'success', aiContent: 'done' }
   }, 1400).checkpoint;
 
@@ -313,19 +779,28 @@ test('normalizes active and submitting work into one safe paused checkpoint', ()
   const repeated = normalizeInterruptedBatch(normalized.checkpoint, 3000);
 
   assert.equal(normalized.ok, true);
-  assert.deepEqual(normalized.orphanWindowIds, [31, 32]);
+  assert.deepEqual(normalized.orphanTabIds, [21, 22]);
+  assert.equal('orphanWindowIds' in normalized, false);
   assert.equal(normalized.checkpoint.status, 'paused_recovery');
   assert.equal(normalized.checkpoint.tasks['0'].state, 'queued');
   assert.deepEqual(
     normalized.checkpoint.tasks['1'],
     {
       urlIndex: 1,
+      attempt: 1,
       state: 'queued',
       phase: null,
       tabId: null,
       windowId: null,
+      ownerPageTabId: null,
+      ownershipEpoch: null,
       startedAt: null,
-      updatedAt: 2000
+      updatedAt: 2000,
+      requestId: null,
+      manualResolution: {
+        status: 'idle',
+        updatedAt: null
+      }
     }
   );
   assert.equal(normalized.checkpoint.tasks['2'].state, 'terminal');
@@ -338,10 +813,12 @@ test('normalizes active and submitting work into one safe paused checkpoint', ()
     ),
     {
       originalIndex: 2,
+      attempt: 1,
       url: 'https://example.test/2',
       sourceDomain: 'example.test',
       result: 'manual_required',
       aiContent: null,
+      errorCode: 'submission_uncertain',
       errorMessage: '任务在提交确认前中断，评论可能已提交，请人工确认',
       timestamp: 2000,
       elapsed: 1,
@@ -349,6 +826,380 @@ test('normalizes active and submitting work into one safe paused checkpoint', ()
     }
   );
   assert.equal(repeated.changed, false);
-  assert.deepEqual(repeated.orphanWindowIds, []);
+  assert.deepEqual(repeated.orphanTabIds, []);
+  assert.equal('orphanWindowIds' in repeated, false);
   assert.equal(repeated.checkpoint.results.length, 2);
 });
+
+test('deduplicates repeated worker tab IDs during interruption recovery', () => {
+  let checkpoint = createCheckpoint(2);
+  checkpoint = applyBatchRuntimeEvent(checkpoint, {
+    type: 'session_started',
+    batchId: 'batch-1'
+  }, 1100).checkpoint;
+  for (const urlIndex of [0, 1]) {
+    checkpoint = applyBatchRuntimeEvent(checkpoint, {
+      type: 'task_activated',
+      batchId: 'batch-1',
+      urlIndex,
+      attempt: 1,
+      tabId: 21,
+      windowId: 31,
+      ownerPageTabId: 41,
+      ownershipEpoch: `epoch-${urlIndex}`,
+      startedAt: 1200
+    }, 1200).checkpoint;
+  }
+
+  const normalized = normalizeInterruptedBatch(checkpoint, 2000);
+
+  assert.deepEqual(normalized.orphanTabIds, [21]);
+  assert.equal('orphanWindowIds' in normalized, false);
+});
+
+test('migrates a version 1 checkpoint to attempt-aware version 2', () => {
+  const version1 = createVersion1CheckpointFixture();
+  const migrated = migrateBatchRuntimeCheckpoint(version1, 2000);
+
+  assert.equal(migrated.ok, true);
+  assert.equal(migrated.changed, true);
+  assert.equal(migrated.checkpoint.version, 2);
+  assert.equal(migrated.checkpoint.tasks['0'].attempt, 1);
+  assert.deepEqual(migrated.checkpoint.tasks['0'].manualResolution, {
+    status: 'idle',
+    updatedAt: null
+  });
+  assert.equal(migrated.checkpoint.results[0].attempt, 1);
+});
+
+test('migration sanitizes legacy and version 2 result diagnostics', () => {
+  const version1 = createVersion1CheckpointFixture();
+  version1.results[0].errorMessage = [
+    'Authorization: Basic legacy-basic-secret',
+    '{"id_token":"legacy-id-secret"}'
+  ].join('; ');
+  const migratedVersion1 = migrateBatchRuntimeCheckpoint(version1, 2000);
+  const version2 = structuredClone(migratedVersion1.checkpoint);
+  version2.results[0].errorMessage =
+    '{"authorization":"Bearer version-two-secret"}';
+  const versionTwoUrl =
+    'https://target.test/0?view=full&id_token=version-two-url-secret';
+  version2.source.rows[0] = [versionTwoUrl];
+  version2.source.parsedUrls[0].url = versionTwoUrl;
+  version2.source.parsedUrls[0].originalRow = [versionTwoUrl];
+  version2.results[0].url = versionTwoUrl;
+  version2.results[0].originalRow = [versionTwoUrl];
+
+  const migratedVersion2 = migrateBatchRuntimeCheckpoint(version2, 2100);
+  const serialized = JSON.stringify({
+    version1: migratedVersion1.checkpoint,
+    version2: migratedVersion2.checkpoint
+  });
+
+  assert.equal(migratedVersion1.ok, true);
+  assert.equal(migratedVersion2.ok, true);
+  assert.equal(migratedVersion2.changed, true);
+  assert.doesNotMatch(
+    serialized,
+    /legacy-basic-secret|legacy-id-secret|version-two-secret|version-two-url-secret/
+  );
+  assert.match(serialized, /REDACTED/);
+  assert.match(serialized, /view=full/);
+});
+
+test('clean version 2 checkpoint migration is unchanged', () => {
+  const version2 = migrateBatchRuntimeCheckpoint(
+    createVersion1CheckpointFixture(),
+    2000
+  ).checkpoint;
+
+  const migrated = migrateBatchRuntimeCheckpoint(version2, 2100);
+
+  assert.equal(migrated.ok, true);
+  assert.equal(migrated.changed, false);
+  assert.deepEqual(migrated.checkpoint, version2);
+});
+
+test('version 1 migration failures never echo the raw checkpoint', () => {
+  const malformed = createVersion1CheckpointFixture();
+  malformed.results[0].errorMessage =
+    '{"authorization":"Bearer malformed-v1-secret"}';
+  delete malformed.source.rows;
+
+  const postValidationFailure = createVersion1CheckpointFixture();
+  postValidationFailure.results[0].errorMessage =
+    '{"authorization":"Bearer post-validation-secret"}';
+  postValidationFailure.tasks['0'].phase = 'not-a-batch-phase';
+
+  for (const checkpoint of [malformed, postValidationFailure]) {
+    const migrated = migrateBatchRuntimeCheckpoint(checkpoint, 2100);
+
+    assert.equal(migrated.ok, false);
+    assert.equal(migrated.checkpoint, null);
+    assert.doesNotMatch(
+      JSON.stringify(migrated),
+      /malformed-v1-secret|post-validation-secret/
+    );
+  }
+});
+
+test('apply sanitizes existing version 2 history before unrelated events', () => {
+  const checkpoint = createTerminalCheckpoint({
+    result: 'manual_required',
+    errorCode: 'submission_uncertain'
+  });
+  const rawUrl =
+    'https://target.test/0?view=full&token=existing-url-secret';
+  checkpoint.source.rows[0] = [rawUrl];
+  checkpoint.source.parsedUrls[0].url = rawUrl;
+  checkpoint.source.parsedUrls[0].originalRow = [rawUrl];
+  checkpoint.results[0].url = rawUrl;
+  checkpoint.results[0].originalRow = [rawUrl];
+  checkpoint.results[0].errorMessage = JSON.stringify({
+    authorization: 'Bearer existing"stillsecret'
+  });
+
+  const applied = applyBatchRuntimeEvent(checkpoint, {
+    type: 'session_started',
+    batchId: 'batch-1'
+  }, 2200);
+  const serialized = JSON.stringify(applied);
+
+  assert.equal(applied.ok, true);
+  assert.equal(applied.changed, true);
+  assert.doesNotMatch(
+    serialized,
+    /existing-url-secret|existing|stillsecret/
+  );
+  assert.match(serialized, /view=full/);
+  assert.match(serialized, /REDACTED/);
+});
+
+test('invalid version 2 responses never echo raw checkpoint values', () => {
+  const invalid = createTerminalCheckpoint({
+    result: 'fail',
+    errorCode: 'task_failed'
+  });
+  invalid.settings = null;
+  invalid.results[0].errorMessage =
+    '{"authorization":"Bearer invalid-result-secret"}';
+  invalid.debugContext = 'Authorization: Bearer unknown-field-secret';
+
+  const responses = [
+    migrateBatchRuntimeCheckpoint(invalid, 2200),
+    applyBatchRuntimeEvent(invalid, {
+      type: 'session_started',
+      batchId: 'batch-1'
+    }, 2200),
+    normalizeInterruptedBatch(invalid, 2200)
+  ];
+
+  for (const response of responses) {
+    assert.equal(response.ok, false);
+    assert.equal(response.checkpoint, null);
+    assert.doesNotMatch(
+      JSON.stringify(response),
+      /invalid-result-secret|unknown-field-secret/
+    );
+  }
+});
+
+test('migration rejects result URL credentials without echoing them', () => {
+  const version1 = createVersion1CheckpointFixture();
+  version1.results[0].url =
+    'https://migration-user:migration-password@target.test/0';
+  const version2 = migrateBatchRuntimeCheckpoint(
+    createVersion1CheckpointFixture(),
+    2000
+  ).checkpoint;
+  version2.results[0].url =
+    'https://migration-user:migration-password@target.test/0';
+
+  for (const checkpoint of [version1, version2]) {
+    let migrated;
+    assert.doesNotThrow(() => {
+      migrated = migrateBatchRuntimeCheckpoint(checkpoint, 2100);
+    });
+    assert.equal(migrated.ok, false);
+    assert.doesNotMatch(
+      JSON.stringify(migrated),
+      /migration-user|migration-password/
+    );
+  }
+});
+
+test('retries a safe terminal attempt without deleting attempt history', () => {
+  const terminal = createTerminalCheckpoint({
+    result: 'fail',
+    errorCode: 'task_timeout'
+  });
+  const retried = applyBatchRuntimeEvent(terminal, {
+    type: 'task_retried',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    confirmedRisk: false
+  }, 2200);
+
+  assert.equal(retried.ok, true);
+  assert.equal(retried.checkpoint.tasks['0'].state, 'queued');
+  assert.equal(retried.checkpoint.tasks['0'].attempt, 2);
+  assert.equal(retried.checkpoint.results.length, 1);
+  assert.equal(retried.checkpoint.results[0].attempt, 1);
+});
+
+test('requires confirmation for uncertain submissions and rejects stale attempts', () => {
+  const terminal = createTerminalCheckpoint({
+    result: 'manual_required',
+    errorCode: 'submission_uncertain'
+  });
+  const unconfirmed = applyBatchRuntimeEvent(terminal, {
+    type: 'task_retried',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    confirmedRisk: false
+  }, 2200);
+  const stale = applyBatchRuntimeEvent(terminal, {
+    type: 'task_phase',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 0,
+    phase: 'loading'
+  }, 2200);
+
+  assert.equal(unconfirmed.error, 'retry_confirmation_required');
+  assert.equal(stale.error, 'stale_attempt');
+});
+
+test('rejects retries after the batch is completed or terminated', () => {
+  for (const status of ['completed', 'terminated']) {
+    const terminal = createTerminalCheckpoint({
+      result: 'fail',
+      errorCode: 'task_timeout'
+    });
+    terminal.status = status;
+
+    const retried = applyBatchRuntimeEvent(terminal, {
+      type: 'task_retried',
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      confirmedRisk: false
+    }, 2200);
+
+    assert.equal(retried.ok, false);
+    assert.equal(retried.error, 'invalid_transition');
+    assert.equal(retried.checkpoint.status, status);
+    assert.equal(retried.checkpoint.tasks['0'].state, 'terminal');
+    assert.equal(retried.checkpoint.tasks['0'].attempt, 1);
+  }
+});
+
+test('assigns deterministic error codes to all version 1 result types', () => {
+  const cases = [
+    ['success', null],
+    ['skipped', null],
+    ['no_comment_box', 'no_comment_box'],
+    ['manual_required', 'submission_uncertain'],
+    ['blocked_illegal', 'illegal_site'],
+    ['fail', 'task_failed']
+  ];
+
+  for (const [result, expectedErrorCode] of cases) {
+    const version1 = createVersion1CheckpointFixture();
+    version1.results[0].result = result;
+    version1.results[0].errorCode = null;
+
+    const migrated = migrateBatchRuntimeCheckpoint(version1, 2000);
+
+    assert.equal(migrated.ok, true);
+    assert.equal(migrated.checkpoint.results[0].errorCode, expectedErrorCode);
+  }
+});
+
+test('assigns deterministic error codes when the legacy property is absent', () => {
+  const cases = [
+    ['success', null],
+    ['skipped', null],
+    ['no_comment_box', 'no_comment_box'],
+    ['manual_required', 'submission_uncertain'],
+    ['blocked_illegal', 'illegal_site'],
+    ['fail', 'task_failed']
+  ];
+
+  for (const [result, expectedErrorCode] of cases) {
+    const version1 = createVersion1CheckpointFixture();
+    version1.results[0].result = result;
+    delete version1.results[0].errorCode;
+
+    const migrated = migrateBatchRuntimeCheckpoint(version1, 2000);
+
+    assert.equal(migrated.ok, true);
+    assert.equal(migrated.checkpoint.results[0].errorCode, expectedErrorCode);
+  }
+});
+
+function createVersion1CheckpointFixture() {
+  return {
+    version: 1,
+    batchId: 'batch-1',
+    status: 'completed',
+    createdAt: 1000,
+    updatedAt: 1500,
+    source: {
+      fileName: 'targets.csv',
+      headers: ['原URL'],
+      rows: [['https://target.test/0']],
+      parsedUrls: [{
+        originalIndex: 0,
+        url: 'https://target.test/0',
+        sourceDomain: 'target.test',
+        originalRow: ['https://target.test/0']
+      }]
+    },
+    settings: {
+      autoOpenPanel: false,
+      autoGenerate: true,
+      autoSubmit: true,
+      timeoutSeconds: 60,
+      concurrency: 3
+    },
+    cursor: { nextIndex: 1 },
+    tasks: {
+      0: {
+        urlIndex: 0,
+        state: 'terminal',
+        phase: null,
+        tabId: null,
+        windowId: null,
+        startedAt: null,
+        updatedAt: 1500
+      }
+    },
+    results: [{
+      originalIndex: 0,
+      url: 'https://target.test/0',
+      sourceDomain: 'target.test',
+      result: 'success',
+      aiContent: 'saved',
+      errorCode: null,
+      errorMessage: null,
+      timestamp: 1500,
+      elapsed: 1,
+      originalRow: ['https://target.test/0']
+    }]
+  };
+}
+
+function createTerminalCheckpoint({ result, errorCode }) {
+  const checkpoint = migrateBatchRuntimeCheckpoint(
+    createVersion1CheckpointFixture(),
+    2000
+  ).checkpoint;
+  checkpoint.status = 'paused_recovery';
+  checkpoint.results[0].result = result;
+  checkpoint.results[0].errorCode = errorCode;
+  checkpoint.results[0].errorMessage = errorCode;
+  return checkpoint;
+}
