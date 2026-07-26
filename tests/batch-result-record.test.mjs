@@ -37,6 +37,11 @@ test('records IDs and display snapshots without PII or site description', () => 
   const result = buildBatchResult(taskSnapshot(), {
     result: 'success',
     aiContent: 'Published comment',
+    resultPreview: {
+      commentText: ' Published comment ',
+      anchors: [{ anchorText: 'Promo A' }],
+      promotedWebsiteUrl: 'https://promo-a.test/?token=private'
+    },
     errorCode: null,
     skipReason: null
   }, {
@@ -51,6 +56,9 @@ test('records IDs and display snapshots without PII or site description', () => 
     sourceDomain: 'target.test',
     result: 'success',
     aiContent: 'Published comment',
+    commentText: 'Published comment',
+    anchorTexts: ['Promo A'],
+    promotedWebsiteUrl: 'https://promo-a.test/?token=REDACTED',
     errorMessage: null,
     timestamp: 1_000,
     elapsed: 3,

@@ -2316,6 +2316,52 @@ test('markTerminal preserves the stable error code from content reports', async 
   assert.equal(response.checkpoint.results[0].errorCode, 'task_failed');
 });
 
+test('markTerminal derives a safe result preview from confirmed history', async () => {
+  const { controller } = createHarness();
+  await controller.handleMessage(startMessage(1));
+  await controller.handleMessage({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 11,
+    windowId: 21
+  });
+
+  const response = await controller.markTerminal({
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    result: 'success',
+    aiContent: '<p>generated</p>',
+    history: {
+      commentHtml: '<p>never persist this field</p>',
+      commentText: '  Visible comment  ',
+      anchors: [{ anchorText: 'Anchor text' }],
+      promotedWebsiteUrl: 'https://promo.test/product'
+    }
+  });
+
+  assert.equal(response.ok, true);
+  assert.deepEqual(
+    {
+      commentText: response.checkpoint.results[0].commentText,
+      anchorTexts: response.checkpoint.results[0].anchorTexts,
+      promotedWebsiteUrl:
+        response.checkpoint.results[0].promotedWebsiteUrl
+    },
+    {
+      commentText: 'Visible comment',
+      anchorTexts: ['Anchor text'],
+      promotedWebsiteUrl: 'https://promo.test/product'
+    }
+  );
+  assert.equal(
+    JSON.stringify(response.checkpoint).includes('never persist this field'),
+    false
+  );
+});
+
 test('content terminal reporting is bound to its exact active sender tab', async () => {
   const harness = createHarness();
   await harness.controller.handleMessage(startMessage(1));

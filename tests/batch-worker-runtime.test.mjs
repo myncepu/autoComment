@@ -130,6 +130,11 @@ test('confirmation seals and closes its tab before replenishing one worker slot'
     sourceTabId: 101,
     result: 'success',
     aiContent: 'saved',
+    resultPreview: {
+      commentText: 'Visible comment',
+      anchorTexts: ['Product'],
+      promotedWebsiteUrl: 'https://promo.test/'
+    },
     historySaveStatus: 'saved'
   });
 
@@ -141,6 +146,11 @@ test('confirmation seals and closes its tab before replenishing one worker slot'
     ['handle', 3, 1]
   ]);
   assert.equal(harness.tabsApi.createCalls.length, 4);
+  assert.deepEqual(harness.terminalPayloads[0].result.resultPreview, {
+    commentText: 'Visible comment',
+    anchorTexts: ['Product'],
+    promotedWebsiteUrl: 'https://promo.test/'
+  });
 });
 
 test('pause stops replenishment and seals each activity before closing its tab', async () => {

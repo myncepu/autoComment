@@ -305,9 +305,15 @@ async function broadcastBatchConfirmed(
       historyPendingCount: effectiveHistoryPendingCount,
       ...(effectiveCloudQueueStatus
         ? { cloudQueueStatus: effectiveCloudQueueStatus }
-        : {})
+      : {})
     };
   }
+  const committedResult = checkpoint.checkpoint?.results?.find(
+    (result) => (
+      result.originalIndex === message.urlIndex &&
+      result.attempt === message.attempt
+    )
+  );
   await chrome.runtime.sendMessage({
     type: 'BATCH_CONFIRMED',
     batchId: message.batchId,
@@ -317,6 +323,13 @@ async function broadcastBatchConfirmed(
     aiContent: message.aiContent || null,
     errorCode: message.errorCode || null,
     errorMessage: message.errorMessage || null,
+    resultPreview: {
+      commentText: committedResult?.commentText ?? null,
+      anchorTexts: Array.isArray(committedResult?.anchorTexts)
+        ? committedResult.anchorTexts
+        : [],
+      promotedWebsiteUrl: committedResult?.promotedWebsiteUrl ?? null
+    },
     ...(effectiveHistorySaveStatus
       ? { historySaveStatus: effectiveHistorySaveStatus }
       : {}),

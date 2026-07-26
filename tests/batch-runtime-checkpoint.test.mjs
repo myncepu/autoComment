@@ -150,6 +150,45 @@ test('task terminal events redact secrets before checkpoint history persistence'
   assert.match(serialized, /REDACTED/);
 });
 
+test('task terminal events persist only the normalized result preview', () => {
+  let checkpoint = applyBatchRuntimeEvent(createCheckpoint(1), {
+    type: 'session_started',
+    batchId: 'batch-1'
+  }, 1100).checkpoint;
+
+  checkpoint = applyBatchRuntimeEvent(checkpoint, {
+    type: 'task_terminal',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    result: {
+      result: 'success',
+      aiContent: '<p>generated</p>',
+      resultPreview: {
+        commentText: '  The full\ncomment  ',
+        anchors: [{ anchorText: ' Product link ' }],
+        promotedWebsiteUrl:
+          'https://promo.test/?campaign=one&token=private'
+      }
+    }
+  }, 1200).checkpoint;
+
+  assert.deepEqual(
+    {
+      commentText: checkpoint.results[0].commentText,
+      anchorTexts: checkpoint.results[0].anchorTexts,
+      promotedWebsiteUrl: checkpoint.results[0].promotedWebsiteUrl
+    },
+    {
+      commentText: 'The full comment',
+      anchorTexts: ['Product link'],
+      promotedWebsiteUrl:
+        'https://promo.test/?campaign=one&token=REDACTED'
+    }
+  );
+  assert.doesNotMatch(JSON.stringify(checkpoint), /commentHtml|private/);
+});
+
 test('rejects malformed and unsupported checkpoints', () => {
   assert.deepEqual(
     validateBatchRuntimeCheckpoint(null),
@@ -512,6 +551,9 @@ test('moves one task through active, submitting, and terminal states', () => {
       sourceDomain: 'example.test',
       result: 'success',
       aiContent: 'saved comment',
+      commentText: null,
+      anchorTexts: [],
+      promotedWebsiteUrl: null,
       errorCode: null,
       errorMessage: null,
       timestamp: 1400,
@@ -845,6 +887,9 @@ test('normalizes active and submitting work into one safe paused checkpoint', ()
       sourceDomain: 'example.test',
       result: 'manual_required',
       aiContent: null,
+      commentText: null,
+      anchorTexts: [],
+      promotedWebsiteUrl: null,
       errorCode: 'submission_uncertain',
       errorMessage: '任务在提交确认前中断，评论可能已提交，请人工确认',
       timestamp: 2000,
@@ -956,6 +1001,37 @@ test('clean version 2 checkpoint migration is unchanged', () => {
   assert.equal(migrated.ok, true);
   assert.equal(migrated.changed, false);
   assert.deepEqual(migrated.checkpoint, version2);
+});
+
+test('current checkpoints backfill stable empty result preview values once', () => {
+  const legacyCurrent = createTerminalCheckpoint({
+    result: 'success',
+    errorCode: null
+  });
+  delete legacyCurrent.results[0].commentText;
+  delete legacyCurrent.results[0].anchorTexts;
+  delete legacyCurrent.results[0].promotedWebsiteUrl;
+
+  const migrated = migrateBatchRuntimeCheckpoint(legacyCurrent, 2200);
+  const repeated = migrateBatchRuntimeCheckpoint(migrated.checkpoint, 2300);
+
+  assert.equal(migrated.ok, true);
+  assert.equal(migrated.changed, true);
+  assert.deepEqual(
+    {
+      commentText: migrated.checkpoint.results[0].commentText,
+      anchorTexts: migrated.checkpoint.results[0].anchorTexts,
+      promotedWebsiteUrl:
+        migrated.checkpoint.results[0].promotedWebsiteUrl
+    },
+    {
+      commentText: null,
+      anchorTexts: [],
+      promotedWebsiteUrl: null
+    }
+  );
+  assert.equal(repeated.ok, true);
+  assert.equal(repeated.changed, false);
 });
 
 test('version 1 migration failures never echo the raw checkpoint', () => {
