@@ -22,6 +22,15 @@
     "service_worker": "background.js",
     "type": "module"
   },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; default-src 'self'; base-uri 'none'"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["worker-pending.html"],
+      "matches": ["<all_urls>"]
+    }
+  ],
   "action": {
     "default_title": "Auto Register Filler - 网站自动填表与推广文案助手"
   },

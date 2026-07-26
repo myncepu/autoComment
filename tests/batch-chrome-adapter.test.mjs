@@ -326,6 +326,45 @@ test('worker tab adapter retries a lost response once with the same request iden
   ]);
 });
 
+test('worker tab adapter preserves recovery ownership metadata on a failed response', async () => {
+  const harness = createChromeHarness();
+  const checkpoint = {
+    version: 2,
+    batchId: 'batch-1',
+    status: 'running',
+    tasks: {
+      3: {
+        state: 'active',
+        attempt: 2,
+        tabId: 501,
+        windowId: 42
+      }
+    }
+  };
+  harness.chromeApi.runtime.sendMessage = async () => ({
+    ok: false,
+    error: 'tab_navigation_uncertain',
+    recoveryRequired: true,
+    checkpoint
+  });
+  const dependencies = createChromeBatchDependencies(harness.chromeApi);
+
+  await assert.rejects(
+    dependencies.tabsApi.create({}, {
+      batchId: 'batch-1',
+      urlIndex: 3,
+      attempt: 2,
+      requestId: 'batch-1:3:2'
+    }),
+    (error) => {
+      assert.equal(error.code, 'tab_navigation_uncertain');
+      assert.equal(error.recoveryRequired, true);
+      assert.equal(error.runtimeCheckpoint, checkpoint);
+      return true;
+    }
+  );
+});
+
 test('loads only whitelisted profile and automation settings', async () => {
   const harness = createChromeHarness();
   const dependencies = createChromeBatchDependencies(harness.chromeApi);

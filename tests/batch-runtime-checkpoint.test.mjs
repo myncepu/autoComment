@@ -161,6 +161,42 @@ test('rejects malformed and unsupported checkpoints', () => {
   );
 });
 
+test('version 2 migration adds request and reservation defaults exactly once', () => {
+  const legacyVersion2 = createCheckpoint(1);
+  delete legacyVersion2.tasks['0'].requestId;
+  delete legacyVersion2.openingReservations;
+
+  const migrated = migrateBatchRuntimeCheckpoint(legacyVersion2, 2000);
+  const stable = migrateBatchRuntimeCheckpoint(migrated.checkpoint, 2100);
+
+  assert.equal(migrated.ok, true);
+  assert.equal(migrated.changed, true);
+  assert.equal(migrated.checkpoint.tasks['0'].requestId, null);
+  assert.deepEqual(migrated.checkpoint.openingReservations, {});
+  assert.equal(stable.ok, true);
+  assert.equal(stable.changed, false);
+});
+
+test('rejects malformed opening reservations and inconsistent task request identities', () => {
+  const malformed = createCheckpoint(1);
+  malformed.openingReservations = {
+    forged: {
+      requestId: 'different-key',
+      batchId: 'batch-1',
+      urlIndex: 7,
+      attempt: 3,
+      windowId: 42,
+      tabId: 777,
+      updatedAt: 2000
+    }
+  };
+  const invalidTask = createCheckpoint(1);
+  invalidTask.tasks['0'].requestId = 42;
+
+  assert.equal(validateBatchRuntimeCheckpoint(malformed).ok, false);
+  assert.equal(validateBatchRuntimeCheckpoint(invalidTask).ok, false);
+});
+
 function createCheckpoint(count = 4) {
   const items = createItems(count);
   return createBatchRuntimeCheckpoint({
@@ -227,6 +263,7 @@ test('moves one task through active, submitting, and terminal states', () => {
       windowId: 51,
       startedAt: 1200,
       updatedAt: 1200,
+      requestId: null,
       manualResolution: {
         status: 'idle',
         updatedAt: null
@@ -442,6 +479,7 @@ test('normalizes active and submitting work into one safe paused checkpoint', ()
       windowId: null,
       startedAt: null,
       updatedAt: 2000,
+      requestId: null,
       manualResolution: {
         status: 'idle',
         updatedAt: null

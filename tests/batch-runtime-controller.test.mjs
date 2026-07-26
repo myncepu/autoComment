@@ -105,7 +105,7 @@ function createHarness({ failPower = false, existingTabs = [] } = {}) {
   };
   const tabs = {
     async query() {
-      return structuredClone(existingTabs);
+      return [...tabStore.values()].map((tab) => structuredClone(tab));
     },
     async create(details) {
       createdTabs.push(structuredClone(details));
@@ -131,6 +131,11 @@ function createHarness({ failPower = false, existingTabs = [] } = {}) {
     async update(tabId, changes) {
       updatedTabs.push([tabId, structuredClone(changes)]);
       operationLog.push(['tabs-update', tabId, structuredClone(changes)]);
+      if (tabs.updateAppliedFailure) {
+        const tab = tabStore.get(tabId);
+        tabStore.set(tabId, { ...tab, ...structuredClone(changes) });
+        throw tabs.updateAppliedFailure;
+      }
       if (tabs.updateFailure) throw tabs.updateFailure;
       const tab = tabStore.get(tabId);
       if (!tab) throw new Error(`No tab with id: ${tabId}.`);
@@ -626,7 +631,7 @@ test('background creates and checkpoints a worker tab from trusted sender identi
   assert.equal(response.checkpoint.tasks['0'].requestId, 'batch-1:0:1');
   assert.deepEqual(harness.createdTabs, [{
     windowId: 42,
-    url: 'about:blank',
+    url: 'chrome-extension://extension-id/worker-pending.html#batch-1%3A0%3A1',
     active: false
   }]);
   assert.deepEqual(harness.updatedTabs, [[
@@ -709,7 +714,7 @@ test('a create already in background finishes checkpointing before pagehide clea
   );
   assert.deepEqual(harness.createdTabs, [{
     windowId: 42,
-    url: 'about:blank',
+    url: 'chrome-extension://extension-id/worker-pending.html#batch-1%3A0%3A1',
     active: false
   }]);
 
@@ -798,7 +803,7 @@ test('three background-owned workers use the console sender window', async () =>
   assert.equal(responses.every((response) => response.ok), true);
   assert.deepEqual(harness.createdTabs, [0, 1, 2].map((urlIndex) => ({
     windowId: 42,
-    url: 'about:blank',
+    url: `chrome-extension://extension-id/worker-pending.html#batch-1%3A${urlIndex}%3A1`,
     active: false
   })));
   assert.deepEqual(harness.updatedTabs, [0, 1, 2].map((urlIndex) => ([
@@ -844,7 +849,7 @@ test('permanent reservation persistence failure never creates or reports a queue
   assert.equal(harness.data.batchRuntimeCheckpoint.tasks['0'].state, 'queued');
 });
 
-test('ACTIVE persistence and blank-tab close failures retain durable cleanup ownership without navigation', async () => {
+test('ACTIVE persistence and pending-tab close failures retain durable cleanup ownership without navigation', async () => {
   const harness = createHarness();
   installBatchRuntimeController(harness.chrome, harness.controller);
   await harness.controller.handleMessage(startMessage(1));
@@ -870,7 +875,7 @@ test('ACTIVE persistence and blank-tab close failures retain durable cleanup own
   assert.equal(response.error, 'checkpoint_write_failed');
   assert.deepEqual(harness.createdTabs, [{
     windowId: 42,
-    url: 'about:blank',
+    url: 'chrome-extension://extension-id/worker-pending.html#batch-1%3A0%3A1',
     active: false
   }]);
   assert.deepEqual(harness.updatedTabs, []);
@@ -893,6 +898,107 @@ test('ACTIVE persistence and blank-tab close failures retain durable cleanup own
   assert.deepEqual(recovered.checkpoint.recoveryCleanup.orphanTabIds, []);
   assert.deepEqual(recovered.checkpoint.openingReservations, {});
   assert.deepEqual(harness.removedTabs, [91, 91]);
+});
+
+test('startup discovers and cleans a pending worker after ownership, close, and recovery writes all fail', async () => {
+  const harness = createHarness();
+  await harness.controller.handleMessage(startMessage(1));
+  harness.chrome.storage.local.setFailures = [
+    null,
+    new Error('ACTIVE storage unavailable'),
+    new Error('recovery storage unavailable')
+  ];
+  harness.chrome.tabs.removeFailure = new Error('tabs unavailable');
+
+  const failed = await harness.controller.handleMessage({
+    type: 'BATCH_CREATE_WORKER_TAB',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    requestId: 'batch-1:0:1'
+  }, batchPageSender());
+
+  assert.equal(failed.ok, false);
+  assert.equal(failed.error, 'checkpoint_write_failed');
+  assert.equal(
+    harness.data.batchRuntimeCheckpoint
+      .openingReservations['batch-1:0:1'].tabId,
+    null
+  );
+  assert.equal(
+    harness.tabStore.get(91).url,
+    'chrome-extension://extension-id/worker-pending.html#batch-1%3A0%3A1'
+  );
+
+  harness.chrome.tabs.removeFailure = null;
+  const recovered = await harness.controller.recoverOnStartup();
+
+  assert.equal(recovered.ok, true);
+  assert.equal(harness.tabStore.has(91), false);
+  assert.deepEqual(harness.removedTabs, [91, 91]);
+  assert.deepEqual(recovered.checkpoint.openingReservations, {});
+});
+
+test('startup discovers a pending worker left between tab creation and ACTIVE persistence', async () => {
+  const pendingUrl =
+    'chrome-extension://extension-id/worker-pending.html#batch-1%3A0%3A1';
+  const harness = createHarness({
+    existingTabs: [{
+      id: 600,
+      windowId: 42,
+      url: pendingUrl,
+      active: false
+    }]
+  });
+  await harness.controller.handleMessage(startMessage(1));
+  harness.data.batchRuntimeCheckpoint.openingReservations = {
+    'batch-1:0:1': {
+      requestId: 'batch-1:0:1',
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      windowId: 42,
+      tabId: null,
+      updatedAt: 2000
+    }
+  };
+
+  const recovered = await harness.controller.recoverOnStartup();
+
+  assert.equal(recovered.ok, true);
+  assert.deepEqual(harness.removedTabs, [600]);
+  assert.equal(harness.tabStore.has(600), false);
+  assert.deepEqual(recovered.checkpoint.openingReservations, {});
+});
+
+test('malformed opening reservations fail validation without deleting their claimed tab', async () => {
+  const harness = createHarness({
+    existingTabs: [{
+      id: 777,
+      windowId: 42,
+      url: 'https://user-owned.test/',
+      active: true
+    }]
+  });
+  await harness.controller.handleMessage(startMessage(1));
+  harness.data.batchRuntimeCheckpoint.openingReservations = {
+    forged: {
+      requestId: 'different-key',
+      batchId: 'batch-1',
+      urlIndex: 99,
+      attempt: 7,
+      windowId: 42,
+      tabId: 777,
+      updatedAt: 2000
+    }
+  };
+
+  const response = await harness.controller.loadForPage();
+
+  assert.equal(response.ok, false);
+  assert.equal(response.error, 'invalid_checkpoint');
+  assert.deepEqual(harness.removedTabs, []);
+  assert.equal(harness.tabStore.has(777), true);
 });
 
 test('lost create response replays the same live ACTIVE tab without creating a second target', async () => {
@@ -960,7 +1066,7 @@ test('missing ACTIVE replay tab is durably re-reserved and replaced once', async
   assert.deepEqual(harness.fetchedTabs, [91]);
 });
 
-test('navigation failure pauses for recovery and closes the owned blank tab before any handle exists', async () => {
+test('navigation failure pauses for recovery and closes the owned pending tab before any handle exists', async () => {
   const harness = createHarness();
   installBatchRuntimeController(harness.chrome, harness.controller);
   await harness.controller.handleMessage(startMessage(1));
@@ -985,6 +1091,80 @@ test('navigation failure pauses for recovery and closes the owned blank tab befo
   assert.deepEqual(response.checkpoint.recoveryCleanup.orphanTabIds, []);
   assert.deepEqual(harness.removedTabs, [91]);
   assert.equal(harness.tabStore.has(91), false);
+});
+
+test('an applied navigation with a lost update response verifies the target and succeeds with one tab', async () => {
+  const harness = createHarness();
+  await harness.controller.handleMessage(startMessage(1));
+  harness.chrome.tabs.updateAppliedFailure =
+    new Error('tabs.update response lost');
+
+  const response = await harness.controller.handleMessage({
+    type: 'BATCH_CREATE_WORKER_TAB',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    requestId: 'batch-1:0:1'
+  }, batchPageSender());
+
+  assert.equal(response.ok, true);
+  assert.equal(response.tab.id, 91);
+  assert.equal(response.checkpoint.tasks['0'].state, 'active');
+  assert.equal(harness.createdTabs.length, 1);
+  assert.deepEqual(harness.fetchedTabs, [91]);
+  assert.deepEqual(harness.removedTabs, []);
+});
+
+test('uncertain navigation lookup preserves ACTIVE ownership and requests recovery', async () => {
+  const harness = createHarness();
+  await harness.controller.handleMessage(startMessage(1));
+  harness.chrome.tabs.updateFailure = new Error('navigation uncertain');
+  harness.chrome.tabs.getFailure = new Error('tabs temporarily unavailable');
+
+  const response = await harness.controller.handleMessage({
+    type: 'BATCH_CREATE_WORKER_TAB',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    requestId: 'batch-1:0:1'
+  }, batchPageSender());
+
+  assert.equal(response.ok, false);
+  assert.equal(response.recoveryRequired, true);
+  assert.equal(response.checkpoint.status, 'running');
+  assert.equal(response.checkpoint.tasks['0'].state, 'active');
+  assert.equal(response.checkpoint.tasks['0'].tabId, 91);
+  assert.deepEqual(harness.removedTabs, []);
+});
+
+test('transient ACTIVE replay lookup preserves ownership instead of resetting or terminalizing', async () => {
+  const harness = createHarness();
+  await harness.controller.handleMessage(startMessage(1));
+  const message = {
+    type: 'BATCH_CREATE_WORKER_TAB',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    requestId: 'batch-1:0:1'
+  };
+  const created = await harness.controller.handleMessage(
+    message,
+    batchPageSender()
+  );
+  harness.chrome.tabs.getFailure = new Error('tabs temporarily unavailable');
+
+  const replay = await harness.controller.handleMessage(
+    message,
+    batchPageSender()
+  );
+
+  assert.equal(created.ok, true);
+  assert.equal(replay.ok, false);
+  assert.equal(replay.recoveryRequired, true);
+  assert.equal(replay.checkpoint.tasks['0'].state, 'active');
+  assert.equal(replay.checkpoint.tasks['0'].tabId, 91);
+  assert.equal(harness.createdTabs.length, 1);
+  assert.deepEqual(harness.removedTabs, []);
 });
 
 test('background create reasserts wakefulness after a service-worker restart', async () => {

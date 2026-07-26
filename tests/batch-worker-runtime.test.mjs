@@ -75,6 +75,47 @@ test('uses a background-checkpointed create without a duplicate ACTIVE continuat
   );
 });
 
+test('owned recovery-required create failure pauses without terminalizing or delivering a handle', async () => {
+  let harness;
+  harness = createWorkerHarness({
+    concurrency: 1,
+    taskCount: 1,
+    tabsOptions: {
+      create() {
+        const checkpoint = structuredClone(harness.checkpoint);
+        Object.assign(checkpoint.tasks['0'], {
+          state: 'active',
+          requestId: 'batch-1:0:1',
+          tabId: 100,
+          windowId: 42,
+          startedAt: 1000
+        });
+        const error = new Error('tab_navigation_uncertain');
+        error.code = 'tab_navigation_uncertain';
+        error.recoveryRequired = true;
+        error.runtimeCheckpoint = checkpoint;
+        throw error;
+      }
+    }
+  });
+  const events = [];
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  runtime.subscribe((event) => events.push(event));
+
+  await runtime.start(harness.checkpoint);
+
+  assert.equal(harness.terminalPayloads.length, 0);
+  assert.equal(harness.sentHandles.length, 0);
+  assert.equal(
+    harness.calls.some(([, type]) => type === 'BATCH_TASK_TERMINAL'),
+    false
+  );
+  assert.equal(
+    events.some(({ type }) => type === 'runtime-error'),
+    true
+  );
+});
+
 test('confirmation seals and closes its tab before replenishing one worker slot', async () => {
   const harness = createWorkerHarness({ concurrency: 3, taskCount: 5 });
   const runtime = createBatchWorkerRuntime(harness.dependencies);

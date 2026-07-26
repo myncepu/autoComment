@@ -443,6 +443,34 @@ test('batch page is a local semantic module shell with no inline handlers', () =
   assert.doesNotMatch(html, /https?:\/\/[^"']+\.(?:js|css)/i);
 });
 
+test('worker pending page is a local inert document with no script or handle path', () => {
+  const html = fs.readFileSync(
+    path.join(projectRoot, 'worker-pending.html'),
+    'utf8'
+  );
+  const dom = new JSDOM(html);
+
+  assert.equal(dom.window.document.querySelectorAll('script').length, 0);
+  assert.equal(dom.window.document.querySelectorAll('[onload],[onclick]').length, 0);
+  assert.equal(dom.window.document.body.textContent.trim(), '');
+  assert.doesNotMatch(html, /BATCH_HANDLE|chrome\./);
+  assert.match(html, /Content-Security-Policy/);
+  const manifest = JSON.parse(fs.readFileSync(
+    path.join(projectRoot, 'manifest.json'),
+    'utf8'
+  ));
+  assert.match(
+    manifest.content_security_policy.extension_pages,
+    /default-src 'self'/
+  );
+  assert.equal(
+    manifest.web_accessible_resources.some(
+      ({ resources }) => resources.includes('worker-pending.html')
+    ),
+    true
+  );
+});
+
 test('production batch module imports without document or chrome globals', async () => {
   assert.equal('document' in globalThis, false);
   assert.equal('chrome' in globalThis, false);

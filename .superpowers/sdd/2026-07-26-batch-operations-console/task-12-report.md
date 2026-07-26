@@ -17,9 +17,10 @@
   window. The page sends only batch/task identity; the serialized background
   controller derives the checkpoint URL and the real batch-page
   `sender.tab.windowId`. It first persists an opening request reservation,
-  creates an inactive `about:blank` tab, persists ACTIVE ownership of the
-  returned tab ID, and only then navigates it to the checkpoint URL and
-  responds. Normal windows are created only by the explicit manual-work
+  creates an inactive local `worker-pending.html#<requestId>` tab, persists
+  ACTIVE ownership of the returned tab ID, and only then navigates it to the
+  checkpoint URL and responds. Normal windows are created only by the
+  explicit manual-work
   adapter and are returned with `automation: false`; they do not receive
   `BATCH_HANDLE` and do not occupy worker slots.
 - A restored paused checkpoint performs no automatic resume. Explicit resume
@@ -257,6 +258,48 @@ missing request IDs, no adapter retry, and unstable manager identity. After
 the protocol implementation, the expanded affected runtime/page command
 passed 121/121.
 
+## Round 5 Discoverable Pending Ownership and Uncertainty
+
+- The opening resource is now the packaged, script-free, content-free
+  `worker-pending.html`. Its fragment is the encoded stable request ID.
+  Background creates it inactive in the trusted console window. The manifest
+  explicitly includes an extension-page CSP and the pending resource; the
+  document itself has a stricter `default-src 'none'` policy and contains no
+  script, event handler, Chrome API reference, visible content, or
+  `BATCH_HANDLE` path.
+- Startup, teardown, and replay query open tabs and parse only this extension's
+  exact pending resource path. A discovered tab is cleanup-eligible only when
+  its decoded fragment matches a strictly validated reservation and its
+  window/tab identity agrees. This recovers a crash between `tabs.create` and
+  ACTIVE persistence, and also recovers when ACTIVE persistence, tab close,
+  and the compensating recovery write all fail. Unmatched pending URLs and
+  ordinary user tabs are never removed.
+- Version 2 migration now adds `task.requestId: null` and
+  `openingReservations: {}` exactly once for older checkpoints. Validation
+  requires request IDs to be string-or-null and reservations to have the
+  exact key/shape, matching batch, task range, attempt, window, optional tab,
+  timestamp, queued task, and source bounds. Malformed reservation state is
+  rejected before any tab query/removal.
+- A thrown `tabs.update` is treated as an uncertain response. Background uses
+  a bounded `tabs.get`: if the observed URL is already the target, the create
+  succeeds with the existing ACTIVE tab; if the target was not applied, the
+  durable teardown path pauses and cleans it; if lookup is transient or times
+  out, the response carries `recoveryRequired` with the still-ACTIVE
+  checkpoint. ACTIVE replay resets only after an explicit missing-tab error;
+  transient lookup failure preserves ownership.
+- The page adapter retains `recoveryRequired` and its returned checkpoint on
+  the thrown create error. Worker runtime adopts that checkpoint, stops
+  scheduling, emits `runtime-error`, sends no `BATCH_TASK_TERMINAL`, delivers
+  no handle, and does not clear the background-owned tab ID. Transport retry
+  continues to use the exact same request ID.
+
+Round-5 RED evidence was captured as 15 focused failures among 148 tests:
+missing pending resource/manifest contract, permissive checkpoint schema,
+undiscoverable create-to-ACTIVE crashes, unsafe forged reservation cleanup,
+unverified update-response loss, transient lookup dropping recovery metadata,
+adapter metadata loss, and worker terminalization of owned uncertain work.
+The same affected command passed 148/148 after implementation.
+
 ## Legacy Race Coverage Map
 
 The removed monolith fixture is not retained. Each former integration
@@ -347,10 +390,10 @@ guarantee is owned and tested by the production module that now implements it:
 
 ## Verification
 
-- Round-4 affected runtime/page command:
-  `node --test tests/batch-runtime-controller.test.mjs tests/batch-chrome-adapter.test.mjs tests/batch-window-manager.test.mjs tests/batch-runtime-checkpoint.test.mjs tests/batch-worker-runtime.test.mjs tests/batch-page-integration.test.mjs`
-  passed 121/121 with zero failures.
-- Full repository: `npm test` passed 464/464 with zero failures.
+- Round-5 affected runtime/page command:
+  `node --test tests/batch-runtime-checkpoint.test.mjs tests/batch-runtime-controller.test.mjs tests/batch-chrome-adapter.test.mjs tests/batch-worker-runtime.test.mjs tests/batch-multi-window-integration.test.js`
+  passed 148/148 with zero failures.
+- Full repository: `npm test` passed 475/475 with zero failures.
 - `node --check` passed for every changed JavaScript module and test.
 - `manifest.json` parsed successfully.
 - `batch.js` dynamically imported without DOM or Chrome globals.
@@ -385,5 +428,7 @@ guarantee is owned and tested by the production module that now implements it:
   `fix: atomically create background-owned batch tabs`.
 - Round-4 hardening commit subject:
   `fix: make worker tab creation replay-safe`.
+- Round-5 hardening commit subject:
+  `fix: recover pending worker tab ownership`.
 - The final commit SHA is reported in the task `DONE` handoff because a file
   cannot contain the hash of the commit that contains itself.
