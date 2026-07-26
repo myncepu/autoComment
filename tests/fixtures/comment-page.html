@@ -5,7 +5,7 @@
   <meta name="description" content="A local browser-extension test article about practical website accessibility." />
   <title>Local Accessibility Article</title>
 </head>
-<body>
+<body data-fixture-target="<!-- FIXTURE_TARGET_ID -->">
   <main>
     <article>
       <h1>Practical accessibility checks</h1>
@@ -14,6 +14,7 @@
     <form id="commentform">
       <label>Name <input id="author" name="author" /></label>
       <label>Email <input id="email" name="email" type="email" /></label>
+      <label>Password <input id="password" name="password" type="password" /></label>
       <label>Website <input id="url" name="url" type="url" /></label>
       <label>Comment <textarea id="comment" name="comment"></textarea></label>
       <button id="submit" type="submit">Post Comment</button>

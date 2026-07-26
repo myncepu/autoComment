@@ -3259,6 +3259,17 @@
     // ── 步骤2：统计表单中所有输入框（用于日志）───────────────
     const formAllInputs = Array.from(form.querySelectorAll('input'));
     const formTextareas = Array.from(form.querySelectorAll('textarea'));
+    const passwordInputs = formAllInputs.filter(
+      (input) => (input.type || '').toLowerCase() === 'password'
+    );
+    if (passwordInputs.length > 0) {
+      const passwordProfile = await getUserProfile({ includePassword: true });
+      if (passwordProfile.password) {
+        for (const passwordInput of passwordInputs) {
+          setValueRobust(passwordInput, passwordProfile.password);
+        }
+      }
+    }
     console.log('[AutoComment] 表单中的 input 数量:', formAllInputs.length, 'textarea 数量:', formTextareas.length);
     console.log('[AutoComment] 表单中所有 input:', formAllInputs.map(i => ({
       name: i.name, id: i.id, type: i.type, className: i.className,

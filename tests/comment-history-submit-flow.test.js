@@ -212,6 +212,59 @@ test('missing profile fields can be reported by an open panel without global sta
   assert.equal(statuses[0].color, '#f97373');
 });
 
+test('task password is requested and filled only after a password input is detected', async () => {
+  const dom = new JSDOM(`<!doctype html><form id="commentform">
+    <input id="author" name="author">
+    <input id="email" name="email" type="email">
+    <input id="password" name="password" type="password">
+    <input id="url" name="url" type="url">
+    <textarea id="comment" name="comment"></textarea>
+  </form>`);
+  const requests = [];
+  const context = vm.createContext({
+    console: { log() {}, warn() {}, error() {} },
+    document: dom.window.document,
+    getUserProfile: async (options) => {
+      requests.push(options || {});
+      return {
+        name: 'Fixture Writer',
+        email: 'writer@example.test',
+        password: options?.includePassword ? 'task-only-password' : ''
+      };
+    },
+    getWebsiteUrl: async () => 'https://promo.test/',
+    findLikelyCommentTextarea: () => dom.window.document.getElementById('comment'),
+    setValueRobust(element, value) {
+      element.value = value;
+    },
+    setValue(element, value) {
+      element.value = value;
+    },
+    setTimeout
+  });
+  const functionSource = sourceBetween(
+    'async function ensureAllCommentFormFieldsFilled',
+    '\n\n  // 收集当前页面内容'
+  );
+  vm.runInContext(
+    `${functionSource}
+globalThis.ensureAllCommentFormFieldsFilled = ensureAllCommentFormFieldsFilled;`,
+    context
+  );
+
+  const result = await context.ensureAllCommentFormFieldsFilled(
+    'A local fixture comment',
+    false
+  );
+
+  assert.equal(result.success, true);
+  assert.deepEqual(plain(requests), [{}, { includePassword: true }]);
+  assert.equal(
+    dom.window.document.getElementById('password').value,
+    'task-only-password'
+  );
+});
+
 test('automatic profile failure is attempt-scoped and cannot continue to submit', async () => {
   const phases = [];
   const pending = [];
