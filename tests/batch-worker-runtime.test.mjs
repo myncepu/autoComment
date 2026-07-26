@@ -402,6 +402,54 @@ test('timeout seals and closes the expired tab before replenishing capacity', as
   );
 });
 
+test('an attempt deadline expires and closes a task without the scan interval', async () => {
+  const armed = [];
+  let expire;
+  const harness = createWorkerHarness({
+    concurrency: 1,
+    taskCount: 1,
+    timeoutSeconds: 45,
+    taskDeadlineFactory({ onExpire }) {
+      expire = onExpire;
+      return {
+        arm(identity, startedAt, timeoutMs) {
+          armed.push({
+            identity: structuredClone(identity),
+            startedAt,
+            timeoutMs
+          });
+        },
+        clear() {
+          return true;
+        },
+        clearAll() {}
+      };
+    }
+  });
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  await runtime.start(harness.checkpoint);
+
+  assert.equal(harness.terminalPayloads.length, 0);
+  assert.deepEqual(armed, [{
+    identity: {
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1
+    },
+    startedAt: 1000,
+    timeoutMs: 45_000
+  }]);
+
+  await expire(armed[0].identity);
+
+  assert.equal(harness.terminalPayloads.length, 1);
+  assert.equal(
+    harness.terminalPayloads[0].result.errorCode,
+    'task_timeout'
+  );
+  assert.deepEqual(harness.tabsApi.removeCalls, [100]);
+});
+
 test('stop seals active work and never replenishes it', async () => {
   const harness = createWorkerHarness({ concurrency: 1, taskCount: 2 });
   const runtime = createBatchWorkerRuntime(harness.dependencies);
@@ -1661,6 +1709,7 @@ function createWorkerHarness({
   readinessTimeoutMs,
   handleDeliveryTimeoutMs,
   timeoutSeconds = 60,
+  taskDeadlineFactory,
   tabsOptions = {}
 }) {
   const tabsApi = createFakeTabsApi(tabsOptions);
@@ -1751,6 +1800,7 @@ function createWorkerHarness({
       return { sealed: true, recovered: false };
     },
     clock,
+    ...(taskDeadlineFactory ? { taskDeadlineFactory } : {}),
     ...(readinessTimeoutMs === undefined ? {} : { readinessTimeoutMs }),
     ...(handleDeliveryTimeoutMs === undefined
       ? {}

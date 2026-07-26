@@ -577,6 +577,44 @@ test('moves one task through active, submitting, and terminal states', () => {
   assert.equal(initial.tasks['0'].state, 'queued');
 });
 
+test('terminal result elapsed is persisted once and never advances with session time', () => {
+  let checkpoint = applyBatchRuntimeEvent(createCheckpoint(1), {
+    type: 'session_started',
+    batchId: 'batch-1'
+  }, 1_100).checkpoint;
+  checkpoint = applyBatchRuntimeEvent(checkpoint, {
+    type: 'task_activated',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 41,
+    windowId: 51,
+    ownerPageTabId: 61,
+    ownershipEpoch: 'epoch-frozen',
+    startedAt: 2_000
+  }, 2_000).checkpoint;
+  checkpoint = applyBatchRuntimeEvent(checkpoint, {
+    type: 'task_terminal',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    result: {
+      result: 'success',
+      aiContent: 'saved'
+    }
+  }, 9_000).checkpoint;
+  const elapsed = checkpoint.results[0].elapsed;
+
+  checkpoint = applyBatchRuntimeEvent(checkpoint, {
+    type: 'session_completed',
+    batchId: 'batch-1'
+  }, 90_000).checkpoint;
+
+  assert.equal(elapsed, 7);
+  assert.equal(checkpoint.results[0].elapsed, 7);
+  assert.equal(checkpoint.results[0].timestamp, 9_000);
+});
+
 test('paused terminal convergence is limited to internally proven cleanup ownership', () => {
   const started = applyBatchRuntimeEvent(createCheckpoint(1), {
     type: 'session_started',

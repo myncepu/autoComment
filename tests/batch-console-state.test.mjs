@@ -56,6 +56,18 @@ test('does not count manual resolution as automatic success', () => {
   assert.equal(snapshot.rows[0].manualResolution.status, 'resolved');
 });
 
+test('terminal task elapsed time stays frozen across periodic renders', () => {
+  const checkpoint = createConsoleCheckpointFixture();
+  const first = createBatchConsoleSnapshot(checkpoint, { now: 70_000 });
+  const later = createBatchConsoleSnapshot(checkpoint, { now: 700_000 });
+
+  assert.equal(first.rows[3].elapsedMs, 7_000);
+  assert.equal(later.rows[3].elapsedMs, 7_000);
+  assert.equal(first.rows[4].elapsedMs, 8_000);
+  assert.equal(later.rows[4].elapsedMs, 8_000);
+  assert.ok(later.rows[1].elapsedMs > first.rows[1].elapsedMs);
+});
+
 test('filters snapshot rows without mutating rows or their counts', () => {
   const snapshot = createBatchConsoleSnapshot(createConsoleCheckpointFixture(), {
     now: 70000
