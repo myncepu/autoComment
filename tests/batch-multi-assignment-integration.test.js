@@ -95,7 +95,7 @@ test('freezes five explicit/weighted assignments into a v3 checkpoint without se
       autoGenerate: true,
       autoSubmit: true
     }
-  }, () => 1_001);
+  }, 1_001);
 
   assert.equal(checkpoint.version, 3);
   assert.equal(checkpoint.cursor.nextIndex, 0);
