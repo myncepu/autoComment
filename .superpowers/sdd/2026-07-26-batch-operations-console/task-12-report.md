@@ -16,10 +16,12 @@
 - Automatic workers are background-owned tabs in the existing console
   window. The page sends only batch/task identity; the serialized background
   controller derives the checkpoint URL and the real batch-page
-  `sender.tab.windowId`. It first persists an opening request reservation,
-  creates an inactive local `worker-pending.html#<requestId>` tab, persists
-  ACTIVE ownership of the returned tab ID, and only then navigates it to the
-  checkpoint URL and responds. Normal windows are created only by the
+  `sender.tab.id` and `sender.tab.windowId`. It persists an opening request
+  reservation with a random ownership epoch, precreates the matching
+  `chrome.storage.session` journal record, creates an inactive local
+  `worker-pending.html#<requestId>` tab with an explicit opener, binds that
+  tab in the journal, persists ACTIVE ownership, and only then navigates it
+  to the checkpoint URL and responds. Normal windows are created only by the
   explicit manual-work
   adapter and are returned with `automation: false`; they do not receive
   `BATCH_HANDLE` and do not occupy worker slots.
@@ -133,6 +135,10 @@ production gap before the corresponding implementation.
 
 ## Round 2 Background Ownership and Race Hardening
 
+The original round-2 persist-before-close and orphan-list description is
+historical. Round 8 supersedes it with journal-proven remove-first cleanup
+that retains the original durable ownership until every removal succeeds.
+
 - Ordinary `visibilitychange` events are non-destructive. Moving the batch page
   through hidden and visible states preserves the full UI and handle. Only
   `pagehide` and explicit shared-shell navigation request teardown.
@@ -216,6 +222,10 @@ state/command barriers and passed without an additional production change.
 
 ## Round 4 Durable Reservation and Replay-Safe Creation
 
+The round-4 `about:blank` and compensating-close protocol is historical.
+Rounds 5 and 8 supersede it with the exact packaged pending URL plus durable
+and per-browser-session ownership proof.
+
 - `BATCH_CREATE_WORKER_TAB` is now a four-stage serialized protocol:
   persist `openingReservations[requestId]`; create one inactive `about:blank`
   tab in the trusted batch-page sender window; persist the tab ID as an ACTIVE
@@ -259,6 +269,11 @@ the protocol implementation, the expanded affected runtime/page command
 passed 121/121.
 
 ## Round 5 Discoverable Pending Ownership and Uncertainty
+
+The round-5 URL-only discovery description is historical. Round 8 requires
+the exact session journal, epoch, opener, window, durable request identity,
+and full-string pending URL together; there is no journal-free discovery
+path.
 
 - The opening resource is now the packaged, script-free, content-free
   `worker-pending.html`. Its fragment is the encoded stable request ID.
@@ -334,6 +349,10 @@ change; the expanded round-5 affected command passed 152/152.
 
 ## Round 7 Fail-Closed Ownership Recovery
 
+The round-7 target-URL check is historical. Round 8 proves an ACTIVE target
+by durable identity, journal epoch, opener, window, tab, and request instead,
+so legitimate redirects and fragments remain cleanup-eligible.
+
 - Legacy version 1 and older version 2 ACTIVE/SUBMITTING tasks now gain a
   canonical request ID only when the complete ownership tuple is valid:
   in-bounds task/index/attempt, positive tab and window IDs, and a positive
@@ -368,6 +387,66 @@ ownership. A separate live-proof test was observed failing by deleting the
 reused tab before the teardown correction. The focused controller suite
 passed 47/47, and the expanded affected command passed 157/157.
 
+## Round 8 Browser-Session Ownership Proof
+
+- Chrome 102 is now the declared minimum. Background composes a strict
+  `chrome.storage.session` ownership journal keyed by the canonical
+  `${batchId}:${urlIndex}:${attempt}` request. Every exact journal record
+  contains the request identity, positive owner-page tab and window IDs,
+  nullable worker tab ID, created time, and a random opaque
+  `ownershipEpoch`. The epoch exists only in durable task/reservation
+  ownership and the session journal; it is never placed in `BATCH_HANDLE`,
+  results, history, DOM, or diagnostics.
+- Session storage is trusted-context-only by Chrome's default access level
+  and is cleared on browser restart. If a durable active owner outlives that
+  journal, startup retains its tab fields and pauses as
+  `ownership_unverified`; recovery is manual and never URL-authorized.
+- Creation is fail-closed and ordered: durable reservation first; session
+  journal precreate with `tabId: null`; `tabs.create` in the sender window
+  with the exact full pending URL and explicit `openerTabId`; journal bind to
+  the returned tab; durable ACTIVE persistence; target navigation last. A
+  journal-precreate failure creates and navigates zero tabs. Lost responses
+  replay only when durable identity, exact journal epoch, live opener/window,
+  and tab all match. A replay after ACTIVE persistence failure promotes the
+  already journal-bound pending tab and never creates a duplicate.
+- Pending cleanup requires the valid durable reservation and matching session
+  journal (including a legitimate precreate `tabId: null` state), exact
+  request/epoch/opener/window identity, and exact full-string pending URL.
+  Query or raw-fragment lookalikes fail closed. There is no journal-free
+  pending cleanup and no integer orphan-list deletion path.
+- ACTIVE/SUBMITTING target cleanup does not depend on the current target URL.
+  Redirects and fragments are expected. Cleanup instead requires the exact
+  canonical durable task, positive tab/window/owner tuple, matching journal
+  epoch/request/tab, and live opener/window proof. A same-URL user tab, stale
+  epoch, missing journal, wrong opener, wrong window, transient lookup, or
+  malformed legacy owner is retained for manual recovery.
+- Legacy active ownership without both owner-page identity and epoch migrates
+  to `paused_recovery` with `ownership_unverified`. Its tab fields remain
+  visible and are never automatically removed. Start and Clear also reject
+  while any durable ACTIVE/SUBMITTING task or opening reservation exists, so
+  audit or UI commands cannot discard ownership.
+- Cleanup is remove-first and durable-clear-last. Generic failures preserve
+  the original task/reservation and journal for retry. If removal succeeds
+  but the durable clear fails, the next attempt may advance only through the
+  explicit missing-tab result. The session journal is removed only after the
+  durable ownership clear; a journal-clear failure is harmless because a
+  journal without matching durable ownership is non-authoritative.
+- Terminal handling is background-owned and close-first. Content senders may
+  update phase, submitting, or terminal state only for their exact active
+  `{batchId, urlIndex, attempt, tabId}`. A trusted batch-page sender may
+  terminalize only a task owned by that same page tab. Content cannot issue
+  start/resume/pause/stop/complete/clear, teardown, create, retry, or manual
+  session controls, and externally supplied ACTIVE ownership is not routed.
+
+Round-8 RED-to-GREEN probes covered session-journal precreate failure,
+raw/query pending lookalikes, redirected targets, same-URL user tabs, stale
+epochs, missing journals/openers, legacy unverified ownership, ACTIVE replay
+without proof, journal-bound pending replay without duplication, submitting
+close failure, remove-success plus durable-write failure, transient
+tab/journal reads, close-first terminal persistence, content/page sender
+binding, and protected Start/Clear. The affected command passed 187/187, and
+the full repository passed 504/504.
+
 ## Legacy Race Coverage Map
 
 The removed monolith fixture is not retained. Each former integration
@@ -401,7 +480,8 @@ guarantee is owned and tested by the production module that now implements it:
    command-controller “persists a sanitized session before starting workers”.
 10. `Start safely pauses a runtime checkpoint with a missing task attempt` →
     runtime-controller “missing-attempt worker activation pauses without
-    deleting an unclaimed tab ID”.
+    deleting an unclaimed tab ID”; late unverified ownership also remains
+    manual-only.
 11. `a keep-awake failure preserves the uploaded dataset and stays idle` →
     runtime-controller “a power acquisition failure leaves a new checkpoint
     safely paused”.
@@ -458,11 +538,11 @@ guarantee is owned and tested by the production module that now implements it:
 
 ## Verification
 
-- Round-7 affected runtime/page command:
-  `node --test tests/batch-runtime-checkpoint.test.mjs tests/batch-runtime-controller.test.mjs tests/batch-chrome-adapter.test.mjs tests/batch-worker-runtime.test.mjs tests/batch-multi-window-integration.test.js`
-  passed 157/157 with zero failures.
-- Full repository: `npm test` passed 484/484 with zero failures.
-- `node --check` passed for every changed JavaScript module and test.
+- Round-8 affected runtime/page command:
+  `node --test tests/batch-runtime-checkpoint.test.mjs tests/batch-session-journal.test.mjs tests/batch-runtime-controller.test.mjs tests/batch-chrome-adapter.test.mjs tests/batch-worker-runtime.test.mjs tests/batch-multi-window-integration.test.js tests/comment-history-message-listener.test.mjs`
+  passed 187/187 with zero failures.
+- Full repository: `npm test` passed 504/504 with zero failures.
+- `node --check` passed for every round-8 changed JavaScript module and test.
 - `manifest.json` parsed successfully.
 - `batch.js` dynamically imported without DOM or Chrome globals.
 - `git diff --check` passed.
@@ -470,8 +550,11 @@ guarantee is owned and tested by the production module that now implements it:
   - zero installed runtime routes for externally supplied
     `BATCH_TASK_ACTIVE`;
   - no deletion authorization from naked recovery orphan arrays;
-  - live window plus exact target/pending URL proof for every teardown
-    candidate;
+  - exact durable + session-journal epoch proof and a live opener/window for
+    every teardown candidate;
+  - exact full-string pending URL proof and no target-URL dependency;
+  - `ownershipEpoch` absent from results, `BATCH_HANDLE`, history, DOM, and
+    diagnostics;
   - zero `chrome.*` references in app-shell, wizard, console view/state, or
     page composition;
   - automatic worker creation only through same-window background tabs;
@@ -507,5 +590,7 @@ guarantee is owned and tested by the production module that now implements it:
   `fix: validate batch task ownership identities`.
 - Round-7 hardening commit subject:
   `fix: prove batch tab ownership before cleanup`.
+- Round-8 hardening commit subject:
+  `fix: journal batch tab ownership per browser session`.
 - The final commit SHA is reported in the task `DONE` handoff because a file
   cannot contain the hash of the commit that contains itself.

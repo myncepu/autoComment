@@ -1,5 +1,6 @@
 {
   "manifest_version": 3,
+  "minimum_chrome_version": "102",
   "name": "Auto Register Filler",
   "version": "1.5.3",
   "description": "自动填充注册表单，并为当前网站生成推广文案。",

@@ -10,6 +10,9 @@ import {
   installBatchRuntimeController
 } from './lib/batch-runtime-controller.mjs';
 import {
+  createBatchSessionJournal
+} from './lib/batch-session-journal.mjs';
+import {
   createBatchSubmitContextStore,
   installBatchSubmitContextListener
 } from './lib/batch-submit-context-store.mjs';
@@ -20,6 +23,7 @@ installActionClickHandler(chrome);
 const batchResultStore = createBatchResultStore(chrome.storage.local);
 const batchRuntimeController = createBatchRuntimeController({
   storageArea: chrome.storage.local,
+  sessionJournal: createBatchSessionJournal(chrome.storage.session),
   power: chrome.power,
   tabs: chrome.tabs,
   windows: chrome.windows,
@@ -107,9 +111,17 @@ async function persistBatchReport(message) {
 
 async function broadcastBatchConfirmed(
   message,
-  { historySaveStatus, historyPendingCount, sourceTabId } = {}
+  {
+    historySaveStatus,
+    historyPendingCount,
+    sourceTabId,
+    sender
+  } = {}
 ) {
-  const checkpoint = await batchRuntimeController.markTerminal(message);
+  const checkpoint = await batchRuntimeController.markTerminal(
+    message,
+    sender
+  );
   if (!checkpoint.ok) {
     throw new Error(`checkpoint_write_failed:${checkpoint.error}`);
   }
@@ -192,7 +204,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             await broadcastBatchConfirmed(message, {
               historySaveStatus,
               historyPendingCount,
-              sourceTabId: sender?.tab?.id
+              sourceTabId: sender?.tab?.id,
+              sender
             });
           } else {
             sendResponse({
@@ -253,7 +266,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         await broadcastBatchConfirmed(message, {
           historySaveStatus: 'queued',
           historyPendingCount: null,
-          sourceTabId: sender.tab.id
+          sourceTabId: sender.tab.id,
+          sender
         });
         sendResponse({ ok: true });
       } catch (error) {
@@ -308,7 +322,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({ ok: true, deferred: true });
           return;
         }
-        await broadcastBatchConfirmed(message, { sourceTabId: tabId });
+        await broadcastBatchConfirmed(message, {
+          sourceTabId: tabId,
+          sender
+        });
         console.log('[background] BATCH_REPORT_RESULT <<< sendResponse({ok:true})');
         sendResponse({ ok: true });
       } catch (e) {

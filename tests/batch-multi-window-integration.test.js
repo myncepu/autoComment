@@ -158,6 +158,7 @@ function createTabsApi() {
       const tab = {
         id: nextTabId++,
         windowId: details.windowId,
+        openerTabId: details.openerTabId,
         url: details.url,
         status: 'complete',
         discarded: false,
@@ -247,6 +248,9 @@ async function createProductionHarness(options = {}) {
     createBatchRuntimeController
   } = await import('../lib/batch-runtime-controller.mjs');
   const {
+    createBatchSessionJournal
+  } = await import('../lib/batch-session-journal.mjs');
+  const {
     bootBatchPage
   } = await import('../lib/batch-page-composition.mjs');
   const checkpoint = Object.hasOwn(options, 'checkpoint')
@@ -260,6 +264,7 @@ async function createProductionHarness(options = {}) {
     }
   });
   const storageSync = createStorageArea();
+  const storageSession = createStorageArea();
   const tabsApi = createTabsApi();
   const runtimeMessages = [];
   const runtimePageListeners = new Set();
@@ -270,8 +275,10 @@ async function createProductionHarness(options = {}) {
   const powerCalls = [];
   const navigateCalls = [];
   let nextManualWindowId = 700;
+  let nextOwnershipEpoch = 0;
   const runtimeController = createBatchRuntimeController({
     storageArea: storageLocal,
+    sessionJournal: createBatchSessionJournal(storageSession),
     power: {
       requestKeepAwake(level) {
         powerCalls.push(['request', level]);
@@ -291,6 +298,7 @@ async function createProductionHarness(options = {}) {
       let now = 3000;
       return () => ++now;
     })(),
+    generateOwnershipEpoch: () => `test-epoch-${++nextOwnershipEpoch}`,
     logger: { warn() {} }
   });
   const dom = new JSDOM(`<!doctype html>
@@ -304,15 +312,56 @@ async function createProductionHarness(options = {}) {
     url: 'chrome-extension://extension-id/batch.html',
     pretendToBeVisual: true
   });
-  const dependencies = {
-    async runtimeRequest(type, payload = {}) {
-      runtimeMessages.push({ type, ...clone(payload) });
-      if (options.runtimeGates?.[type]) {
-        await options.runtimeGates[type].promise;
+  const pageSender = {
+    id: 'extension-id',
+    tab: { id: 50, windowId: 42 },
+    url: 'chrome-extension://extension-id/batch.html'
+  };
+  async function runtimeRequest(type, payload = {}) {
+    runtimeMessages.push({ type, ...clone(payload) });
+    if (options.runtimeGates?.[type]) {
+      await options.runtimeGates[type].promise;
+    }
+    return runtimeController.handleMessage(
+      { type, ...clone(payload) },
+      pageSender
+    );
+  }
+  const workerTabsApi = {
+    onRemoved: tabsApi.onRemoved,
+    onUpdated: tabsApi.onUpdated,
+    async create(_details, identity) {
+      const response = await runtimeRequest('BATCH_CREATE_WORKER_TAB', {
+        batchId: identity.batchId,
+        urlIndex: identity.urlIndex,
+        attempt: identity.attempt,
+        requestId: identity.requestId ||
+          `${identity.batchId}:${identity.urlIndex}:${identity.attempt}`
+      });
+      if (!response?.ok) {
+        const error = new Error(response?.error || 'tab_create_failed');
+        error.code = response?.error || 'tab_create_failed';
+        if (response?.recoveryRequired === true) {
+          error.recoveryRequired = true;
+          error.runtimeCheckpoint = response.checkpoint || null;
+        }
+        throw error;
       }
-      return runtimeController.handleMessage({ type, ...clone(payload) });
+      return {
+        ...response.tab,
+        backgroundCheckpointed: true,
+        runtimeCheckpoint: response.checkpoint
+      };
     },
-    tabsApi,
+    get: (...args) => tabsApi.get(...args),
+    query: (...args) => tabsApi.query(...args),
+    sendMessage: (...args) => tabsApi.sendMessage(...args),
+    remove: (...args) => tabsApi.remove(...args),
+    update: (...args) => tabsApi.update(...args)
+  };
+  const dependencies = {
+    runtimeRequest,
+    tabsApi: workerTabsApi,
     async getConsoleWindowId() {
       return 42;
     },
@@ -411,6 +460,7 @@ async function createProductionHarness(options = {}) {
     page,
     tabsApi,
     storageLocal,
+    storageSession,
     storageSync,
     runtimeMessages,
     runtimePageListeners,
@@ -644,14 +694,35 @@ test('paused production boot creates no tabs and explicit resume creates three s
   const resumeIndex = harness.runtimeMessages.findIndex(
     (message) => message.type === 'BATCH_SESSION_RESUME'
   );
-  const activeIndex = harness.runtimeMessages.findIndex(
-    (message) => message.type === 'BATCH_TASK_ACTIVE'
+  const createIndex = harness.runtimeMessages.findIndex(
+    (message) => message.type === 'BATCH_CREATE_WORKER_TAB'
   );
-  assert.ok(resumeIndex >= 0 && activeIndex > resumeIndex);
+  assert.ok(resumeIndex >= 0 && createIndex > resumeIndex);
+  assert.equal(
+    harness.runtimeMessages.some(
+      (message) => message.type === 'BATCH_TASK_ACTIVE'
+    ),
+    false
+  );
   assert.deepEqual(harness.tabsApi.createCalls, [
-    { windowId: 42, url: 'https://target.test/0', active: false },
-    { windowId: 42, url: 'https://target.test/1', active: false },
-    { windowId: 42, url: 'https://target.test/2', active: false }
+    {
+      windowId: 42,
+      openerTabId: 50,
+      url: 'chrome-extension://extension-id/worker-pending.html#batch-1%3A0%3A1',
+      active: false
+    },
+    {
+      windowId: 42,
+      openerTabId: 50,
+      url: 'chrome-extension://extension-id/worker-pending.html#batch-1%3A1%3A1',
+      active: false
+    },
+    {
+      windowId: 42,
+      openerTabId: 50,
+      url: 'chrome-extension://extension-id/worker-pending.html#batch-1%3A2%3A1',
+      active: false
+    }
   ]);
   assert.equal(harness.document.querySelectorAll('[data-task-row]').length, 5);
   assert.match(harness.document.querySelector('[data-task-row="0"]').textContent, /运行|加载|worker/);
@@ -1129,10 +1200,12 @@ test('page teardown durably cleans a deferred START cancelled by beginTeardown',
     harness.storageLocal.data.batchRuntimeCheckpoint.status,
     'paused_recovery'
   );
-  assert.deepEqual(
-    harness.storageLocal.data.batchRuntimeCheckpoint
-      .recoveryCleanup.orphanTabIds,
-    []
+  assert.equal(
+    Object.hasOwn(
+      harness.storageLocal.data.batchRuntimeCheckpoint.recoveryCleanup,
+      'orphanTabIds'
+    ),
+    false
   );
   assert.equal(harness.tabsApi.createCalls.length, 0);
   assert.equal(harness.tabsApi.tabs.size, 0);
@@ -1211,7 +1284,7 @@ test('navigation cleanup failure retains UI, singleton, and retryable ownership'
   assert.equal(harness.runtimePageListeners.size, 0);
 });
 
-test('navigation storage failure keeps the local recovery projection and handle', async () => {
+test('navigation storage failure keeps durable ownership for an explicit-missing retry', async () => {
   const harness = await createProductionHarness();
   click(harness.document, '[data-action="resume"]');
   await waitFor(() => harness.tabsApi.tabs.size === 3, 'owned tabs');
@@ -1232,7 +1305,7 @@ test('navigation storage failure keeps the local recovery projection and handle'
 
   assert.equal(harness.storageLocal.data.batchRuntimeCheckpoint.status, 'running');
   assert.equal(harness.navigateCalls.length, 0);
-  assert.equal(harness.tabsApi.tabs.size, 3);
+  assert.equal(harness.tabsApi.tabs.size, 0);
   assert.notEqual(
     harness.document.querySelector('[data-batch-console]').textContent,
     ''

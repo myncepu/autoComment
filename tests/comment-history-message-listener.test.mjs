@@ -308,6 +308,8 @@ test('background migrates an old record before its startup retention check and c
       timestamp: fixedNow - 80 * 24 * 60 * 60 * 1000
     }]
   };
+  const sessionData = {};
+  const tabData = new Map();
   const chromeApi = {
     runtime: {
       id: 'extension-id',
@@ -345,6 +347,24 @@ test('background migrates an old record before its startup retention check and c
         async remove(keys) {
           for (const key of Array.isArray(keys) ? keys : [keys]) delete storageData[key];
         }
+      },
+      session: {
+        async get(keys) {
+          const requested = Array.isArray(keys) ? keys : [keys];
+          return Object.fromEntries(requested.flatMap((key) => (
+            Object.hasOwn(sessionData, key)
+              ? [[key, structuredClone(sessionData[key])]]
+              : []
+          )));
+        },
+        async set(values) {
+          Object.assign(sessionData, structuredClone(values));
+        },
+        async remove(keys) {
+          for (const key of Array.isArray(keys) ? keys : [keys]) {
+            delete sessionData[key];
+          }
+        }
       }
     },
     action: {
@@ -380,13 +400,30 @@ test('background migrates an old record before its startup retention check and c
       onRemoved: { addListener() {} },
       async sendMessage() {},
       async create(details) {
-        return { id: 42, windowId: details.windowId, ...details };
+        const tab = { id: 42, windowId: details.windowId, ...details };
+        tabData.set(tab.id, structuredClone(tab));
+        return tab;
+      },
+      async get(tabId) {
+        const tab = tabData.get(tabId);
+        if (!tab) throw new Error(`No tab with id: ${tabId}.`);
+        return structuredClone(tab);
       },
       async update(tabId, details) {
-        return { id: tabId, windowId: 52, ...details };
+        const updated = {
+          ...tabData.get(tabId),
+          id: tabId,
+          windowId: 52,
+          ...details
+        };
+        tabData.set(tabId, structuredClone(updated));
+        return updated;
+      },
+      async remove(tabId) {
+        tabData.delete(tabId);
       },
       async query() {
-        return [];
+        return [...tabData.values()].map((tab) => structuredClone(tab));
       }
     },
     windows: {
@@ -492,23 +529,30 @@ test('background migrates an old record before its startup retention check and c
       originalRow: [String(originalIndex), url]
     };
   });
-  const startResponses = await dispatchConfirm({
-    type: 'BATCH_SESSION_START',
-    batchId: message.batchId,
-    source: {
-      fileName: 'integration.csv',
-      headers: ['id', 'URL'],
-      rows: sourceItems.map((item) => item.originalRow),
-      parsedUrls: sourceItems
+  const startResponses = await dispatchConfirm(
+    {
+      type: 'BATCH_SESSION_START',
+      batchId: message.batchId,
+      source: {
+        fileName: 'integration.csv',
+        headers: ['id', 'URL'],
+        rows: sourceItems.map((item) => item.originalRow),
+        parsedUrls: sourceItems
+      },
+      settings: {
+        autoOpenPanel: true,
+        autoGenerate: true,
+        autoSubmit: true,
+        timeoutSeconds: 60,
+        concurrency: 1
+      }
     },
-    settings: {
-      autoOpenPanel: true,
-      autoGenerate: true,
-      autoSubmit: true,
-      timeoutSeconds: 60,
-      concurrency: 1
+    {
+      id: 'extension-id',
+      tab: { id: 900, windowId: 52 },
+      url: 'chrome-extension://extension-id/batch.html'
     }
-  });
+  );
   assert.equal(startResponses[0]?.ok, true);
   assert.deepEqual(powerCalls, [['request', 'system']]);
   assert.equal(startupListeners.length, 1);

@@ -211,6 +211,8 @@ test('enforces the task ownership matrix and canonical active request identity',
       requestId: 'batch-1:0:1',
       tabId: 41,
       windowId: 51,
+      ownerPageTabId: 61,
+      ownershipEpoch: 'epoch-1',
       startedAt: 1200
     },
     1200
@@ -318,11 +320,99 @@ test('task activation events reject every non-positive ownership field', () => {
       requestId: 'batch-1:0:1',
       tabId: 41,
       windowId: 51,
+      ownerPageTabId: 61,
+      ownershipEpoch: 'epoch-1',
       startedAt: 1200,
       ...patch
     }, 1200);
     assert.equal(result.ok, false);
   }
+});
+
+test('task activation requires a positive owner page and a non-empty ownership epoch', () => {
+  const running = applyBatchRuntimeEvent(createCheckpoint(1), {
+    type: 'session_started',
+    batchId: 'batch-1'
+  }, 1100).checkpoint;
+  const baseEvent = {
+    type: 'task_activated',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    requestId: 'batch-1:0:1',
+    tabId: 41,
+    windowId: 51,
+    ownerPageTabId: 61,
+    ownershipEpoch: 'epoch-1',
+    startedAt: 1200
+  };
+
+  for (const patch of [
+    { ownerPageTabId: 0 },
+    { ownerPageTabId: -1 },
+    { ownershipEpoch: '' },
+    { ownershipEpoch: null }
+  ]) {
+    const rejected = applyBatchRuntimeEvent(
+      running,
+      { ...baseEvent, ...patch },
+      1200
+    );
+    assert.equal(rejected.ok, false);
+  }
+
+  const accepted = applyBatchRuntimeEvent(running, baseEvent, 1200);
+  assert.equal(accepted.ok, true);
+  assert.equal(accepted.checkpoint.tasks['0'].ownerPageTabId, 61);
+  assert.equal(accepted.checkpoint.tasks['0'].ownershipEpoch, 'epoch-1');
+});
+
+test('legacy active ownership remains visible but becomes unverified paused recovery', () => {
+  const legacy = createCheckpoint(1);
+  Object.assign(legacy, {
+    status: 'running'
+  });
+  Object.assign(legacy.tasks['0'], {
+    state: 'active',
+    requestId: 'batch-1:0:1',
+    tabId: 41,
+    windowId: 51,
+    ownerPageTabId: 61,
+    ownershipEpoch: 'epoch-1',
+    startedAt: 1200
+  });
+  delete legacy.tasks['0'].ownerPageTabId;
+  delete legacy.tasks['0'].ownershipEpoch;
+
+  const migrated = migrateBatchRuntimeCheckpoint(legacy, 2000);
+
+  assert.equal(migrated.ok, true);
+  assert.equal(migrated.changed, true);
+  assert.equal(migrated.checkpoint.status, 'paused_recovery');
+  assert.deepEqual(
+    {
+      requestId: migrated.checkpoint.tasks['0'].requestId,
+      tabId: migrated.checkpoint.tasks['0'].tabId,
+      windowId: migrated.checkpoint.tasks['0'].windowId,
+      startedAt: migrated.checkpoint.tasks['0'].startedAt,
+      ownerPageTabId: migrated.checkpoint.tasks['0'].ownerPageTabId,
+      ownershipEpoch: migrated.checkpoint.tasks['0'].ownershipEpoch,
+      reason: migrated.checkpoint.recoveryCleanup.reason
+    },
+    {
+      requestId: 'batch-1:0:1',
+      tabId: 41,
+      windowId: 51,
+      startedAt: 1200,
+      ownerPageTabId: null,
+      ownershipEpoch: null,
+      reason: 'ownership_unverified'
+    }
+  );
+  assert.equal(
+    validateBatchRuntimeCheckpoint(migrated.checkpoint).ok,
+    true
+  );
 });
 
 function createCheckpoint(count = 4) {
@@ -356,9 +446,11 @@ test('moves one task through active, submitting, and terminal states', () => {
     batchId: 'batch-1',
     urlIndex: 0,
     attempt: 1,
-    tabId: 41,
-    windowId: 51,
-    startedAt: 1200
+      tabId: 41,
+      windowId: 51,
+      ownerPageTabId: 61,
+      ownershipEpoch: 'epoch-1',
+      startedAt: 1200
   }, 1200);
   const submitting = applyBatchRuntimeEvent(active.checkpoint, {
     type: 'task_submitting',
@@ -389,6 +481,8 @@ test('moves one task through active, submitting, and terminal states', () => {
       phase: null,
       tabId: 41,
       windowId: 51,
+      ownerPageTabId: 61,
+      ownershipEpoch: 'epoch-1',
       startedAt: 1200,
       updatedAt: 1200,
       requestId: 'batch-1:0:1',
@@ -440,7 +534,10 @@ test('rejects stale identities, skipped states, and conflicting terminal results
     urlIndex: 7,
     attempt: 1,
     tabId: 1,
-    windowId: 2
+    windowId: 2,
+    ownerPageTabId: 3,
+    ownershipEpoch: 'epoch-1',
+    startedAt: 1200
   }, 1100);
 
   assert.deepEqual(
@@ -466,7 +563,10 @@ test('rejects stale identities, skipped states, and conflicting terminal results
     urlIndex: 0,
     attempt: 1,
     tabId: 1,
-    windowId: 2
+    windowId: 2,
+    ownerPageTabId: 3,
+    ownershipEpoch: 'epoch-1',
+    startedAt: 1200
   }, 1200);
   const terminal = applyBatchRuntimeEvent(active.checkpoint, {
     type: 'task_terminal',
@@ -554,6 +654,8 @@ test('normalizes active and submitting work into one safe paused checkpoint', ()
     attempt: 1,
     tabId: 21,
     windowId: 31,
+    ownerPageTabId: 41,
+    ownershipEpoch: 'epoch-1',
     startedAt: 1200
   }, 1200).checkpoint;
   checkpoint = applyBatchRuntimeEvent(checkpoint, {
@@ -563,6 +665,8 @@ test('normalizes active and submitting work into one safe paused checkpoint', ()
     attempt: 1,
     tabId: 22,
     windowId: 31,
+    ownerPageTabId: 41,
+    ownershipEpoch: 'epoch-2',
     startedAt: 1200
   }, 1200).checkpoint;
   checkpoint = applyBatchRuntimeEvent(checkpoint, {
@@ -578,6 +682,8 @@ test('normalizes active and submitting work into one safe paused checkpoint', ()
     attempt: 1,
     tabId: 23,
     windowId: 33,
+    ownerPageTabId: 43,
+    ownershipEpoch: 'epoch-3',
     startedAt: 1200
   }, 1200).checkpoint;
   checkpoint = applyBatchRuntimeEvent(checkpoint, {
@@ -605,6 +711,8 @@ test('normalizes active and submitting work into one safe paused checkpoint', ()
       phase: null,
       tabId: null,
       windowId: null,
+      ownerPageTabId: null,
+      ownershipEpoch: null,
       startedAt: null,
       updatedAt: 2000,
       requestId: null,
@@ -656,6 +764,8 @@ test('deduplicates repeated worker tab IDs during interruption recovery', () => 
       attempt: 1,
       tabId: 21,
       windowId: 31,
+      ownerPageTabId: 41,
+      ownershipEpoch: `epoch-${urlIndex}`,
       startedAt: 1200
     }, 1200).checkpoint;
   }
