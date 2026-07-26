@@ -116,6 +116,7 @@ function safeSubmission(input) {
     name: text(input?.name, 500),
     email: text(input?.email, 500),
     passwordPresent: input?.passwordPresent === true,
+    passwordMatchesProfile: input?.passwordMatchesProfile === true,
     websiteUrl: text(input?.websiteUrl, 2_000),
     comment: text(input?.comment, 20_000)
   };

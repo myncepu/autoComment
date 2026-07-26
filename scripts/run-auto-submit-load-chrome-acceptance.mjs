@@ -9,8 +9,12 @@ import {
   createAutoSubmitLoadPlan
 } from '../tests/helpers/auto-submit-load-plan.mjs';
 import {
-  closeBrowserContextWithin
+  closeBrowserContextWithin,
+  finalizeAcceptanceResult
 } from '../tests/helpers/browser-cleanup.mjs';
+import {
+  withServerPool
+} from '../tests/helpers/fixture-server-pool.mjs';
 
 const require = createRequire(import.meta.url);
 const projectRoot = path.resolve(
@@ -122,35 +126,40 @@ async function main() {
   const chromePath = chromeExecutable();
   if (!chromePath) throw new Error('installed_chrome_not_found');
   const { chromium } = loadPlaywright();
-  const servers = Array.from({ length: 6 }, () => createFixtureServer());
-  const ports = await Promise.all(servers.map(listen));
-  const origins = ports.map((port) => `http://127.0.0.1:${port}`);
-  const plan = createAutoSubmitLoadPlan(origins);
-  const temporaryProfile = await fs.mkdtemp(
-    path.join(os.tmpdir(), 'autocomment-auto-submit-30-')
-  );
-  const requestedUrls = [];
-  const pageErrors = [];
-  const outcomes = [];
-  let context;
-  let active = 0;
-  let maxActive = 0;
-  let result;
-  let browserCleanup = 'not_started';
+  return withServerPool({
+    count: 6,
+    createServer: createFixtureServer,
+    listen,
+    closeServer
+  }, async ({ ports }) => {
+    const origins = ports.map((port) => `http://127.0.0.1:${port}`);
+    const plan = createAutoSubmitLoadPlan(origins);
+    let temporaryProfile;
+    const requestedUrls = [];
+    const pageErrors = [];
+    const outcomes = [];
+    let context;
+    let active = 0;
+    let maxActive = 0;
+    let result;
+    let browserCleanup = 'not_started';
 
-  try {
-    context = await chromium.launchPersistentContext(temporaryProfile, {
-      executablePath: chromePath,
-      headless: true,
-      viewport: { width: 1280, height: 900 },
-      args: ['--disable-background-networking']
-    });
-    const adapterSource = await fs.readFile(
-      path.join(projectRoot, 'tests/fixtures/fake-chrome-adapter.js'),
-      'utf8'
-    );
-    await context.addInitScript({ content: adapterSource });
-    context.on('request', (request) => requestedUrls.push(request.url()));
+    try {
+      temporaryProfile = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'autocomment-auto-submit-30-')
+      );
+      context = await chromium.launchPersistentContext(temporaryProfile, {
+        executablePath: chromePath,
+        headless: true,
+        viewport: { width: 1280, height: 900 },
+        args: ['--disable-background-networking']
+      });
+      const adapterSource = await fs.readFile(
+        path.join(projectRoot, 'tests/fixtures/fake-chrome-adapter.js'),
+        'utf8'
+      );
+      await context.addInitScript({ content: adapterSource });
+      context.on('request', (request) => requestedUrls.push(request.url()));
 
     async function runTask(task) {
       active += 1;
@@ -230,6 +239,7 @@ async function main() {
       assert.equal(record.name, profile.name);
       assert.equal(record.email, profile.email);
       assert.equal(record.passwordPresent, true);
+      assert.equal(record.passwordMatchesProfile, true);
       assert.equal(record.websiteUrl, promotionSite.url);
       assert.equal(
         record.comment,
@@ -270,38 +280,42 @@ async function main() {
       /fixture-secret/
     );
 
-    result = {
-      ok: true,
-      chromeVersion: await context.browser()?.version(),
-      submitted: records.length,
-      targetBlogs: origins.length,
-      maxConcurrency: maxActive,
-      autoGenerate: true,
-      autoSubmit: true,
-      commentsPerTargetBlog: recordsByBlog.map(
-        (blogRecords) => blogRecords.length
-      ),
-      commentsPerProfile: countBy(
-        sortedRecords.map(({ profileId }) => profileId)
-      ),
-      commentsPerPromotionSite: countBy(
-        sortedRecords.map(({ promotionSiteId }) => promotionSiteId)
-      ),
-      confirmations: outcomes.reduce(
-        (total, { state }) => total + state.confirmations.length,
-        0
-      ),
-      pageErrors,
-      thirdPartyRequests: 0,
-      thirdPartySubmissions: 0
-    };
-  } finally {
-    browserCleanup = await closeBrowserContextWithin(context);
-    await Promise.all(servers.map((server) => closeServer(server)));
-    await fs.rm(temporaryProfile, { recursive: true, force: true });
-  }
-  return { ...result, browserCleanup };
+      result = {
+        chromeVersion: await context.browser()?.version(),
+        submitted: records.length,
+        targetBlogs: origins.length,
+        maxConcurrency: maxActive,
+        autoGenerate: true,
+        autoSubmit: true,
+        commentsPerTargetBlog: recordsByBlog.map(
+          (blogRecords) => blogRecords.length
+        ),
+        commentsPerProfile: countBy(
+          sortedRecords.map(({ profileId }) => profileId)
+        ),
+        commentsPerPromotionSite: countBy(
+          sortedRecords.map(({ promotionSiteId }) => promotionSiteId)
+        ),
+        confirmations: outcomes.reduce(
+          (total, { state }) => total + state.confirmations.length,
+          0
+        ),
+        pageErrors,
+        thirdPartyRequests: 0,
+        thirdPartySubmissions: 0
+      };
+    } finally {
+      browserCleanup = await closeBrowserContextWithin(context);
+      if (temporaryProfile) {
+        await fs.rm(temporaryProfile, { recursive: true, force: true });
+      }
+    }
+    return finalizeAcceptanceResult(result, browserCleanup);
+  });
 }
 
 const result = await main();
-process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+await new Promise((resolve) => {
+  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`, resolve);
+});
+if (!result.ok) process.exit(1);

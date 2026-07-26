@@ -191,6 +191,10 @@
         passwordsByProfileId.set(profileId, String(password));
       }
     },
+    passwordMatchesCurrentProfile(value) {
+      return typeof value === 'string' &&
+        value === passwordsByProfileId.get(currentHandle?.profileId);
+    },
     configureFaults({ llmDelayMs = 0, submitDelayMs = 0 } = {}) {
       modelDelayMs = Math.max(0, Number(llmDelayMs) || 0);
       submittingDelayMs = Math.max(0, Number(submitDelayMs) || 0);

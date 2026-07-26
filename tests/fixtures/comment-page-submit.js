@@ -25,6 +25,9 @@
         name: field('author'),
         email: field('email'),
         passwordPresent: Boolean(field('password')),
+        passwordMatchesProfile:
+          globalObject.LocalFixtureChrome
+            ?.passwordMatchesCurrentProfile(field('password')) === true,
         websiteUrl: field('url'),
         comment: field('comment')
       };

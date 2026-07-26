@@ -177,6 +177,7 @@ test('serves five isolated assignment targets and records only safe task fields 
         name: 'Alice',
         email: 'alice@example.test',
         passwordPresent: true,
+        passwordMatchesProfile: true,
         password: 'must-not-store',
         websiteUrl: 'https://promo-a.test/',
         comment: 'Local generated comment'
@@ -193,6 +194,7 @@ test('serves five isolated assignment targets and records only safe task fields 
       name: 'Alice',
       email: 'alice@example.test',
       passwordPresent: true,
+      passwordMatchesProfile: true,
       websiteUrl: 'https://promo-a.test/',
       comment: 'Local generated comment'
     }]);
