@@ -1125,6 +1125,7 @@ test('pre-create session journal failure creates and navigates zero tabs', async
       ownershipEpoch: 'epoch-test',
       tabId: null,
       cleanupOnly: false,
+      cleanupObservedAt: null,
       updatedAt: 1400
     }
   );
@@ -1323,6 +1324,15 @@ test('a never-settling background tab create cannot block queued terminal persis
     () => harness.createdTabs.length === 1,
     'background tab creation'
   );
+  assert.equal(
+    validateBatchRuntimeCheckpoint(
+      harness.data.batchRuntimeCheckpoint
+    ).ok,
+    true,
+    JSON.stringify(
+      harness.data.batchRuntimeCheckpoint.openingReservations
+    )
+  );
 
   const terminal = sendInstalledMessage(
     harness.listeners.messages[0],
@@ -1361,6 +1371,20 @@ test('a never-settling background tab create cannot block queued terminal persis
     harness.sessionData['batchWorkerOwnershipV1:batch-1:0:1']
       .ownershipEpoch,
     'epoch-test'
+  );
+  const reloadRecovery = await harness.controller.loadForPage();
+  assert.equal(reloadRecovery.ok, false);
+  assert.equal(
+    Object.hasOwn(
+      reloadRecovery.checkpoint.openingReservations,
+      'batch-1:0:1'
+    ),
+    true
+  );
+  assert.equal(
+    reloadRecovery.checkpoint
+      .openingReservations['batch-1:0:1'].cleanupObservedAt,
+    null
   );
 
   createGate.resolve();
@@ -1493,14 +1517,6 @@ test('a cleanup tombstone survives controller restart before tab creation settle
     true
   );
 
-  harness.tabStore.set(123, {
-    id: 123,
-    windowId: 42,
-    openerTabId: 70,
-    url:
-      'chrome-extension://extension-id/worker-pending.html#' +
-      'batch-1%3A0%3A1'
-  });
   const restarted = createBatchRuntimeController({
     storageArea: harness.chrome.storage.local,
     sessionJournal: createBatchSessionJournal(
@@ -1513,6 +1529,23 @@ test('a cleanup tombstone survives controller restart before tab creation settle
     now: () => 9000
   });
 
+  const quiescing = await restarted.loadForPage();
+  assert.equal(quiescing.ok, false);
+  assert.equal(
+    quiescing.checkpoint
+      .openingReservations['batch-1:0:1'].cleanupObservedAt,
+    9000
+  );
+  assert.equal(harness.tabStore.has(123), false);
+
+  harness.tabStore.set(123, {
+    id: 123,
+    windowId: 42,
+    openerTabId: 70,
+    url:
+      'chrome-extension://extension-id/worker-pending.html#' +
+      'batch-1%3A0%3A1'
+  });
   const recovered = await restarted.loadForPage();
   assert.equal(recovered.ok, true);
   assert.deepEqual(recovered.checkpoint.openingReservations, {});

@@ -93,6 +93,10 @@ cleanup-only tombstone when its task terminalizes; the tombstone and exact
 session journal remain until a live tab is proven by request URL, opener,
 window, tab ID and ownership epoch and removal succeeds. A close failure is
 persisted as recovery state and converges on the next startup/page recovery.
+While the originating controller still has an unresolved create promise, a
+recovery scan cannot clear the tombstone. After a controller restart, the first
+no-tab scan persists a quiescence observation; only a later scan after the
+quiescence interval may clear it if no exact pending tab appeared.
 
 The result row reads elapsed time from the terminal result once one exists.
 Only active/submitting tasks derive elapsed time from the current clock.
