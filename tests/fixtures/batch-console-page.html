@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <title>批次控制台 Fixture</title>
+    <link rel="stylesheet" href="../../styles/tokens.css" />
+    <link rel="stylesheet" href="../../styles/app-shell.css" />
+    <link rel="stylesheet" href="../../styles/batch-console.css" />
+  </head>
+  <body class="batch-console-page">
+    <header data-app-shell></header>
+    <main class="batch-console" id="main-content">
+      <section class="batch-console__hero" aria-labelledby="batch-console-title">
+        <div>
+          <p class="batch-console__eyebrow">LOCAL WEB FIXTURE</p>
+          <h1 id="batch-console-title">批次控制台</h1>
+          <p>使用纯 Web 模块演练批次创建、CSV 预检与确定性命令结果。</p>
+        </div>
+        <button class="batch-console__primary" type="button" data-action="new-batch">
+          新建批次
+        </button>
+      </section>
+      <p class="batch-console__notice" data-fixture-navigation-status aria-live="polite">
+        当前为普通 HTTP 标签页，不需要扩展 API。
+      </p>
+      <section class="batch-console__result" aria-labelledby="fixture-result-title">
+        <h2 id="fixture-result-title">Fixture 命令结果</h2>
+        <p data-fixture-command-status aria-live="polite">尚未开始批次</p>
+      </section>
+    </main>
+    <dialog data-batch-wizard></dialog>
+    <script type="module" src="./batch-console-app.mjs"></script>
+  </body>
+</html>
