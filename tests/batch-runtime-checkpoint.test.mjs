@@ -368,7 +368,7 @@ test('migrates the retired cleanup observation from ordinary and cleanup-only re
       Object.hasOwn(reservation, 'cleanupObservedAt'),
       false
     );
-    assert.equal(reservation.createCompletionUnknown, false);
+    assert.equal(reservation.createCompletionUnknown, true);
     assert.equal(
       validateBatchRuntimeCheckpoint(migrated.checkpoint).ok,
       true

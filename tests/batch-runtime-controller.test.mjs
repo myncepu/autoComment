@@ -1125,9 +1125,45 @@ test('pre-create session journal failure creates and navigates zero tabs', async
       ownershipEpoch: 'epoch-test',
       tabId: null,
       cleanupOnly: false,
-      createCompletionUnknown: true,
+      createCompletionUnknown: false,
       updatedAt: 1400
     }
+  );
+});
+
+test('unknown-create persistence failure never calls tabs.create', async () => {
+  const harness = createHarness();
+  installBatchRuntimeController(harness.chrome, harness.controller);
+  await harness.controller.handleMessage(startMessage(1));
+  harness.chrome.storage.local.setFailures = [
+    null,
+    new Error('unknown-create storage unavailable')
+  ];
+
+  const response = await sendInstalledMessage(
+    harness.listeners.messages[0],
+    {
+      type: 'BATCH_CREATE_WORKER_TAB',
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      requestId: 'batch-1:0:1'
+    },
+    batchPageSender()
+  );
+
+  assert.equal(response.ok, false);
+  assert.equal(response.error, 'checkpoint_write_failed');
+  assert.deepEqual(harness.createdTabs, []);
+  assert.equal(
+    harness.data.batchRuntimeCheckpoint
+      .openingReservations['batch-1:0:1'].createCompletionUnknown,
+    false
+  );
+  assert.equal(
+    harness.sessionData['batchWorkerOwnershipV1:batch-1:0:1']
+      .ownershipEpoch,
+    'epoch-test'
   );
 });
 
@@ -1744,6 +1780,7 @@ test('ACTIVE persistence failure retains its pending reservation and journal wit
   await harness.controller.handleMessage(startMessage(1));
   harness.chrome.storage.local.setFailures = [
     null,
+    null,
     new Error('ACTIVE storage unavailable')
   ];
   harness.chrome.tabs.removeFailure = new Error('tabs unavailable');
@@ -1796,6 +1833,7 @@ test('create replay promotes the journal-bound pending tab without duplicating i
   await harness.controller.handleMessage(startMessage(1));
   harness.chrome.storage.local.setFailures = [
     null,
+    null,
     new Error('ACTIVE storage unavailable')
   ];
 
@@ -1834,6 +1872,7 @@ test('pending removal plus durable clear failure retries from journal after expl
   const harness = createHarness();
   await harness.controller.handleMessage(startMessage(1));
   harness.chrome.storage.local.setFailures = [
+    null,
     null,
     new Error('ACTIVE storage unavailable'),
     new Error('recovery storage unavailable')
