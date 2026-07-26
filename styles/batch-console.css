@@ -718,7 +718,8 @@
 }
 
 .batch-console__row-actions .batch-console__button {
-  min-height: 34px;
+  min-width: 40px;
+  min-height: 40px;
   padding: 5px 8px;
   font-size: 12px;
 }

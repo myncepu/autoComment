@@ -74,6 +74,11 @@ test('batch console CSS exposes desktop, overview, card and compact layout modes
     /grid-template-columns:\s*repeat\(2/
   );
   assert.ok(conditions.includes('(prefers-reduced-motion: reduce)'));
+  const rowActionRule = [...document.styleSheets[0].cssRules].find((rule) => (
+    rule.selectorText === '.batch-console__row-actions .batch-console__button'
+  ));
+  assert.equal(rowActionRule.style.getPropertyValue('min-height'), '40px');
+  assert.equal(rowActionRule.style.getPropertyValue('min-width'), '40px');
 });
 
 test('fixture adapter runs real CSV preflight and returns deterministic command results', async () => {
@@ -141,7 +146,15 @@ test('fixture adapter drives deterministic console commands, filters and recover
     snapshot.rows.find((row) => row.urlIndex === 18).attempt,
     2
   );
-  await adapter.controller.openManual({ urlIndex: 17, attempt: 1 });
+  const manualHandle = await adapter.controller.openManual({
+    urlIndex: 17,
+    attempt: 1
+  });
+  assert.deepEqual(manualHandle, {
+    id: 901,
+    type: 'normal',
+    automation: false
+  });
   await adapter.controller.manualUpdate(
     { urlIndex: 17, attempt: 1 },
     'resolved'

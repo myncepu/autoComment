@@ -268,6 +268,67 @@ export function emptySnapshotFixture() {
   };
 }
 
+export function producerCheckpointFixture(status = 'paused_recovery') {
+  const parsedUrls = Array.from({ length: 3 }, (_, originalIndex) => ({
+    originalIndex,
+    url: `https://producer.test/${originalIndex}`,
+    sourceDomain: 'producer.test',
+    originalRow: [`https://producer.test/${originalIndex}`]
+  }));
+  return {
+    version: 2,
+    batchId: 'producer-batch-1',
+    status,
+    createdAt: 1000,
+    updatedAt: 69000,
+    source: {
+      fileName: 'producer-targets.csv',
+      headers: ['原URL'],
+      rows: parsedUrls.map((item) => item.originalRow),
+      parsedUrls
+    },
+    settings: {
+      autoOpenPanel: false,
+      autoGenerate: true,
+      autoSubmit: true,
+      concurrency: 3,
+      timeoutSeconds: 60,
+      assignment: {
+        identityId: 'default-identity',
+        promotionSiteId: 'default-promotion-site',
+        identitySnapshot: {
+          displayName: 'Producer User',
+          email: 'producer@example.test'
+        },
+        promotionSiteSnapshot: {
+          label: 'producer-promo.test',
+          url: 'https://producer-promo.test/',
+          contentSummary: 'Producer integration fixture'
+        }
+      }
+    },
+    cursor: { nextIndex: 0 },
+    tasks: Object.fromEntries(parsedUrls.map((item) => [
+      String(item.originalIndex),
+      {
+        urlIndex: item.originalIndex,
+        attempt: 1,
+        state: 'queued',
+        phase: null,
+        tabId: null,
+        windowId: null,
+        startedAt: null,
+        updatedAt: 69000,
+        manualResolution: {
+          status: 'idle',
+          updatedAt: null
+        }
+      }
+    ])),
+    results: []
+  };
+}
+
 export function click(document, selector) {
   const element = document.querySelector(selector);
   if (!element) throw new Error(`missing fixture selector: ${selector}`);

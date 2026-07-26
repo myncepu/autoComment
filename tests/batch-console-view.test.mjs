@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { createBatchConsoleSnapshot } from '../lib/batch-console-state.mjs';
 import { createBatchConsoleView } from '../lib/batch-console-view.mjs';
 import {
   change,
@@ -11,9 +12,33 @@ import {
   errorSnapshotFixture,
   offlineSnapshotFixture,
   persistencePendingSnapshotFixture,
+  producerCheckpointFixture,
   recoverySnapshotFixture,
   runningSnapshotFixture
 } from './helpers/batch-console-fixtures.mjs';
+
+test('renders a paused producer snapshot without hand-authored view fields', () => {
+  const document = consoleDocument();
+  const view = createBatchConsoleView(document, consoleHandlers());
+  const snapshot = createBatchConsoleSnapshot(producerCheckpointFixture(), {
+    now: 70000,
+    online: true,
+    keepAlive: false
+  });
+
+  view.render(snapshot);
+
+  assert.equal(document.querySelectorAll('[data-worker-slot]').length, 3);
+  assert.equal(
+    document.querySelectorAll('[data-worker-slot]')[0].textContent.includes('等待队列'),
+    true
+  );
+  assert.equal(document.querySelector('[data-action="resume"]').disabled, false);
+  assert.equal(document.querySelector('[data-action="stop"]').disabled, false);
+  assert.equal(document.querySelector('[data-action="export"]').disabled, false);
+  assert.match(document.querySelector('[data-console-overview]').textContent, /Producer User/);
+  assert.match(document.querySelector('[data-console-overview]').textContent, /producer-promo.test/);
+});
 
 test('renders fixed controls, six counters, tab slots and full-lifecycle rows', () => {
   const document = consoleDocument();
@@ -75,6 +100,102 @@ test('dispatches safe retry directly and confirms uncertain retry before requeue
   assert.match(dialog.textContent, /先人工检查/);
   click(document, '[data-dialog-confirm]');
   assert.deepEqual(calls, [[18, false], [17, true]]);
+});
+
+test('replaces a drawer with one retry confirmation and restores the drawer on cancel', () => {
+  const document = consoleDocument();
+  const view = createBatchConsoleView(document, consoleHandlers());
+  view.render(runningSnapshotFixture());
+  const detailsTrigger = document.querySelector(
+    '[data-action="details"][data-url-index="17"]'
+  );
+
+  detailsTrigger.focus();
+  click(document, '[data-action="details"][data-url-index="17"]');
+  click(
+    document,
+    '[data-task-drawer] [data-action="retry"][data-url-index="17"]'
+  );
+
+  assert.equal(document.querySelectorAll('[data-console-layer]').length, 1);
+  assert.equal(document.querySelector('[data-task-drawer]'), null);
+  const dialog = document.querySelector('[role="dialog"]');
+  assert.match(dialog.textContent, /重复评论/);
+  assert.equal(dialog.contains(document.activeElement), true);
+
+  click(document, '[data-dialog-cancel]');
+  assert.equal(document.querySelectorAll('[data-console-layer]').length, 1);
+  assert.ok(document.querySelector('[data-task-drawer]'));
+  assert.equal(
+    document.activeElement,
+    document.querySelector(
+      '[data-task-drawer] [data-action="retry"][data-url-index="17"]'
+    )
+  );
+  click(document, '[data-drawer-close]');
+  assert.equal(document.querySelector('[data-console-layer]'), null);
+  assert.equal(document.activeElement, detailsTrigger);
+});
+
+test('keeps the search node, focus and caret through synchronous filtered renders', () => {
+  const document = consoleDocument();
+  const calls = [];
+  let snapshot = runningSnapshotFixture();
+  let view;
+  view = createBatchConsoleView(document, consoleHandlers({
+    onFilterChange(filters) {
+      calls.push(filters);
+      snapshot = { ...snapshot, filters };
+      view.render(snapshot);
+    }
+  }));
+  view.render(snapshot);
+  const search = document.querySelector('[name="queueKeyword"]');
+  search.focus();
+
+  search.value = 'a';
+  search.setSelectionRange(1, 1);
+  search.dispatchEvent(new document.defaultView.Event('input', { bubbles: true }));
+  assert.equal(document.querySelector('[name="queueKeyword"]'), search);
+  assert.equal(document.activeElement, search);
+  assert.equal(search.selectionStart, 1);
+  assert.equal(search.value, 'a');
+  assert.equal(calls.length, 1);
+
+  search.value = 'ab';
+  search.setSelectionRange(2, 2);
+  search.dispatchEvent(new document.defaultView.Event('input', { bubbles: true }));
+  search.dispatchEvent(new document.defaultView.Event('change', { bubbles: true }));
+  search.dispatchEvent(new document.defaultView.Event('input', { bubbles: true }));
+  assert.equal(document.querySelector('[name="queueKeyword"]'), search);
+  assert.equal(document.activeElement, search);
+  assert.equal(search.selectionStart, 2);
+  assert.equal(search.value, 'ab');
+  assert.deepEqual(calls.map((filters) => filters.keyword), ['a', 'ab']);
+});
+
+test('publishes selects only on change and deduplicates the same filter payload', () => {
+  const document = consoleDocument();
+  const calls = [];
+  let snapshot = runningSnapshotFixture();
+  let view;
+  view = createBatchConsoleView(document, consoleHandlers({
+    onFilterChange(filters) {
+      calls.push(filters);
+      snapshot = { ...snapshot, filters };
+      view.render(snapshot);
+    }
+  }));
+  view.render(snapshot);
+  const status = document.querySelector('[name="queueStatus"]');
+  status.value = 'manual';
+  status.dispatchEvent(new document.defaultView.Event('input', { bubbles: true }));
+  status.dispatchEvent(new document.defaultView.Event('change', { bubbles: true }));
+  status.dispatchEvent(new document.defaultView.Event('change', { bubbles: true }));
+
+  assert.equal(document.querySelector('[name="queueStatus"]'), status);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].status, 'manual');
 });
 
 test('filters queue, opens details, focuses worker tabs and records manual outcomes', () => {

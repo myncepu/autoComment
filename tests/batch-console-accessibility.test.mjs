@@ -90,6 +90,69 @@ test('keeps an in-flight danger layer busy, disabled and immune to Escape', () =
   assert.equal(dialog.querySelector('[data-dialog-cancel]').disabled, true);
 });
 
+test('allows an informational drawer to close while a background command is in flight', () => {
+  const document = consoleDocument();
+  const view = createBatchConsoleView(document, consoleHandlers());
+  view.render(runningSnapshotFixture());
+  click(document, '[data-action="details"][data-url-index="17"]');
+  const pending = runningSnapshotFixture();
+  pending.command.inFlight = 'export';
+  view.render(pending);
+
+  document.dispatchEvent(new document.defaultView.KeyboardEvent('keydown', {
+    key: 'Escape',
+    bubbles: true,
+    cancelable: true
+  }));
+
+  assert.equal(document.querySelector('[data-task-drawer]'), null);
+});
+
+test('keeps live region nodes stable and announces only changed status data', () => {
+  const document = consoleDocument();
+  const view = createBatchConsoleView(document, consoleHandlers());
+  const running = runningSnapshotFixture();
+  view.render(running);
+  const status = document.querySelector('[data-batch-status]');
+  const result = document.querySelector('[data-command-result]');
+  const banners = document.querySelector('[data-console-banners]');
+  const runningCount = document.querySelector('[data-summary-count="running"]');
+  const countAnnouncer = document.querySelector('[data-count-announcer]');
+
+  const recovery = recoverySnapshotFixture();
+  recovery.counts.running = 0;
+  recovery.counts.queued = 3;
+  recovery.command.resultMessage = '批次已安全暂停';
+  view.render(recovery);
+
+  assert.equal(document.querySelector('[data-batch-status]'), status);
+  assert.equal(document.querySelector('[data-command-result]'), result);
+  assert.equal(document.querySelector('[data-console-banners]'), banners);
+  assert.equal(
+    document.querySelector('[data-summary-count="running"]'),
+    runningCount
+  );
+  assert.equal(document.querySelector('[data-count-announcer]'), countAnnouncer);
+  assert.match(status.textContent, /已暂停/);
+  assert.equal(result.textContent, '批次已安全暂停');
+  assert.match(countAnnouncer.textContent, /运行 0/);
+  assert.equal(banners.getAttribute('aria-live'), 'polite');
+
+  const priorAnnouncement = countAnnouncer.textContent;
+  view.render(recovery);
+  assert.equal(countAnnouncer.textContent, priorAnnouncement);
+
+  const error = recoverySnapshotFixture();
+  error.banners = [{
+    kind: 'error',
+    title: '运行时发生错误',
+    message: 'worker_pause_failed'
+  }];
+  view.render(error);
+  const alert = document.querySelector('[role="alert"]');
+  assert.equal(alert.getAttribute('aria-live'), 'assertive');
+});
+
 test('marks the command surface busy and disables task mutations in flight', () => {
   const document = consoleDocument();
   const view = createBatchConsoleView(document, consoleHandlers());

@@ -4,6 +4,7 @@ import {
   createBatchConsoleSnapshot,
   filterBatchTaskRows
 } from '../lib/batch-console-state.mjs';
+import { producerCheckpointFixture } from './helpers/batch-console-fixtures.mjs';
 
 test('derives counters, slots and latest-attempt rows from one checkpoint', () => {
   const checkpoint = createConsoleCheckpointFixture();
@@ -111,6 +112,72 @@ test('exposes selected console fields without checkpoint passwords', () => {
   const snapshot = createBatchConsoleSnapshot(checkpoint, { now: 70000 });
 
   assert.equal(JSON.stringify(snapshot).includes('must-not-leak'), false);
+});
+
+test('derives a complete paused console view model from the version 2 checkpoint', () => {
+  const snapshot = createBatchConsoleSnapshot(
+    producerCheckpointFixture(),
+    {
+      now: 70000,
+      online: true,
+      keepAlive: false,
+      filters: {
+        status: 'queued',
+        domain: 'producer.test',
+        timeRange: 'all',
+        keyword: ''
+      }
+    }
+  );
+
+  assert.equal(snapshot.batchName, 'producer-targets.csv');
+  assert.equal(snapshot.concurrency, 3);
+  assert.equal(snapshot.slotCapacity, 3);
+  assert.deepEqual(snapshot.assignment, {
+    identityLabel: '默认身份 · Producer User',
+    promotionSiteLabel: 'producer-promo.test',
+    automationLabel: '生成并自动提交',
+    limitsLabel: '并发 3 · 超时 60s'
+  });
+  assert.deepEqual(snapshot.command, {
+    inFlight: null,
+    canPause: false,
+    canResume: true,
+    canStop: true,
+    canExport: true,
+    canCreate: true,
+    resultMessage: ''
+  });
+  assert.equal(snapshot.keepAlive, false);
+  assert.equal(snapshot.checkpointState, 'saved');
+  assert.equal(snapshot.filteredRows.length, 3);
+  assert.match(snapshot.banners[0].message, /不会自动继续/);
+});
+
+test('locks derived commands while offline or while another command is in flight', () => {
+  const checkpoint = producerCheckpointFixture();
+  const offline = createBatchConsoleSnapshot(checkpoint, {
+    now: 70000,
+    online: false
+  });
+  const pending = createBatchConsoleSnapshot(checkpoint, {
+    now: 70000,
+    online: true,
+    inFlight: 'resume'
+  });
+
+  assert.equal(offline.command.canResume, false);
+  assert.equal(offline.command.canStop, true);
+  assert.match(offline.banners[0].title, /离线/);
+  assert.deepEqual(pending.command, {
+    inFlight: 'resume',
+    canPause: false,
+    canResume: false,
+    canStop: false,
+    canExport: false,
+    canCreate: false,
+    resultMessage: ''
+  });
 });
 
 function createConsoleCheckpointFixture() {
