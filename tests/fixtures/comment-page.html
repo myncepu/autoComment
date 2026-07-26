@@ -6,11 +6,16 @@
   <title>Local Accessibility Article</title>
 </head>
 <body>
-  <main>
+  <main id="fixture-page" data-target-id="{{TARGET_ID}}" data-delay-ms="{{DELAY_MS}}">
     <article>
-      <h1>Practical accessibility checks</h1>
+      <h1>{{PAGE_TITLE}}</h1>
       <p>Use clear labels, keyboard navigation, readable contrast, and useful alternative text.</p>
     </article>
+    <section aria-labelledby="fixture-controls-title">
+      <h2 id="fixture-controls-title">Local fixture controls</h2>
+      <p>Requested path: <code id="requested-path">{{REQUESTED_PATH}}</code></p>
+      <p>Model delay: <output id="fixture-delay">{{DELAY_MS}}</output> ms</p>
+    </section>
     <form id="commentform">
       <label>Name <input id="author" name="author" /></label>
       <label>Email <input id="email" name="email" type="email" /></label>

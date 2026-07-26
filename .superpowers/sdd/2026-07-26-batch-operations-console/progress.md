@@ -44,3 +44,4 @@ Task 12 review round 12: preflight canonical terminal payloads and reducer candi
 Task 12: complete and independently approved (commits 1d112c0..fc546e4; final review no findings, mergeable YES; focused 133/133, affected 242/242, full suite 522/522).
 Integration note: downstream multi-profile work uses canonical `profileId` and will adapt this branch's v2 contracts to v3 after merge. Never persist or transmit passwords in checkpoint, BATCH_HANDLE, or history. Report the mergeable Task 12 commit explicitly.
 Coordination gate: multi-profile branch `codex/multi-identity-promotion-batch` is clean at `09e761e`. At the first mergeable Task 12 UI baseline, report commit/modules/integration notes and notify Codex task `019f9a05-b1a2-71b1-bdce-0c6b5bdff8dc` to resume. Do not merge multi-profile scheduling early.
+Task 13: complete (local five-URL fixture, bounded OpenAI-compatible stub, deterministic delays; focused 10/10, full suite 528/528).
