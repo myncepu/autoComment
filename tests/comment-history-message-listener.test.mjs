@@ -379,7 +379,12 @@ test('background migrates an old record before its startup retention check and c
     tabs: {
       onRemoved: { addListener() {} },
       async sendMessage() {},
-      async create() {},
+      async create(details) {
+        return { id: 42, windowId: details.windowId, ...details };
+      },
+      async update(tabId, details) {
+        return { id: tabId, windowId: 52, ...details };
+      },
       async query() {
         return [];
       }
@@ -432,11 +437,14 @@ test('background migrates an old record before its startup retention check and c
     }
   };
 
-  async function dispatchConfirm(confirmMessage) {
+  async function dispatchConfirm(
+    confirmMessage,
+    sender = { id: 'extension-id', tab: { id: 42 } }
+  ) {
     const responses = [];
     const handled = runtimeListeners.map((listener) => listener(
       confirmMessage,
-      { id: 'extension-id', tab: { id: 42 } },
+      sender,
       (response) => responses.push(response)
     ));
     assert.ok(handled.includes(true));
@@ -506,12 +514,15 @@ test('background migrates an old record before its startup retention check and c
   assert.equal(startupListeners.length, 1);
 
   const activeResponses = await dispatchConfirm({
-    type: 'BATCH_TASK_ACTIVE',
+    type: 'BATCH_CREATE_WORKER_TAB',
     batchId: message.batchId,
     urlIndex: message.urlIndex,
     attempt: message.attempt,
-    tabId: 42,
-    windowId: 52
+    requestId: `${message.batchId}:${message.urlIndex}:${message.attempt}`
+  }, {
+    id: 'extension-id',
+    tab: { id: 900, windowId: 52 },
+    url: 'chrome-extension://extension-id/batch.html'
   });
   assert.equal(activeResponses[0]?.ok, true);
   const submittingResponses = await dispatchConfirm({

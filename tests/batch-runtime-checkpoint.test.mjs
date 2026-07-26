@@ -278,6 +278,53 @@ test('migrates only canonical legacy reservations that are missing batchId', () 
   assert.deepEqual(migratedUnsafe.checkpoint.openingReservations, {});
 });
 
+test('migrates valid legacy ACTIVE ownership to canonical identity and rejects incomplete ownership', () => {
+  const legacy = createCheckpoint(1);
+  Object.assign(legacy.tasks['0'], {
+    state: 'active',
+    requestId: null,
+    tabId: 41,
+    windowId: 51,
+    startedAt: 1200
+  });
+  const incomplete = structuredClone(legacy);
+  incomplete.tasks['0'].windowId = null;
+
+  const migrated = migrateBatchRuntimeCheckpoint(legacy, 2000);
+  const rejected = migrateBatchRuntimeCheckpoint(incomplete, 2000);
+
+  assert.equal(migrated.ok, true);
+  assert.equal(migrated.changed, true);
+  assert.equal(migrated.checkpoint.tasks['0'].requestId, 'batch-1:0:1');
+  assert.equal(rejected.ok, false);
+});
+
+test('task activation events reject every non-positive ownership field', () => {
+  const running = applyBatchRuntimeEvent(createCheckpoint(1), {
+    type: 'session_started',
+    batchId: 'batch-1'
+  }, 1100).checkpoint;
+  for (const patch of [
+    { tabId: 0 },
+    { windowId: 0 },
+    { startedAt: 0 },
+    { startedAt: Number.NaN }
+  ]) {
+    const result = applyBatchRuntimeEvent(running, {
+      type: 'task_activated',
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      requestId: 'batch-1:0:1',
+      tabId: 41,
+      windowId: 51,
+      startedAt: 1200,
+      ...patch
+    }, 1200);
+    assert.equal(result.ok, false);
+  }
+});
+
 function createCheckpoint(count = 4) {
   const items = createItems(count);
   return createBatchRuntimeCheckpoint({
@@ -608,7 +655,8 @@ test('deduplicates repeated worker tab IDs during interruption recovery', () => 
       urlIndex,
       attempt: 1,
       tabId: 21,
-      windowId: 31
+      windowId: 31,
+      startedAt: 1200
     }, 1200).checkpoint;
   }
 

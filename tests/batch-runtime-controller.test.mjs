@@ -190,6 +190,29 @@ function createHarness({ failPower = false, existingTabs = [] } = {}) {
       return clock;
     }
   });
+  const handleMessage = controller.handleMessage;
+  controller.handleMessage = (message, sender) => {
+    if (
+      message?.type === 'BATCH_TASK_ACTIVE' &&
+      Number.isInteger(message.urlIndex) &&
+      Number.isInteger(message.attempt) &&
+      message.attempt > 0 &&
+      Number.isInteger(message.tabId) &&
+      Number.isInteger(message.windowId) &&
+      !tabStore.has(message.tabId)
+    ) {
+      const item =
+        data.batchRuntimeCheckpoint?.source?.parsedUrls?.[message.urlIndex];
+      if (typeof item?.url === 'string') {
+        tabStore.set(message.tabId, {
+          id: message.tabId,
+          windowId: message.windowId,
+          url: item.url
+        });
+      }
+    }
+    return handleMessage(message, sender);
+  };
   return {
     controller,
     chrome: { storage: { local: storageArea }, power, tabs, windows, runtime },
@@ -1047,6 +1070,101 @@ test('malformed task ownership never deletes the claimed user tab during page re
   }
 });
 
+test('legacy naked orphan IDs never authorize deletion of a user tab', async () => {
+  const harness = createHarness({
+    existingTabs: [{
+      id: 777,
+      windowId: 42,
+      url: 'https://user-owned.test/',
+      active: true
+    }]
+  });
+  await harness.controller.handleMessage(startMessage(1));
+  harness.data.batchRuntimeCheckpoint.status = 'paused_recovery';
+  harness.data.batchRuntimeCheckpoint.recoveryCleanup = {
+    reason: 'legacy',
+    orphanTabIds: [777],
+    diagnostic: 'tab_close_failed',
+    updatedAt: 2000
+  };
+
+  const response = await harness.controller.loadForPage();
+
+  assert.equal(response.ok, true);
+  assert.deepEqual(harness.removedTabs, []);
+  assert.equal(harness.tabStore.has(777), true);
+});
+
+test('teardown requires live window and URL proof before deleting an owned task tab', async () => {
+  const harness = createHarness({
+    existingTabs: [{
+      id: 11,
+      windowId: 21,
+      url: 'https://example.test/0'
+    }]
+  });
+  await harness.controller.handleMessage(startMessage(1));
+  await harness.controller.handleMessage({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 11,
+    windowId: 21
+  });
+  harness.tabStore.set(11, {
+    id: 11,
+    windowId: 21,
+    url: 'https://user.example/private'
+  });
+
+  const response = await harness.controller.handleMessage({
+    type: 'BATCH_PAGE_TEARDOWN',
+    batchId: 'batch-1',
+    reason: 'navigation'
+  });
+
+  assert.equal(response.ok, true);
+  assert.deepEqual(harness.removedTabs, []);
+  assert.equal(harness.tabStore.has(11), true);
+});
+
+test('installed runtime rejects content-forged ACTIVE ownership without persistence or cleanup', async () => {
+  const harness = createHarness({
+    existingTabs: [{
+      id: 777,
+      windowId: 42,
+      url: 'https://user-owned.test/',
+      active: true
+    }]
+  });
+  installBatchRuntimeController(harness.chrome, harness.controller);
+  await harness.controller.handleMessage(startMessage(1));
+  harness.setCalls.length = 0;
+
+  const response = await sendInstalledMessage(
+    harness.listeners.messages[0],
+    {
+      type: 'BATCH_TASK_ACTIVE',
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      tabId: 777,
+      windowId: 42
+    },
+    {
+      id: 'extension-id',
+      tab: { id: 777, windowId: 42 },
+      url: 'https://attacker.test/'
+    }
+  );
+
+  assert.equal(response.error, 'listener_rejected_message');
+  assert.deepEqual(harness.setCalls, []);
+  assert.deepEqual(harness.removedTabs, []);
+  assert.equal(harness.data.batchRuntimeCheckpoint.tasks['0'].state, 'queued');
+});
+
 test('legacy canonical reservation migration still discovers and cleans its exact pending tab', async () => {
   const harness = createHarness({
     existingTabs: [{
@@ -1694,7 +1812,7 @@ test('page teardown storage failure leaves running ownership untouched', async (
   assert.deepEqual(harness.removedTabs, []);
 });
 
-test('missing-attempt worker activation safely pauses and closes the unclaimed tab', async () => {
+test('missing-attempt worker activation pauses without deleting an unclaimed tab ID', async () => {
   const harness = createHarness();
   await harness.controller.handleMessage(startMessage(1));
 
@@ -1710,7 +1828,7 @@ test('missing-attempt worker activation safely pauses and closes the unclaimed t
   assert.equal(response.error, 'stale_attempt');
   assert.equal(response.checkpoint.status, 'paused_recovery');
   assert.deepEqual(response.checkpoint.recoveryCleanup.orphanTabIds, []);
-  assert.deepEqual(harness.removedTabs, [11]);
+  assert.deepEqual(harness.removedTabs, []);
 });
 
 test('late activation after page teardown is cancelled and cleaned without restart', async () => {

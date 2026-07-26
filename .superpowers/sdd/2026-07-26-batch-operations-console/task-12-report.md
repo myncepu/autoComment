@@ -332,6 +332,42 @@ migration, malformed task cleanup accepting tab 777, and compatible pending
 recovery failing to load. The focused command passed 71/71 after the schema
 change; the expanded round-5 affected command passed 152/152.
 
+## Round 7 Fail-Closed Ownership Recovery
+
+- Legacy version 1 and older version 2 ACTIVE/SUBMITTING tasks now gain a
+  canonical request ID only when the complete ownership tuple is valid:
+  in-bounds task/index/attempt, positive tab and window IDs, and a positive
+  finite start time. Incomplete or contradictory legacy ownership fails
+  migration validation without exposing the claimed tab to cleanup.
+- A naked `recoveryCleanup.orphanTabIds` array is diagnostic state only. It is
+  never copied into the deletion candidate set, and a legacy array is cleared
+  without removing its claimed tab. A failed close remains retryable because
+  teardown preserves the original validated task or opening-reservation
+  ownership, not because the integer ID is trusted.
+- Every deletion candidate is re-proven against the live tab query. ACTIVE or
+  SUBMITTING ownership requires the same positive tab/window tuple and an
+  exact source target URL or canonical pending-worker URL. Opening
+  reservations still require their exact extension pending URL, request
+  identity, and window/tab constraints. A valid checkpoint whose tab ID has
+  since been reused for a different URL cannot delete that user tab.
+- The installed runtime no longer routes `BATCH_TASK_ACTIVE`. A forged
+  content-page message claiming tab 777 returns synchronously as unhandled
+  with zero checkpoint writes and zero tab removals. Normal page operation
+  continues through trusted `BATCH_CREATE_WORKER_TAB`, which creates,
+  checkpoints, and navigates the worker in the background. The background
+  history integration test now uses that production activation path.
+- The checkpoint `task_activated` event rejects zero/negative tab IDs,
+  zero/negative window IDs, and zero, negative, NaN, or infinite start times.
+  The controller supplies its own positive clock value only for its internal
+  compatibility call when an explicit start time is absent.
+
+Round-7 focused RED ran 75 checkpoint/controller tests with four failures for
+legacy ACTIVE migration, malformed legacy fail-closed behavior, non-positive
+activation identity, naked orphan authorization, and forged external ACTIVE
+ownership. A separate live-proof test was observed failing by deleting the
+reused tab before the teardown correction. The focused controller suite
+passed 47/47, and the expanded affected command passed 157/157.
+
 ## Legacy Race Coverage Map
 
 The removed monolith fixture is not retained. Each former integration
@@ -364,8 +400,8 @@ guarantee is owned and tested by the production module that now implements it:
 9. `Start durably creates the complete runtime session before scheduling` →
    command-controller “persists a sanitized session before starting workers”.
 10. `Start safely pauses a runtime checkpoint with a missing task attempt` →
-    runtime-controller “missing-attempt worker activation safely pauses and
-    closes the unclaimed tab”.
+    runtime-controller “missing-attempt worker activation pauses without
+    deleting an unclaimed tab ID”.
 11. `a keep-awake failure preserves the uploaded dataset and stays idle` →
     runtime-controller “a power acquisition failure leaves a new checkpoint
     safely paused”.
@@ -422,15 +458,20 @@ guarantee is owned and tested by the production module that now implements it:
 
 ## Verification
 
-- Round-6 affected runtime/page command:
+- Round-7 affected runtime/page command:
   `node --test tests/batch-runtime-checkpoint.test.mjs tests/batch-runtime-controller.test.mjs tests/batch-chrome-adapter.test.mjs tests/batch-worker-runtime.test.mjs tests/batch-multi-window-integration.test.js`
-  passed 152/152 with zero failures.
-- Full repository: `npm test` passed 479/479 with zero failures.
+  passed 157/157 with zero failures.
+- Full repository: `npm test` passed 484/484 with zero failures.
 - `node --check` passed for every changed JavaScript module and test.
 - `manifest.json` parsed successfully.
 - `batch.js` dynamically imported without DOM or Chrome globals.
 - `git diff --check` passed.
 - Static audits found:
+  - zero installed runtime routes for externally supplied
+    `BATCH_TASK_ACTIVE`;
+  - no deletion authorization from naked recovery orphan arrays;
+  - live window plus exact target/pending URL proof for every teardown
+    candidate;
   - zero `chrome.*` references in app-shell, wizard, console view/state, or
     page composition;
   - automatic worker creation only through same-window background tabs;
@@ -464,5 +505,7 @@ guarantee is owned and tested by the production module that now implements it:
   `fix: recover pending worker tab ownership`.
 - Round-6 hardening commit subject:
   `fix: validate batch task ownership identities`.
+- Round-7 hardening commit subject:
+  `fix: prove batch tab ownership before cleanup`.
 - The final commit SHA is reported in the task `DONE` handoff because a file
   cannot contain the hash of the commit that contains itself.
