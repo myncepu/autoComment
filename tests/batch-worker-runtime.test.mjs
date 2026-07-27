@@ -153,6 +153,325 @@ test('confirmation seals and closes its tab before replenishing one worker slot'
   });
 });
 
+test('accepts removed-tab checkpoint and replenishes the freed worker slot', async () => {
+  const harness = createWorkerHarness({ concurrency: 1, taskCount: 2 });
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  const events = [];
+  runtime.subscribe((event) => events.push(event));
+  await runtime.start(harness.checkpoint);
+  const terminalCheckpoint = structuredClone(harness.checkpoint);
+  Object.assign(terminalCheckpoint.tasks['0'], {
+    state: 'terminal',
+    phase: null,
+    tabId: null,
+    windowId: null,
+    startedAt: null
+  });
+  terminalCheckpoint.results.push({
+    originalIndex: 0,
+    attempt: 1,
+    result: 'fail',
+    errorCode: 'worker_tab_closed',
+    errorMessage: 'Worker tab closed'
+  });
+  assert.equal(
+    await runtime.acceptRemovedTabCheckpoint({
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      tabId: 100,
+      checkpoint: terminalCheckpoint
+    }),
+    true
+  );
+  assert.deepEqual(
+    harness.sentHandles.map(({ urlIndex }) => urlIndex),
+    [0, 1]
+  );
+  assert.equal(
+    events.some(
+      ({ type, checkpoint }) => (
+        type === 'changed' &&
+        checkpoint.tasks['0'].state === 'terminal'
+      )
+    ),
+    true
+  );
+  assert.deepEqual(harness.tabsApi.removeCalls, []);
+});
+
+test('keeps an unrelated recovery pause after adopting a removed-tab checkpoint', async () => {
+  const harness = createWorkerHarness({ concurrency: 1, taskCount: 2 });
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  const events = [];
+  runtime.subscribe((event) => events.push(event));
+  await runtime.start(harness.checkpoint);
+  harness.tabsApi.update = async () => {
+    throw new Error('focus failed before worker removal');
+  };
+
+  assert.equal(await runtime.focus(0), null);
+  harness.tabsApi.emitRemoved(100);
+  await Promise.resolve();
+
+  const terminalCheckpoint = structuredClone(harness.checkpoint);
+  terminalCheckpoint.updatedAt += 1;
+  Object.assign(terminalCheckpoint.tasks['0'], {
+    state: 'terminal',
+    phase: null,
+    tabId: null,
+    windowId: null,
+    startedAt: null,
+    updatedAt: terminalCheckpoint.updatedAt
+  });
+  terminalCheckpoint.results.push({
+    originalIndex: 0,
+    attempt: 1,
+    result: 'fail',
+    errorCode: 'task_failed',
+    errorMessage: 'Worker tab closed',
+    timestamp: terminalCheckpoint.updatedAt
+  });
+
+  assert.equal(await runtime.acceptRemovedTabCheckpoint({
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 100,
+    checkpoint: terminalCheckpoint
+  }), true);
+  assert.deepEqual(
+    harness.sentHandles.map(({ urlIndex }) => urlIndex),
+    [0],
+    'an unrelated safety pause must not refill automatically'
+  );
+  assert.equal(harness.intervalCallbacks.length, 1);
+  assert.equal(
+    events.some(
+      ({ transition, recovered }) => (
+        transition === 'BATCH_WORKER_TAB_REMOVED' &&
+        recovered === true
+      )
+    ),
+    false
+  );
+
+  assert.equal(await runtime.resume(terminalCheckpoint), true);
+  assert.deepEqual(
+    harness.sentHandles.map(({ urlIndex }) => urlIndex),
+    [0, 1]
+  );
+});
+
+test('ignores stale removed-tab checkpoint identities and duplicate delivery', async () => {
+  const harness = createWorkerHarness({ concurrency: 1, taskCount: 2 });
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  await runtime.start(harness.checkpoint);
+  const terminalCheckpoint = structuredClone(harness.checkpoint);
+  Object.assign(terminalCheckpoint.tasks['0'], {
+    state: 'terminal',
+    phase: null,
+    tabId: null,
+    windowId: null,
+    startedAt: null
+  });
+  terminalCheckpoint.results.push({
+    originalIndex: 0,
+    attempt: 1,
+    result: 'fail',
+    errorCode: 'worker_tab_closed',
+    errorMessage: 'Worker tab closed'
+  });
+  const staleBatchCheckpoint = structuredClone(terminalCheckpoint);
+  staleBatchCheckpoint.batchId = 'batch-stale';
+  const staleAttemptCheckpoint = structuredClone(terminalCheckpoint);
+  staleAttemptCheckpoint.tasks['0'].attempt = 2;
+
+  assert.equal(await runtime.acceptRemovedTabCheckpoint({
+    batchId: 'batch-stale',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 100,
+    checkpoint: staleBatchCheckpoint
+  }), false);
+  assert.equal(await runtime.acceptRemovedTabCheckpoint({
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 2,
+    tabId: 100,
+    checkpoint: staleAttemptCheckpoint
+  }), false);
+
+  const message = {
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 100,
+    checkpoint: terminalCheckpoint
+  };
+  assert.equal(await runtime.acceptRemovedTabCheckpoint(message), true);
+  assert.equal(await runtime.acceptRemovedTabCheckpoint(message), false);
+  assert.deepEqual(
+    harness.sentHandles.map(({ urlIndex }) => urlIndex),
+    [0, 1]
+  );
+});
+
+test('rejects equal-time removed snapshots that regress unrelated task, result, or reservation state', async () => {
+  async function runProbe(regress) {
+    const harness = createWorkerHarness({ concurrency: 2, taskCount: 3 });
+    const runtime = createBatchWorkerRuntime(harness.dependencies);
+    const events = [];
+    runtime.subscribe((event) => events.push(event));
+    await runtime.start(harness.checkpoint);
+    await runtime.handleConfirmation({
+      type: 'BATCH_CONFIRMED',
+      batchId: 'batch-1',
+      urlIndex: 1,
+      attempt: 1,
+      sourceTabId: 101,
+      result: 'success',
+      aiContent: 'saved',
+      historySaveStatus: 'saved'
+    });
+    harness.checkpoint.updatedAt = 5000;
+    harness.checkpoint.openingReservations = {
+      'batch-1:2:1': {
+        batchId: 'batch-1',
+        urlIndex: 2,
+        attempt: 1,
+        requestId: 'batch-1:2:1',
+        cleanupOnly: true,
+        createCompletionUnknown: true,
+        cleanupObservedAt: 4900,
+        updatedAt: 5000
+      }
+    };
+    const candidate = structuredClone(harness.checkpoint);
+    Object.assign(candidate.tasks['0'], {
+      state: 'terminal',
+      phase: null,
+      tabId: null,
+      windowId: null,
+      startedAt: null,
+      updatedAt: 5000
+    });
+    candidate.results.push({
+      originalIndex: 0,
+      attempt: 1,
+      result: 'fail',
+      errorCode: 'task_failed',
+      errorMessage: 'Worker tab closed',
+      timestamp: 5000
+    });
+    regress(candidate);
+
+    assert.equal(await runtime.acceptRemovedTabCheckpoint({
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      tabId: 100,
+      checkpoint: candidate
+    }), false);
+    assert.deepEqual(
+      harness.sentHandles.map(({ urlIndex }) => urlIndex),
+      [0, 1, 2]
+    );
+    assert.equal((await runtime.focus(0))?.tabId, 100);
+    assert.equal(
+      events.some(({ type }) => type === 'runtime-error'),
+      false
+    );
+  }
+
+  await runProbe((candidate) => {
+    Object.assign(candidate.tasks['1'], {
+      state: 'active',
+      phase: 'generating',
+      tabId: 101,
+      windowId: 42,
+      startedAt: 1000,
+      updatedAt: 4000
+    });
+  });
+  await runProbe((candidate) => {
+    const unrelated = candidate.results.find(
+      ({ originalIndex }) => originalIndex === 1
+    );
+    unrelated.aiContent = 'stale unrelated result';
+  });
+  await runProbe((candidate) => {
+    candidate.openingReservations['batch-1:2:1'].cleanupOnly = false;
+    candidate.openingReservations['batch-1:2:1'].updatedAt = 4000;
+  });
+  for (const field of ['windowId', 'ownerPageTabId', 'ownershipEpoch']) {
+    await runProbe((candidate) => {
+      candidate.openingReservations['batch-1:2:1'][field] =
+        Number(candidate.openingReservations['batch-1:2:1'][field] || 0) + 1;
+    });
+  }
+});
+
+test('ignores removed-tab checkpoint with a different frozen profile identity', async () => {
+  const harness = createWorkerHarness({ concurrency: 1, taskCount: 2 });
+  harness.checkpoint.version = 3;
+  harness.checkpoint.configRevision = 7;
+  harness.checkpoint.profiles = {
+    'profile-a': {
+      id: 'profile-a',
+      displayName: '作者 A',
+      name: 'Alice',
+      email: 'alice@example.test'
+    },
+    'profile-b': {
+      id: 'profile-b',
+      displayName: '作者 B',
+      name: 'Bob',
+      email: 'bob@example.test'
+    }
+  };
+  harness.checkpoint.promotionSites = {
+    'site-a': {
+      id: 'site-a',
+      name: '站点 A',
+      url: 'https://promo-a.test/',
+      content: 'Promotion A'
+    }
+  };
+  for (const task of Object.values(harness.checkpoint.tasks)) {
+    Object.assign(task, {
+      taskId: `batch-1:${task.urlIndex + 1}`,
+      profileId: 'profile-a',
+      promotionSiteId: 'site-a',
+      assignmentPairId: 'pair-a',
+      assignmentSource: 'weighted'
+    });
+  }
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  await runtime.start(harness.checkpoint);
+  const terminalCheckpoint = structuredClone(harness.checkpoint);
+  Object.assign(terminalCheckpoint.tasks['0'], {
+    state: 'terminal',
+    phase: null,
+    tabId: null,
+    windowId: null,
+    startedAt: null,
+    profileId: 'profile-b'
+  });
+
+  assert.equal(await runtime.acceptRemovedTabCheckpoint({
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 100,
+    checkpoint: terminalCheckpoint
+  }), false);
+  assert.deepEqual(
+    harness.sentHandles.map(({ urlIndex }) => urlIndex),
+    [0]
+  );
+});
+
 test('pause stops replenishment and seals each activity before closing its tab', async () => {
   const harness = createWorkerHarness({ concurrency: 3, taskCount: 5 });
   const runtime = createBatchWorkerRuntime(harness.dependencies);

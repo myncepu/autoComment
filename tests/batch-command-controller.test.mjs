@@ -437,6 +437,36 @@ test('draft storage failure leaves Start safely unclaimed with no runtime side e
   );
 });
 
+test('publishes the authoritative checkpoint before rejecting active ownership', async () => {
+  const authoritative = createCheckpoint({
+    status: 'paused_recovery',
+    taskState: 'active'
+  });
+  authoritative.batchId = 'owned-batch';
+  authoritative.source.fileName = 'owned-targets.csv';
+  const harness = createCommandHarness({
+    checkpoint: authoritative,
+    runtimeFailure: {
+      type: 'BATCH_SESSION_START',
+      error: 'batch_ownership_active'
+    }
+  });
+
+  await assert.rejects(
+    harness.controller.start(startDraft()),
+    (error) => error?.code === 'batch_ownership_active'
+  );
+
+  assert.deepEqual(harness.published, [{
+    checkpoint: authoritative,
+    authoritative: true
+  }]);
+  assert.equal(
+    harness.calls.some(([name]) => name === 'worker.start'),
+    false
+  );
+});
+
 test('Start owns an immutable upload snapshot after the editable draft changes', async () => {
   const startGate = deferred();
   const harness = createCommandHarness({

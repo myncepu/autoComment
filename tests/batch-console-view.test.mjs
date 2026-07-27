@@ -17,6 +17,47 @@ import {
   runningSnapshotFixture
 } from './helpers/batch-console-fixtures.mjs';
 
+test('renders the overview above the full-width queue', () => {
+  const document = consoleDocument();
+  const view = createBatchConsoleView(document, consoleHandlers());
+
+  view.render(runningSnapshotFixture());
+
+  const content = document.querySelector('[data-console-content]');
+  const overview = content.querySelector('[data-console-overview]');
+  const queue = content.querySelector('.batch-console__queue');
+  assert.equal(overview.nextElementSibling, queue);
+  assert.ok(overview.querySelector('[data-assignment-summary]'));
+  assert.ok(overview.querySelector('[data-runtime-health]'));
+  assert.ok(overview.querySelector('[data-worker-slots]'));
+  assert.equal(document.querySelector('aside.batch-console__overview'), null);
+  assert.equal(overview.tagName, 'SECTION');
+  assert.equal(overview.getAttribute('aria-label'), '批次运行概览');
+});
+
+test('worker slots remain accessible in the queue-first overview', () => {
+  const document = consoleDocument();
+  const view = createBatchConsoleView(document, consoleHandlers());
+  const snapshot = runningSnapshotFixture();
+  Object.assign(snapshot.slots[0], {
+    profileLabel: '作者 A',
+    promotionSiteLabel: '产品 A'
+  });
+
+  view.render(snapshot);
+
+  const assignment = document.querySelector('[data-assignment-summary]');
+  const health = document.querySelector('[data-runtime-health]');
+  const slots = document.querySelector('[data-worker-slots]');
+  assert.equal(assignment.querySelector('h2').textContent, '当前批次分配');
+  assert.equal(health.querySelector('h2').textContent, '运行保障');
+  assert.equal(slots.querySelector('h2').textContent, 'worker 标签页槽位');
+  assert.match(assignment.textContent, /推广网站promo\.test/);
+  assert.match(slots.textContent, /槽位 1/);
+  assert.match(slots.textContent, /作者 A × 产品 A/);
+  assert.match(slots.textContent, /1 秒/);
+});
+
 test('renders a paused producer snapshot without hand-authored view fields', () => {
   const document = consoleDocument();
   const view = createBatchConsoleView(document, consoleHandlers());

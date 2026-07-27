@@ -80,7 +80,8 @@ function createHarness({
   );
   const listeners = {
     messages: [],
-    startup: []
+    startup: [],
+    removed: []
   };
   let nextCreatedTabId = 91;
   let clock = 1000;
@@ -149,6 +150,11 @@ function createHarness({
     }
   };
   const tabs = {
+    onRemoved: {
+      addListener(listener) {
+        listeners.removed.push(listener);
+      }
+    },
     async query() {
       return [...tabStore.values()].map((tab) => structuredClone(tab));
     },
@@ -348,6 +354,18 @@ function startMessage(count = 2) {
       concurrency: 2
     }
   };
+}
+
+async function startActiveWorker(harness, count = 2) {
+  await harness.controller.handleMessage(startMessage(count));
+  await harness.controller.handleMessage({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 11,
+    windowId: 21
+  });
 }
 
 async function assignmentStartMessage() {
@@ -705,6 +723,178 @@ test('returns the checkpoint updated by a task phase command', async () => {
   assert.equal(response.checkpoint.tasks['0'].phase, 'generating');
 });
 
+test('removed worker tab terminalizes exact durable ownership before clearing its journal', async () => {
+  const harness = createHarness();
+  await startActiveWorker(harness);
+  harness.operationLog.length = 0;
+
+  const response = await harness.controller.handleWorkerTabRemoved(11);
+
+  assert.equal(response.ok, true);
+  assert.equal(response.changed, true);
+  assert.deepEqual(response.removal, {
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 11
+  });
+  assert.equal(response.checkpoint.tasks['0'].state, 'terminal');
+  assert.equal(response.checkpoint.results[0].result, 'fail');
+  assert.equal(response.checkpoint.tasks['1'].state, 'queued');
+  assert.equal(response.checkpoint.tasks['0'].tabId, null);
+  assert.equal(
+    Object.hasOwn(
+      harness.sessionData,
+      'batchWorkerOwnershipV1:batch-1:0:1'
+    ),
+    false
+  );
+  assert.deepEqual(
+    harness.operationLog.map(([operation]) => operation),
+    ['persist', 'session-remove']
+  );
+});
+
+test('reloaded controller persists removed worker tab despite wake-lock failure', async () => {
+  const harness = createHarness();
+  await startActiveWorker(harness);
+  const reloadedController = createBatchRuntimeController({
+    storageArea: harness.chrome.storage.local,
+    sessionJournal: createBatchSessionJournal(
+      harness.chrome.storage.session
+    ),
+    power: {
+      requestKeepAwake() {
+        throw new Error('power unavailable');
+      },
+      releaseKeepAwake() {}
+    },
+    tabs: harness.chrome.tabs,
+    runtime: harness.chrome.runtime
+  });
+
+  const response = await reloadedController.handleWorkerTabRemoved(11);
+
+  assert.equal(response.ok, true);
+  assert.equal(response.changed, true);
+  assert.equal(response.checkpoint.tasks['0'].state, 'terminal');
+  assert.equal(
+    harness.data.batchRuntimeCheckpoint.tasks['0'].state,
+    'terminal'
+  );
+  assert.equal(
+    Object.hasOwn(
+      harness.sessionData,
+      'batchWorkerOwnershipV1:batch-1:0:1'
+    ),
+    false
+  );
+});
+
+test('removed worker tab during submission becomes manual-required', async () => {
+  const harness = createHarness();
+  await startActiveWorker(harness);
+  await harness.controller.handleMessage({
+    type: 'BATCH_TASK_SUBMITTING',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1
+  }, {
+    id: 'extension-id',
+    tab: { id: 11, windowId: 21 }
+  });
+
+  const response = await harness.controller.handleWorkerTabRemoved(11);
+
+  assert.equal(response.ok, true);
+  assert.equal(response.changed, true);
+  assert.equal(response.checkpoint.results[0].result, 'manual_required');
+  assert.equal(
+    response.checkpoint.results[0].errorCode,
+    'submission_uncertain'
+  );
+});
+
+test('duplicate worker removal is idempotent', async () => {
+  const harness = createHarness();
+  await startActiveWorker(harness);
+
+  await harness.controller.handleWorkerTabRemoved(11);
+  const response = await harness.controller.handleWorkerTabRemoved(11);
+
+  assert.equal(response.ok, true);
+  assert.equal(response.changed, false);
+  assert.equal(response.checkpoint.results.length, 1);
+});
+
+test('unrelated removed tab leaves durable ownership unchanged', async () => {
+  const harness = createHarness();
+  await startActiveWorker(harness);
+
+  const response = await harness.controller.handleWorkerTabRemoved(999);
+
+  assert.equal(response.ok, true);
+  assert.equal(response.changed, false);
+  assert.equal(response.checkpoint.tasks['0'].state, 'active');
+  assert.equal(response.checkpoint.tasks['0'].tabId, 11);
+  assert.equal(response.checkpoint.results.length, 0);
+});
+
+test('removed worker tab converges an ownership-unverified tab-missing race', async () => {
+  const harness = createHarness();
+  await startActiveWorker(harness);
+  harness.tabStore.delete(11);
+  const pageResponse = await harness.controller.markTerminal({
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    result: 'fail',
+    errorCode: 'task_failed',
+    errorMessage: '用户关闭了自动 worker 标签页'
+  });
+  assert.equal(pageResponse.error, 'batch_ownership_unverified');
+  assert.equal(pageResponse.checkpoint.status, 'paused_recovery');
+  assert.equal(
+    pageResponse.checkpoint.recoveryCleanup.reason,
+    'ownership_unverified'
+  );
+  assert.equal(
+    pageResponse.checkpoint.recoveryCleanup.diagnostic,
+    'tab_missing'
+  );
+
+  const racedResponse = await harness.controller.handleWorkerTabRemoved(11);
+
+  assert.equal(racedResponse.ok, true);
+  assert.equal(racedResponse.changed, true);
+  assert.equal(racedResponse.checkpoint.tasks['0'].state, 'terminal');
+  assert.equal(racedResponse.checkpoint.status, 'running');
+  assert.equal(
+    Object.hasOwn(racedResponse.checkpoint, 'recoveryCleanup'),
+    false
+  );
+});
+
+test('removed worker tab does not converge a different paused recovery marker', async () => {
+  const harness = createHarness();
+  await startActiveWorker(harness);
+  harness.data.batchRuntimeCheckpoint.status = 'paused_recovery';
+  harness.data.batchRuntimeCheckpoint.recoveryCleanup = {
+    reason: 'ownership_unverified',
+    diagnostic: 'tab_lookup_failed',
+    updatedAt: 2000
+  };
+
+  const response = await harness.controller.handleWorkerTabRemoved(11);
+
+  assert.equal(response.ok, true);
+  assert.equal(response.changed, false);
+  assert.equal(response.checkpoint.status, 'paused_recovery');
+  assert.equal(response.checkpoint.tasks['0'].state, 'active');
+  assert.equal(response.checkpoint.tasks['0'].tabId, 11);
+  assert.equal(response.checkpoint.results.length, 0);
+});
+
 test('content task phase persists before a background-owned page broadcast', async () => {
   const harness = createHarness();
   installBatchRuntimeController(harness.chrome, harness.controller);
@@ -750,6 +940,50 @@ test('content task phase persists before a background-owned page broadcast', asy
     phase: 'generating',
     sourceTabId: 11
   }]);
+});
+
+test('installed removed-tab listener broadcasts removed worker checkpoint after persistence', async () => {
+  const harness = createHarness();
+  installBatchRuntimeController(harness.chrome, harness.controller);
+  await startActiveWorker(harness);
+  harness.operationLog.length = 0;
+  harness.chrome.runtime.sendMessage = async (message) => {
+    harness.operationLog.push(['broadcast']);
+    harness.broadcasts.push(structuredClone(message));
+  };
+
+  harness.listeners.removed[0](11);
+  await waitFor(
+    () => harness.broadcasts.length === 1,
+    'removed worker checkpoint broadcast'
+  );
+
+  const responseCheckpoint = harness.data.batchRuntimeCheckpoint;
+  assert.deepEqual(harness.broadcasts.at(-1), {
+    type: 'BATCH_WORKER_TAB_REMOVED',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 11,
+    checkpoint: responseCheckpoint
+  });
+  assert.ok(
+    harness.operationLog.findIndex(([name]) => name === 'persist') <
+    harness.operationLog.findIndex(([name]) => name === 'broadcast')
+  );
+});
+
+test('installed removed-tab listener does not broadcast unrelated tab removal', async () => {
+  const harness = createHarness();
+  installBatchRuntimeController(harness.chrome, harness.controller);
+  await startActiveWorker(harness);
+  harness.broadcasts.length = 0;
+
+  harness.listeners.removed[0](999);
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(harness.broadcasts, []);
 });
 
 test('task phase rejects page senders and mismatched content tabs', async () => {

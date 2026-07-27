@@ -582,6 +582,7 @@
 
 .batch-console__layout {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--app-space-4, 16px);
   align-items: start;
 }
@@ -592,6 +593,12 @@
 
 .batch-console__overview {
   display: grid;
+  gap: var(--app-space-3, 12px);
+}
+
+.batch-console__overview-summaries {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--app-space-3, 12px);
 }
 
@@ -636,6 +643,7 @@
 
 .batch-console__slots {
   display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
   gap: var(--app-space-2, 8px);
   margin: 0;
   padding: 0;
@@ -842,18 +850,6 @@
   white-space: pre-wrap;
 }
 
-@media (min-width: 1280px) {
-  .batch-console__layout {
-    grid-template-columns: 245px minmax(0, 1fr);
-  }
-}
-
-@media (min-width: 900px) and (max-width: 1279px) {
-  .batch-console__overview {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-}
-
 @media (max-width: 899px) {
   .batch-console__fixture-lab {
     grid-template-columns: minmax(0, 1fr);
@@ -870,6 +866,10 @@
 
   .batch-console__summary {
     grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .batch-console__overview-summaries {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .batch-console__toolbar {

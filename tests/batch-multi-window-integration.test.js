@@ -245,7 +245,8 @@ async function prepareWizardForStart(harness) {
 
 async function createProductionHarness(options = {}) {
   const {
-    createBatchRuntimeController
+    createBatchRuntimeController,
+    installBatchRuntimeController
   } = await import('../lib/batch-runtime-controller.mjs');
   const {
     createBatchSessionJournal
@@ -268,6 +269,7 @@ async function createProductionHarness(options = {}) {
   const tabsApi = createTabsApi();
   const runtimeMessages = [];
   const runtimePageListeners = new Set();
+  const backgroundBroadcasts = [];
   const manualCreateCalls = [];
   const manualCloseCalls = [];
   const exportCalls = [];
@@ -278,6 +280,20 @@ async function createProductionHarness(options = {}) {
   let nextOwnershipEpoch = 0;
   let currentTime = 3000;
   const runtimeNow = () => ++currentTime;
+  const backgroundRuntime = {
+    id: 'extension-id',
+    getURL(file) {
+      return `chrome-extension://extension-id/${file}`;
+    },
+    async sendMessage(message) {
+      backgroundBroadcasts.push(clone(message));
+      for (const listener of [...runtimePageListeners]) {
+        listener(clone(message));
+      }
+    },
+    onMessage: new FakeChromeEvent(),
+    onStartup: new FakeChromeEvent()
+  };
   const runtimeController = createBatchRuntimeController({
     storageArea: storageLocal,
     sessionJournal: createBatchSessionJournal(storageSession),
@@ -290,12 +306,7 @@ async function createProductionHarness(options = {}) {
       }
     },
     tabs: tabsApi,
-    runtime: {
-      id: 'extension-id',
-      getURL(file) {
-        return `chrome-extension://extension-id/${file}`;
-      }
-    },
+    runtime: backgroundRuntime,
     now: runtimeNow,
     generateOwnershipEpoch: () => `test-epoch-${++nextOwnershipEpoch}`,
     loadDomainConfig: async () => (
@@ -304,6 +315,25 @@ async function createProductionHarness(options = {}) {
     loadRecentSuccessUrls: async () => [],
     logger: { warn() {} }
   });
+  if (options.installBackgroundRuntime === true) {
+    const backgroundTabs = options.delayBackgroundRemoval === true
+      ? {
+          ...tabsApi,
+          onRemoved: {
+            addListener(listener) {
+              tabsApi.onRemoved.addListener((...args) => {
+                setImmediate(() => listener(...args));
+              });
+            },
+            removeListener() {}
+          }
+        }
+      : tabsApi;
+    installBatchRuntimeController({
+      tabs: backgroundTabs,
+      runtime: backgroundRuntime
+    }, runtimeController);
+  }
   const dom = new JSDOM(`<!doctype html>
     <html lang="zh-CN">
       <body class="batch-console-page">
@@ -478,12 +508,15 @@ async function createProductionHarness(options = {}) {
     storageSync,
     runtimeMessages,
     runtimePageListeners,
+    backgroundBroadcasts,
+    backgroundRuntime,
     manualCreateCalls,
     manualCloseCalls,
     exportCalls,
     draftWrites,
     powerCalls,
     navigateCalls,
+    runtimeController,
     bootPage: () => bootBatchPage(dom.window.document, dependencies),
     emitRuntime(message) {
       for (const listener of [...runtimePageListeners]) {
@@ -763,6 +796,93 @@ test('running console disables the new-batch preview entry and cannot open its w
   );
 });
 
+test('rejected new batch keeps active ownership selected and explains recovery', async (t) => {
+  const harness = await createProductionHarness();
+  const cleanupCheckpoint = clone(
+    harness.storageLocal.data.batchRuntimeCheckpoint
+  );
+  t.after(async () => {
+    harness.storageLocal.data.batchRuntimeCheckpoint = cleanupCheckpoint;
+    await harness.page.destroy();
+    harness.dom.window.close();
+  });
+  const activeCheckpoint = clone(cleanupCheckpoint);
+  activeCheckpoint.batchId = 'owned-batch';
+  activeCheckpoint.source.fileName = 'owned-targets.csv';
+  activeCheckpoint.tasks['0'] = {
+    ...activeCheckpoint.tasks['0'],
+    state: 'active',
+    phase: 'generating',
+    tabId: 901,
+    windowId: 42,
+    startedAt: 3_000
+  };
+  harness.storageLocal.data.batchRuntimeCheckpoint = activeCheckpoint;
+
+  await prepareWizardForStart(harness);
+  click(harness.document, '[data-action="wizard-start"]');
+  await waitFor(
+    () => /当前批次仍有活动任务，请继续处理或停止批次。/.test(
+      harness.document.body.textContent
+    ),
+    'ownership recovery guidance'
+  );
+
+  assert.doesNotMatch(
+    harness.document.body.textContent,
+    /batch_ownership_active/
+  );
+
+  assert.equal(
+    harness.document.querySelector('[data-batch-name]').textContent,
+    'owned-targets.csv'
+  );
+  assert.equal(
+    harness.document.querySelector('[data-batch-status]').textContent,
+    '已暂停，可恢复'
+  );
+  assert.equal(
+    harness.runtimeMessages.filter(
+      (message) => message.type === 'BATCH_SESSION_START'
+    ).length,
+    1
+  );
+  assert.equal(
+    harness.runtimeMessages.some(
+      (message) => message.type === 'BATCH_SESSION_CLEAR'
+    ),
+    false
+  );
+  const wizard = harness.document.querySelector('[data-batch-wizard]');
+  assert.equal(wizard.hasAttribute('open'), false);
+  const recoveryAlert = harness.document.querySelector(
+    '[data-runtime-error]'
+  );
+  assert.ok(recoveryAlert);
+  assert.equal(recoveryAlert.getAttribute('role'), 'alert');
+  assert.equal(harness.document.activeElement, recoveryAlert);
+  for (
+    let ancestor = recoveryAlert;
+    ancestor;
+    ancestor = ancestor.parentElement
+  ) {
+    assert.equal(ancestor.hasAttribute('inert'), false);
+    assert.notEqual(ancestor.getAttribute('aria-hidden'), 'true');
+  }
+  assert.equal(
+    harness.document.querySelector('[data-action="resume"]').disabled,
+    false
+  );
+  assert.equal(
+    harness.document.querySelector('[data-action="stop"]').disabled,
+    false
+  );
+  assert.equal(
+    harness.document.querySelector('[data-action="new-batch"]').disabled,
+    true
+  );
+});
+
 test('retry advances to attempt 2 and ignores an old attempt confirmation', async (t) => {
   const harness = await createProductionHarness({
     checkpoint: pausedCheckpoint({ manualFirst: true })
@@ -834,6 +954,181 @@ test('a success tab closes only after its history confirmation is durable', asyn
       )
     ),
     true
+  );
+});
+
+test('duplicate background removal cannot regress the active replacement checkpoint', async (t) => {
+  const checkpoint = pausedCheckpoint({ taskCount: 2, concurrency: 1 });
+  checkpoint.source.parsedUrls[0].url = 'https://target.test/target-0';
+  checkpoint.source.parsedUrls[1].url = 'https://target.test/target-1';
+  checkpoint.source.rows[0][1] = 'https://target.test/target-0';
+  checkpoint.source.rows[1][1] = 'https://target.test/target-1';
+  const harness = await createProductionHarness({
+    checkpoint,
+    installBackgroundRuntime: true
+  });
+  t.after(() => harness.page.destroy());
+  click(harness.document, '[data-action="resume"]');
+  await waitFor(
+    () => harness.storageLocal.data.batchRuntimeCheckpoint.tasks['0']
+      .state === 'active',
+    'first worker activity'
+  );
+  const firstTask = clone(
+    harness.storageLocal.data.batchRuntimeCheckpoint.tasks['0']
+  );
+  await harness.tabsApi.remove(firstTask.tabId);
+  await waitFor(
+    () => harness.backgroundBroadcasts.some(
+      ({ type }) => type === 'BATCH_WORKER_TAB_REMOVED'
+    ),
+    'background removal broadcast'
+  );
+  await waitFor(
+    () => harness.storageLocal.data.batchRuntimeCheckpoint.tasks['1']
+      .state === 'active',
+    'refilled worker activity'
+  );
+  const removalMessage = harness.backgroundBroadcasts.find(
+    ({ type }) => type === 'BATCH_WORKER_TAB_REMOVED'
+  );
+  await harness.backgroundRuntime.sendMessage(removalMessage);
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(
+    harness.storageLocal.data.batchRuntimeCheckpoint.tasks['0'].state,
+    'terminal'
+  );
+  assert.ok(harness.tabsApi.updateCalls.some(
+    ([, { url }]) => url.endsWith('/target-1')
+  ));
+  assert.equal(harness.tabsApi.updateCalls.filter(
+    ([, { url }]) => url.endsWith('/target-1')
+  ).length, 1);
+  assert.match(
+    harness.document.querySelector('[data-task-row="1"]').textContent,
+    /运行|加载|worker/
+  );
+  assert.doesNotMatch(
+    harness.document.querySelector('[data-task-row="1"]').textContent,
+    /排队/
+  );
+  assert.equal(
+    harness.document.querySelector('[data-runtime-error]'),
+    null
+  );
+});
+
+test('page-first worker removal adopts the delayed background repair and refills once', async (t) => {
+  const checkpoint = pausedCheckpoint({ taskCount: 2, concurrency: 1 });
+  checkpoint.source.parsedUrls[0].url = 'https://target.test/target-0';
+  checkpoint.source.parsedUrls[1].url = 'https://target.test/target-1';
+  checkpoint.source.rows[0][1] = 'https://target.test/target-0';
+  checkpoint.source.rows[1][1] = 'https://target.test/target-1';
+  const harness = await createProductionHarness({
+    checkpoint,
+    installBackgroundRuntime: true,
+    delayBackgroundRemoval: true
+  });
+  t.after(() => harness.page.destroy());
+  click(harness.document, '[data-action="resume"]');
+  await waitFor(
+    () => harness.storageLocal.data.batchRuntimeCheckpoint.tasks['0']
+      .state === 'active',
+    'first worker activity'
+  );
+  const firstTask = clone(
+    harness.storageLocal.data.batchRuntimeCheckpoint.tasks['0']
+  );
+
+  await harness.tabsApi.remove(firstTask.tabId);
+
+  await waitFor(
+    () => harness.storageLocal.data.batchRuntimeCheckpoint.tasks['0']
+      .state === 'terminal',
+    'background terminal repair'
+  );
+  await waitFor(
+    () => harness.storageLocal.data.batchRuntimeCheckpoint.tasks['1']
+      .state === 'active',
+    'one replacement worker'
+  );
+
+  assert.equal(
+    harness.storageLocal.data.batchRuntimeCheckpoint.status,
+    'running'
+  );
+  assert.equal(
+    harness.tabsApi.updateCalls.filter(
+      ([, { url }]) => url.endsWith('/target-0')
+    ).length,
+    1
+  );
+  assert.equal(
+    harness.tabsApi.updateCalls.filter(
+      ([, { url }]) => url.endsWith('/target-1')
+    ).length,
+    1
+  );
+  assert.equal(
+    harness.storageLocal.data.batchRuntimeCheckpoint.results.filter(
+      ({ originalIndex, attempt }) => originalIndex === 0 && attempt === 1
+    ).length,
+    1
+  );
+  assert.equal(
+    harness.document.querySelector('[data-runtime-error]'),
+    null
+  );
+});
+
+test('rejected removal cannot replace a live task with a different frozen profile', async (t) => {
+  const harness = await createProductionHarness({
+    checkpoint: null,
+    createBatchId: () => 'frozen-profile-batch'
+  });
+  t.after(() => harness.page.destroy());
+  await prepareWizardForStart(harness);
+  click(harness.document, '[data-action="wizard-start"]');
+  await waitFor(
+    () => harness.storageLocal.data.batchRuntimeCheckpoint?.tasks?.['0']
+      ?.state === 'active',
+    'active frozen-profile task'
+  );
+  const current = clone(
+    harness.storageLocal.data.batchRuntimeCheckpoint
+  );
+  const activeTask = current.tasks['0'];
+  const rejectedCheckpoint = clone(current);
+  rejectedCheckpoint.updatedAt = current.updatedAt + 100;
+  Object.assign(rejectedCheckpoint.tasks['0'], {
+    state: 'terminal',
+    phase: null,
+    tabId: null,
+    windowId: null,
+    startedAt: null,
+    profileId: 'forged-profile'
+  });
+
+  harness.emitRuntime({
+    type: 'BATCH_WORKER_TAB_REMOVED',
+    batchId: current.batchId,
+    urlIndex: 0,
+    attempt: activeTask.attempt,
+    tabId: activeTask.tabId,
+    checkpoint: rejectedCheckpoint
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.match(
+    harness.document.querySelector('[data-task-row="0"]').textContent,
+    /运行|加载|worker/
+  );
+  assert.equal(
+    harness.storageLocal.data.batchRuntimeCheckpoint.tasks['0'].profileId,
+    activeTask.profileId
   );
 });
 
