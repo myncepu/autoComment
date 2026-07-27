@@ -43,6 +43,22 @@ test('serves the same fixture from the root path and rejects unknown paths', asy
   });
 });
 
+test('serves the ordinary config bundle fixture and its production modules', async (t) => {
+  await withFixtureServer(t, async (origin) => {
+    for (const fixturePath of [
+      '/options-config-bundle/',
+      '/tests/fixtures/options-config-bundle-app.mjs',
+      '/lib/options-config-bundle-view.mjs',
+      '/lib/options-config-bundle-controller.mjs',
+      '/lib/config-bundle.mjs'
+    ]) {
+      const response = await fetch(`${origin}${fixturePath}`);
+      assert.equal(response.status, 200, fixturePath);
+    }
+    assert.equal((await fetch(`${origin}/favicon.ico`)).status, 204);
+  });
+});
+
 test('local submit handler prevents navigation and writes only the success state', () => {
   let submitHandler;
   const result = { textContent: '' };

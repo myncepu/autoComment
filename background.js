@@ -20,6 +20,9 @@ import {
 } from './lib/batch-runtime-controller.mjs';
 import { createDomainConfigRepository } from './lib/domain-config-repository.mjs';
 import {
+  installDomainConfigRepositoryMessageListener
+} from './lib/domain-config-repository-message.mjs';
+import {
   installBatchDomainConfigListener
 } from './lib/batch-domain-config-listener.mjs';
 import { createProfileSecretRepository } from './lib/profile-secret-repository.mjs';
@@ -113,6 +116,11 @@ const domainConfigReady = (async () => {
     secretRepository: profileSecretRepository
   });
 })();
+installDomainConfigRepositoryMessageListener(
+  chrome,
+  domainConfigRepository,
+  { ready: domainConfigReady }
+);
 installProfileSecretMessageListener(
   chrome,
   profileSecretRepository,

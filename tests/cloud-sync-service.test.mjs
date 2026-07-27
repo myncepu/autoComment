@@ -410,6 +410,17 @@ function createDomainConfigFixture({ replaceError, initialValue } = {}) {
       replacements.push(structuredClone(next));
       value = { ...structuredClone(next), revision: value.revision + 1 };
       return structuredClone(value);
+    },
+    async replaceIfRevision(expectedRevision, next) {
+      if (replaceError) throw replaceError;
+      if (value.revision !== expectedRevision) {
+        const error = new Error('stale_domain_config_revision');
+        error.code = 'stale_domain_config_revision';
+        throw error;
+      }
+      replacements.push(structuredClone(next));
+      value = { ...structuredClone(next), revision: value.revision + 1 };
+      return structuredClone(value);
     }
   };
 }
@@ -595,6 +606,95 @@ test('does not advance the v2 cursor when the domain replacement fails', async (
     repository.meta.has('serverCursor:v2:AAAAAAAAAAAAAAAAAAAAAA'),
     false
   );
+});
+
+test('does not overwrite an options write that lands before a remote domain replace', async () => {
+  const repository = createSyncRepository();
+  repository.meta.set(
+    'domainBootstrapVersion:AAAAAAAAAAAAAAAAAAAAAA',
+    2
+  );
+  repository.meta.set(
+    'initialDomainConfigVersion:AAAAAAAAAAAAAAAAAAAAAA',
+    2
+  );
+  let value = await createDomainConfigFixture().load();
+  let injected = false;
+  function injectOptionsWrite() {
+    if (injected) return;
+    injected = true;
+    value = {
+      ...structuredClone(value),
+      revision: value.revision + 1,
+      profiles: [{
+        id: 'profile-options',
+        displayName: 'Options Profile',
+        name: 'Options User',
+        email: 'options@example.test',
+        createdAt: 100,
+        updatedAt: 100
+      }]
+    };
+  }
+  const domainConfigRepository = {
+    async load() {
+      return structuredClone(value);
+    },
+    async replace(next) {
+      injectOptionsWrite();
+      value = { ...structuredClone(next), revision: value.revision + 1 };
+      return structuredClone(value);
+    },
+    async replaceIfRevision(expectedRevision, next) {
+      injectOptionsWrite();
+      if (value.revision !== expectedRevision) {
+        const error = new Error('stale_domain_config_revision');
+        error.code = 'stale_domain_config_revision';
+        throw error;
+      }
+      value = { ...structuredClone(next), revision: value.revision + 1 };
+      return structuredClone(value);
+    }
+  };
+  const service = createCloudSyncService({
+    repository,
+    domainConfigRepository,
+    storageLocal: createCredentialStorage(),
+    settings: createSettingsFixture(),
+    transportFactory: () => ({
+      async status() {
+        return {
+          protocolVersion: 2,
+          capabilities: ['domain_config_entities_v2']
+        };
+      },
+      async pull() {
+        return {
+          changes: [{
+            serverSeq: 1,
+            entityType: 'profile',
+            entityId: 'profile-a',
+            operation: 'upsert',
+            payload: makeDomainMutation().payload
+          }],
+          nextCursor: 1,
+          highWatermark: 1,
+          hasMore: false
+        };
+      }
+    }),
+    now: () => 500
+  });
+
+  await assert.rejects(
+    service.runOnce('manual'),
+    (error) => error.code === 'stale_domain_config_revision'
+  );
+  assert.deepEqual(
+    (await domainConfigRepository.load()).profiles.map(({ id }) => id),
+    ['profile-options']
+  );
+  assert.equal(repository.appliedPages.length, 0);
 });
 
 test('imports v2 domain bootstrap entities before starting the v2 delta cursor', async () => {
