@@ -70,7 +70,8 @@ test('loads and saves only the explicit portable sync keys', async () => {
     },
     show_export_outlinks_floating_button: true
   });
-  const adapter = createSafeOptionsSettingsAdapter(storage);
+  const permissions = createPermissions({ contains: true });
+  const adapter = createSafeOptionsSettingsAdapter(storage, { permissions });
 
   const loaded = await adapter.load();
   assert.doesNotMatch(JSON.stringify(loaded), /must-not-read/);
@@ -84,6 +85,9 @@ test('loads and saves only the explicit portable sync keys', async () => {
   ]]);
 
   await adapter.save(loaded);
+  assert.deepEqual(permissions.calls, [
+    ['contains', { origins: ['https://openrouter.ai/*'] }]
+  ]);
   assert.deepEqual(storage.writes, [{
     llm_api_base_url: 'https://openrouter.ai/api/v1',
     llm_model: 'qwen/qwen-plus',
@@ -197,16 +201,34 @@ test('permission service failure is sanitized and leaves settings unchanged', as
   assert.deepEqual(storage.writes, []);
 });
 
-test('an unchanged effective LLM Base URL saves without a permission prompt', async () => {
+test('an unchanged custom LLM Base URL requests its missing permission', async () => {
   const storage = createStorageArea({
     llm_api_base_url: 'https://models.example/v1'
   });
-  const permissions = createPermissions();
+  const permissions = createPermissions({ granted: true });
   const adapter = createSafeOptionsSettingsAdapter(storage, { permissions });
 
   await adapter.save(portableSettings('https://models.example/v1'));
 
-  assert.deepEqual(permissions.calls, []);
+  assert.deepEqual(permissions.calls, [
+    ['contains', { origins: ['https://models.example/*'] }],
+    ['request', { origins: ['https://models.example/*'] }]
+  ]);
+  assert.equal(storage.writes.length, 1);
+});
+
+test('an unchanged authorized LLM Base URL checks without prompting', async () => {
+  const storage = createStorageArea({
+    llm_api_base_url: 'https://models.example/v1'
+  });
+  const permissions = createPermissions({ contains: true });
+  const adapter = createSafeOptionsSettingsAdapter(storage, { permissions });
+
+  await adapter.save(portableSettings('https://models.example/v1'));
+
+  assert.deepEqual(permissions.calls, [
+    ['contains', { origins: ['https://models.example/*'] }]
+  ]);
   assert.equal(storage.writes.length, 1);
 });
 

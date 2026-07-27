@@ -246,7 +246,7 @@ test('restores domain content when public settings save fails', async () => {
 
 test('permission denial rolls back domain apply and leaves portable settings unchanged', async () => {
   const stored = {
-    llm_api_base_url: 'https://openrouter.ai/api/v1',
+    llm_api_base_url: 'https://api.example/v1',
     llm_model: 'qwen/qwen-plus',
     batch_concurrency: 2
   };

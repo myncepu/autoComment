@@ -94,7 +94,7 @@ constant.
 
 | Command | Result |
 | --- | --- |
-| `npm test` | PASS — 931/931 |
+| `npm test` | PASS — 932/932 |
 | `npm run test:sync-worker` | PASS — 99/99 across 7 files |
 | `npm run typecheck:sync-worker` | PASS |
 | `npm --prefix cloudflare-sync run deploy:dry` | PASS — Wrangler 4.114.0 dry run |
