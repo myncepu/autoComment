@@ -12,8 +12,8 @@ import {
 import { bootAppShell } from './lib/app-shell.mjs';
 import { focusOptionsSection } from './lib/options-section-navigation.mjs';
 import {
-  createDomainConfigRepository
-} from './lib/domain-config-repository.mjs';
+  createDomainConfigRepositoryClient
+} from './lib/domain-config-repository-message.mjs';
 import {
   createProfileSecretClient
 } from './lib/profile-secret-message-listener.mjs';
@@ -123,7 +123,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     setTimeout(() => target.classList.remove('visible'), timeout);
   }
 
-  const configRepository = createDomainConfigRepository(chrome.storage.local);
+  const configRepository = createDomainConfigRepositoryClient(chrome.runtime);
   const secretRepository = createProfileSecretClient(chrome.runtime);
   const controller = createDomainConfigOptionsController({
     configRepository,

@@ -51,3 +51,18 @@ test('options composition uses a restricted background secret client and never w
   assert.match(source, /controller\.previewImport/);
   assert.match(source, /controller\.applyImport/);
 });
+
+test('production composition routes options domain writes to the background repository', () => {
+  const optionsSource = fs.readFileSync(new URL('options.js', root), 'utf8');
+  const backgroundSource = fs.readFileSync(new URL('background.js', root), 'utf8');
+
+  assert.match(
+    optionsSource,
+    /createDomainConfigRepositoryClient\(chrome\.runtime\)/
+  );
+  assert.doesNotMatch(optionsSource, /createDomainConfigRepository\(/);
+  assert.match(
+    backgroundSource,
+    /installDomainConfigRepositoryMessageListener\([\s\S]*domainConfigRepository[\s\S]*ready:\s*domainConfigReady/
+  );
+});
