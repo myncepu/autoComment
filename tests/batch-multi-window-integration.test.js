@@ -484,6 +484,7 @@ async function createProductionHarness(options = {}) {
     draftWrites,
     powerCalls,
     navigateCalls,
+    runtimeController,
     bootPage: () => bootBatchPage(dom.window.document, dependencies),
     emitRuntime(message) {
       for (const listener of [...runtimePageListeners]) {
@@ -834,6 +835,52 @@ test('a success tab closes only after its history confirmation is durable', asyn
       )
     ),
     true
+  );
+});
+
+test('trusted removed-tab checkpoint refills the next production worker slot', async (t) => {
+  const checkpoint = pausedCheckpoint({ taskCount: 2, concurrency: 1 });
+  checkpoint.source.parsedUrls[0].url = 'https://target.test/target-0';
+  checkpoint.source.parsedUrls[1].url = 'https://target.test/target-1';
+  checkpoint.source.rows[0][1] = 'https://target.test/target-0';
+  checkpoint.source.rows[1][1] = 'https://target.test/target-1';
+  const harness = await createProductionHarness({ checkpoint });
+  t.after(() => harness.page.destroy());
+  click(harness.document, '[data-action="resume"]');
+  await waitFor(
+    () => harness.storageLocal.data.batchRuntimeCheckpoint.tasks['0']
+      .state === 'active',
+    'first worker activity'
+  );
+  const firstTask = clone(
+    harness.storageLocal.data.batchRuntimeCheckpoint.tasks['0']
+  );
+  harness.tabsApi.tabs.delete(firstTask.tabId);
+
+  const response = await harness.runtimeController.handleWorkerTabRemoved(
+    firstTask.tabId
+  );
+  harness.emitRuntime({
+    type: 'BATCH_WORKER_TAB_REMOVED',
+    ...response.removal,
+    checkpoint: response.checkpoint
+  });
+  await waitFor(
+    () => harness.storageLocal.data.batchRuntimeCheckpoint.tasks['1']
+      .state === 'active',
+    'refilled worker activity'
+  );
+
+  assert.equal(
+    harness.storageLocal.data.batchRuntimeCheckpoint.tasks['0'].state,
+    'terminal'
+  );
+  assert.ok(harness.tabsApi.updateCalls.some(
+    ([, { url }]) => url.endsWith('/target-1')
+  ));
+  assert.equal(
+    harness.document.querySelector('[data-runtime-error]'),
+    null
   );
 });
 

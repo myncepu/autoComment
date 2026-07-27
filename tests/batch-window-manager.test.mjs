@@ -325,6 +325,29 @@ test('transient tab removal failure retains mappings and a later close remains u
   assert.deepEqual(unexpected, [activity]);
 });
 
+test('forgetRemoved drops an already-removed activity without closing or reporting it', async () => {
+  const tabsApi = createFakeTabsApi();
+  const unexpectedCloseCalls = [];
+  const manager = new BatchTabManager({
+    tabsApi,
+    windowId: 10,
+    onUnexpectedClose: (activity) => unexpectedCloseCalls.push(activity)
+  });
+  const activity = await manager.create({
+    batchId: 'batch-a',
+    urlIndex: 0,
+    attempt: 1,
+    url: 'https://a.test'
+  });
+
+  assert.equal(manager.forgetRemoved(activity.tabId), activity);
+  assert.equal(manager.getByIndex(activity.urlIndex), null);
+  assert.equal(manager.getByTabId(activity.tabId), null);
+  assert.equal(manager.forgetRemoved(activity.tabId), null);
+  assert.equal(unexpectedCloseCalls.length, 0);
+  assert.deepEqual(tabsApi.removeCalls, []);
+});
+
 test('focus activates only the requested worker tab', async () => {
   const tabsApi = createFakeTabsApi();
   const manager = new BatchTabManager({ tabsApi, windowId: 10 });

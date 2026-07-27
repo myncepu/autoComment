@@ -235,6 +235,67 @@ test('routes runtime requests and accepts only own-extension page events', async
   assert.equal(harness.runtimeOnMessage.listeners.size, 0);
 });
 
+test('accepts removed worker checkpoint only from trusted background and scrubs secrets', () => {
+  const harness = createChromeHarness();
+  const dependencies = createChromeBatchDependencies(harness.chromeApi);
+  const received = [];
+  dependencies.subscribeRuntimeMessages(
+    (message) => received.push(structuredClone(message))
+  );
+  const message = {
+    type: 'BATCH_WORKER_TAB_REMOVED',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 501,
+    checkpoint: {
+      version: 3,
+      batchId: 'batch-1',
+      status: 'running',
+      tasks: {
+        0: {
+          urlIndex: 0,
+          attempt: 1,
+          state: 'terminal',
+          profileId: 'profile-a',
+          apiKey: 'must-not-reach-page'
+        }
+      }
+    }
+  };
+
+  harness.runtimeOnMessage.emit(message, {
+    id: 'extension-id',
+    tab: { id: 501 },
+    url: 'https://target.test/post'
+  });
+  harness.runtimeOnMessage.emit(message, {
+    id: 'extension-id',
+    url: 'chrome-extension://extension-id/background.js'
+  });
+
+  assert.deepEqual(received, [{
+    type: 'BATCH_WORKER_TAB_REMOVED',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 501,
+    checkpoint: {
+      version: 3,
+      batchId: 'batch-1',
+      status: 'running',
+      tasks: {
+        0: {
+          urlIndex: 0,
+          attempt: 1,
+          state: 'terminal',
+          profileId: 'profile-a'
+        }
+      }
+    }
+  }]);
+});
+
 test('worker tab adapter requests an already-checkpointed background tab without trusting page details', async () => {
   const harness = createChromeHarness();
   const dependencies = createChromeBatchDependencies(harness.chromeApi);

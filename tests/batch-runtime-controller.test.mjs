@@ -80,7 +80,8 @@ function createHarness({
   );
   const listeners = {
     messages: [],
-    startup: []
+    startup: [],
+    removed: []
   };
   let nextCreatedTabId = 91;
   let clock = 1000;
@@ -149,6 +150,11 @@ function createHarness({
     }
   };
   const tabs = {
+    onRemoved: {
+      addListener(listener) {
+        listeners.removed.push(listener);
+      }
+    },
     async query() {
       return [...tabStore.values()].map((tab) => structuredClone(tab));
     },
@@ -934,6 +940,50 @@ test('content task phase persists before a background-owned page broadcast', asy
     phase: 'generating',
     sourceTabId: 11
   }]);
+});
+
+test('installed removed-tab listener broadcasts removed worker checkpoint after persistence', async () => {
+  const harness = createHarness();
+  installBatchRuntimeController(harness.chrome, harness.controller);
+  await startActiveWorker(harness);
+  harness.operationLog.length = 0;
+  harness.chrome.runtime.sendMessage = async (message) => {
+    harness.operationLog.push(['broadcast']);
+    harness.broadcasts.push(structuredClone(message));
+  };
+
+  harness.listeners.removed[0](11);
+  await waitFor(
+    () => harness.broadcasts.length === 1,
+    'removed worker checkpoint broadcast'
+  );
+
+  const responseCheckpoint = harness.data.batchRuntimeCheckpoint;
+  assert.deepEqual(harness.broadcasts.at(-1), {
+    type: 'BATCH_WORKER_TAB_REMOVED',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 11,
+    checkpoint: responseCheckpoint
+  });
+  assert.ok(
+    harness.operationLog.findIndex(([name]) => name === 'persist') <
+    harness.operationLog.findIndex(([name]) => name === 'broadcast')
+  );
+});
+
+test('installed removed-tab listener does not broadcast unrelated tab removal', async () => {
+  const harness = createHarness();
+  installBatchRuntimeController(harness.chrome, harness.controller);
+  await startActiveWorker(harness);
+  harness.broadcasts.length = 0;
+
+  harness.listeners.removed[0](999);
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(harness.broadcasts, []);
 });
 
 test('task phase rejects page senders and mismatched content tabs', async () => {
