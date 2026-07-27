@@ -749,6 +749,42 @@ test('removed worker tab terminalizes exact durable ownership before clearing it
   );
 });
 
+test('reloaded controller persists removed worker tab despite wake-lock failure', async () => {
+  const harness = createHarness();
+  await startActiveWorker(harness);
+  const reloadedController = createBatchRuntimeController({
+    storageArea: harness.chrome.storage.local,
+    sessionJournal: createBatchSessionJournal(
+      harness.chrome.storage.session
+    ),
+    power: {
+      requestKeepAwake() {
+        throw new Error('power unavailable');
+      },
+      releaseKeepAwake() {}
+    },
+    tabs: harness.chrome.tabs,
+    runtime: harness.chrome.runtime
+  });
+
+  const response = await reloadedController.handleWorkerTabRemoved(11);
+
+  assert.equal(response.ok, true);
+  assert.equal(response.changed, true);
+  assert.equal(response.checkpoint.tasks['0'].state, 'terminal');
+  assert.equal(
+    harness.data.batchRuntimeCheckpoint.tasks['0'].state,
+    'terminal'
+  );
+  assert.equal(
+    Object.hasOwn(
+      harness.sessionData,
+      'batchWorkerOwnershipV1:batch-1:0:1'
+    ),
+    false
+  );
+});
+
 test('removed worker tab during submission becomes manual-required', async () => {
   const harness = createHarness();
   await startActiveWorker(harness);
