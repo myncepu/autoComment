@@ -235,7 +235,7 @@ test('routes runtime requests and accepts only own-extension page events', async
   assert.equal(harness.runtimeOnMessage.listeners.size, 0);
 });
 
-test('accepts removed worker checkpoint only from trusted background and scrubs secrets', () => {
+test('accepts removed worker checkpoint from MV3 background with or without sender URL and scrubs secrets', () => {
   const harness = createChromeHarness();
   const dependencies = createChromeBatchDependencies(harness.chromeApi);
   const received = [];
@@ -277,7 +277,7 @@ test('accepts removed worker checkpoint only from trusted background and scrubs 
     url: 'chrome-extension://extension-id/background.js'
   });
 
-  assert.deepEqual(received, [{
+  const expectedMessage = {
     type: 'BATCH_WORKER_TAB_REMOVED',
     batchId: 'batch-1',
     urlIndex: 0,
@@ -296,7 +296,8 @@ test('accepts removed worker checkpoint only from trusted background and scrubs 
         }
       }
     }
-  }]);
+  };
+  assert.deepEqual(received, [expectedMessage, expectedMessage]);
 });
 
 test('worker tab adapter requests an already-checkpointed background tab without trusting page details', async () => {
