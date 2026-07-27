@@ -228,15 +228,17 @@
             <span class="settings-card-title settings-card-title-warning">配置备份与恢复</span>
           </div>
           <div class="hint backup-hint">
-            - 每次重新部署扩展后，配置会重置。请使用"导出配置"将当前设置保存为文件。
+            配置包包含 Profile、推广网站、分配策略、非敏感模型设置和批处理默认值；
+            API Key、Profile 密码与云同步密钥不会导出。
           </div>
           <div class="backup-actions">
-            <button id="exportConfigBtn" class="btn btn-secondary">导出配置</button>
-            <button id="importConfigBtn" class="btn btn-secondary">导入配置</button>
+            <button id="exportConfigBtn" class="btn btn-secondary" type="button">导出配置</button>
+            <button id="importConfigBtn" class="btn btn-secondary" type="button">导入配置</button>
             <input type="file" id="importConfigFileInput" class="visually-hidden-file" accept=".json" />
             <button id="applyImportConfigBtn" class="btn btn-primary" type="button" hidden>确认应用导入</button>
-            <span id="importExportStatus" class="status status-warning"></span>
+            <span id="importExportStatus" class="status status-warning" role="status" aria-live="polite"></span>
           </div>
+          <div id="importPreviewSummary" class="hint" role="status" aria-live="polite" hidden></div>
         </div>
       </section>
     </div>

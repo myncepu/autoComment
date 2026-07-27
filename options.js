@@ -20,6 +20,15 @@ import {
 import {
   createDomainConfigOptionsController
 } from './lib/domain-config-options-controller.mjs';
+import {
+  createOptionsConfigBundleController
+} from './lib/options-config-bundle-controller.mjs';
+import {
+  createSafeOptionsSettingsAdapter
+} from './lib/options-safe-settings-adapter.mjs';
+import {
+  createOptionsConfigBundleView
+} from './lib/options-config-bundle-view.mjs';
 
 const SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY =
   'show_export_outlinks_floating_button';
@@ -107,6 +116,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     'importConfigFileInput',
     'applyImportConfigBtn',
     'importExportStatus',
+    'importPreviewSummary',
     'openBatchBtn',
     'openHistoryBtn',
     'toggleExportOutlinksFloatingBtn'
@@ -125,15 +135,21 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const configRepository = createDomainConfigRepositoryClient(chrome.runtime);
   const secretRepository = createProfileSecretClient(chrome.runtime);
-  const controller = createDomainConfigOptionsController({
+  const domainController = createDomainConfigOptionsController({
     configRepository,
     secretRepository
   });
-  let snapshot = await controller.snapshot();
+  const safeSettingsAdapter =
+    createSafeOptionsSettingsAdapter(chrome.storage.sync);
+  const bundleController = createOptionsConfigBundleController({
+    configRepository,
+    domainController,
+    settingsAdapter: safeSettingsAdapter
+  });
+  let snapshot = await domainController.snapshot();
   let editingProfileId = snapshot.profiles[0]?.id ?? null;
   let editingSiteId = snapshot.promotionSites[0]?.id ?? null;
   let editingPairId = snapshot.pairs[0]?.id ?? null;
-  let pendingImportPreview = null;
 
   function replaceOptions(select, items, selectedId, label) {
     select.replaceChildren();
@@ -299,33 +315,33 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
       const profileId = editingProfileId || generatedId('profile');
       editingProfileId = profileId;
-      await controller.saveProfile({
+      await domainController.saveProfile({
         id: profileId,
         displayName,
         name,
         email
       });
       if (ui.userPassword.value !== '') {
-        await controller.savePassword(
+        await domainController.savePassword(
           editingProfileId,
           ui.userPassword.value
         );
       }
-      return controller.snapshot();
+      return domainController.snapshot();
     },
     'Profile 已保存'
   ));
   ui.clearPasswordBtn.addEventListener('click', () => runConfigCommand(
     async () => {
-      await controller.clearPassword(editingProfileId);
-      return controller.snapshot();
+      await domainController.clearPassword(editingProfileId);
+      return domainController.snapshot();
     },
     '密码已清除'
   ));
   ui.deleteProfileBtn.addEventListener('click', () => {
     if (!confirm('确认删除此 Profile？已被 Pair 使用时不会删除。')) return;
     void runConfigCommand(
-      () => controller.deleteProfile(editingProfileId),
+      () => domainController.deleteProfile(editingProfileId),
       'Profile 已删除'
     );
   });
@@ -343,7 +359,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     () => {
       const siteId = editingSiteId || generatedId('site');
       editingSiteId = siteId;
-      return controller.savePromotionSite({
+      return domainController.savePromotionSite({
         id: siteId,
         name: ui.promotionSiteName.value.trim(),
         url: ui.websiteUrl.value.trim(),
@@ -358,7 +374,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
     void runConfigCommand(
-      () => controller.deletePromotionSite(editingSiteId),
+      () => domainController.deletePromotionSite(editingSiteId),
       'Promotion Site 已删除'
     );
   });
@@ -375,7 +391,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     () => {
       const pairId = editingPairId || generatedId('pair');
       editingPairId = pairId;
-      return controller.savePair({
+      return domainController.savePair({
         id: pairId,
         profileId: ui.pairProfileSelect.value,
         promotionSiteId: ui.pairPromotionSiteSelect.value,
@@ -388,12 +404,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   ui.deletePairBtn.addEventListener('click', () => {
     if (!confirm('确认删除此 Pair？')) return;
     void runConfigCommand(
-      () => controller.deletePair(editingPairId),
+      () => domainController.deletePair(editingPairId),
       'Pair 已删除'
     );
   });
   ui.savePolicyBtn.addEventListener('click', () => runConfigCommand(
-    () => controller.savePolicy({
+    () => domainController.savePolicy({
       defaultPairId: ui.defaultPairSelect.value || null,
       quotas: {
         batch: positiveInteger(ui.quotaBatch, '批次上限'),
@@ -410,70 +426,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     }),
     '分配策略已保存'
   ));
-
-  ui.exportConfigBtn.addEventListener('click', async () => {
-    try {
-      const exported = await controller.exportConfig();
-      downloadJson(
-        exported,
-        `autocomment-domain-config-${
-          new Date().toISOString().slice(0, 10)
-        }.json`
-      );
-      showStatus(ui.importExportStatus, '非敏感配置已导出');
-    } catch (error) {
-      showStatus(ui.importExportStatus, error.message, true);
-    }
-  });
-  ui.importConfigBtn.addEventListener(
-    'click',
-    () => ui.importConfigFileInput.click()
-  );
-  ui.importConfigFileInput.addEventListener('change', async () => {
-    const file = ui.importConfigFileInput.files?.[0];
-    ui.importConfigFileInput.value = '';
-    if (!file) return;
-    try {
-      const input = JSON.parse(await file.text());
-      pendingImportPreview = await controller.previewImport(input);
-      const conflictText = pendingImportPreview.conflicts
-        .map(({ code }) => code)
-        .join('、');
-      if (conflictText) {
-        ui.applyImportConfigBtn.hidden = true;
-        showStatus(
-          ui.importExportStatus,
-          `导入被阻止：${conflictText}`,
-          true,
-          6000
-        );
-        return;
-      }
-      ui.applyImportConfigBtn.hidden = false;
-      showStatus(
-        ui.importExportStatus,
-        `预览：新增 ${pendingImportPreview.creates.length}，更新 ${
-          pendingImportPreview.updates.length
-        }。请确认应用。`,
-        false,
-        8000
-      );
-    } catch (error) {
-      pendingImportPreview = null;
-      ui.applyImportConfigBtn.hidden = true;
-      showStatus(ui.importExportStatus, `导入失败：${error.message}`, true);
-    }
-  });
-  ui.applyImportConfigBtn.addEventListener('click', () => {
-    if (!pendingImportPreview) return;
-    const preview = pendingImportPreview;
-    pendingImportPreview = null;
-    ui.applyImportConfigBtn.hidden = true;
-    void runConfigCommand(
-      () => controller.applyImport(preview),
-      '导入已应用'
-    );
-  });
 
   const modelDependencies = {
     storage: chrome.storage,
@@ -530,6 +482,24 @@ document.addEventListener('DOMContentLoaded', async () => {
       [SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY]: showOutlinks
     });
     renderOutlinksToggle();
+  });
+
+  createOptionsConfigBundleView({
+    documentRef: document,
+    controller: bundleController,
+    downloadJson,
+    onApplied: async () => {
+      snapshot = await domainController.snapshot();
+      renderAll();
+      const importedSettings = await safeSettingsAdapter.load();
+      ui.llmApiBaseUrl.value =
+        importedSettings.llm.apiBaseUrl || DEFAULT_LLM_CONFIG.apiBaseUrl;
+      ui.llmModel.value =
+        importedSettings.llm.model || DEFAULT_LLM_CONFIG.model;
+      showOutlinks =
+        importedSettings.preferences.showExportOutlinksFloatingButton;
+      renderOutlinksToggle();
+    }
   });
 
   ui.openBatchBtn.addEventListener(
