@@ -1,428 +1,569 @@
 import {
   DEFAULT_LLM_CONFIG,
-  LLM_SYNC_KEYS,
   loadLlmConfig
 } from './lib/llm-config.mjs';
-import { saveOptionsModelConfig, testOptionsModelConfig } from './lib/llm-options-controller.mjs';
+import {
+  saveOptionsModelConfig,
+  testOptionsModelConfig
+} from './lib/llm-options-controller.mjs';
+import {
+  createCloudSyncOptionsController
+} from './lib/cloud-sync-options-controller.mjs';
+import { bootAppShell } from './lib/app-shell.mjs';
+import { focusOptionsSection } from './lib/options-section-navigation.mjs';
+import {
+  createDomainConfigRepository
+} from './lib/domain-config-repository.mjs';
+import {
+  createProfileSecretClient
+} from './lib/profile-secret-message-listener.mjs';
+import {
+  createDomainConfigOptionsController
+} from './lib/domain-config-options-controller.mjs';
 
-const LEGACY_SKILL_TEMPLATE_STORAGE_KEY = 'qwen_skill_template';
-const WEBSITE_URL_STORAGE_KEY = 'promotion_website_url';
-const WEBSITE_CONTENT_STORAGE_KEY = 'promotion_website_content';
-const USER_NAME_STORAGE_KEY = 'auto_fill_user_name';
-const USER_EMAIL_STORAGE_KEY = 'auto_fill_user_email';
-const USER_PASSWORD_STORAGE_KEY = 'auto_fill_user_password';
-const LEGACY_PROMPT_FIELD_VALUES_STORAGE_KEY = 'auto_fill_prompt_field_values';
-const SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY = 'show_export_outlinks_floating_button';
-const CONFIG_VERSION = 3;
+const SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY =
+  'show_export_outlinks_floating_button';
 
-const ACTIVE_STORAGE_KEYS = [
-  WEBSITE_URL_STORAGE_KEY,
-  WEBSITE_CONTENT_STORAGE_KEY,
-  USER_NAME_STORAGE_KEY,
-  USER_EMAIL_STORAGE_KEY,
-  USER_PASSWORD_STORAGE_KEY,
-  LLM_SYNC_KEYS.apiBaseUrl,
-  LLM_SYNC_KEYS.model,
-  SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY
-];
+function element(id) {
+  return document.getElementById(id);
+}
 
-const IMPORT_COMPAT_STORAGE_KEYS = [
-  ...ACTIVE_STORAGE_KEYS,
-  LEGACY_SKILL_TEMPLATE_STORAGE_KEY,
-  LEGACY_PROMPT_FIELD_VALUES_STORAGE_KEY
-];
+function generatedId(prefix) {
+  return `${prefix}-${crypto.randomUUID()}`;
+}
 
-const modelDependencies = {
-  storage: chrome.storage,
-  permissions: chrome.permissions,
-  runtime: chrome.runtime
-};
+function positiveInteger(input, label) {
+  const value = Number(input.value);
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`${label}必须是正整数`);
+  }
+  return value;
+}
+
+function downloadJson(value, fileName) {
+  const blob = new Blob([JSON.stringify(value, null, 2)], {
+    type: 'application/json'
+  });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
 
 document.addEventListener('DOMContentLoaded', async () => {
-  const websiteUrlInput = document.getElementById('websiteUrl');
-  const websiteContentInput = document.getElementById('websiteContent');
-  const userNameInput = document.getElementById('userName');
-  const userEmailInput = document.getElementById('userEmail');
-  const userPasswordInput = document.getElementById('userPassword');
-  const saveSettingsBtn = document.getElementById('saveSettingsBtn');
-  const settingsStatusEl = document.getElementById('settingsStatus');
-  const llmApiBaseUrlInput = document.getElementById('llmApiBaseUrl');
-  const llmApiKeyInput = document.getElementById('llmApiKey');
-  const llmModelInput = document.getElementById('llmModel');
-  const saveLlmConfigBtn = document.getElementById('saveLlmConfigBtn');
-  const testLlmConnectionBtn = document.getElementById('testLlmConnectionBtn');
-  const llmStatusEl = document.getElementById('llmStatus');
-  const exportConfigBtn = document.getElementById('exportConfigBtn');
-  const importConfigBtn = document.getElementById('importConfigBtn');
-  const importConfigFileInput = document.getElementById('importConfigFileInput');
-  const importExportStatus = document.getElementById('importExportStatus');
-  const openBatchBtn = document.getElementById('openBatchBtn');
-  const openHistoryBtn = document.getElementById('openHistoryBtn');
-  const toggleExportOutlinksFloatingBtn = document.getElementById('toggleExportOutlinksFloatingBtn');
+  bootAppShell(document, { currentUrl: window.location.href });
+  const focusCurrentSection = () => (
+    focusOptionsSection(document, window.location.hash)
+  );
+  focusCurrentSection();
+  window.addEventListener('hashchange', focusCurrentSection);
 
-  if (
-    !websiteUrlInput ||
-    !websiteContentInput ||
-    !userNameInput ||
-    !userEmailInput ||
-    !userPasswordInput ||
-    !saveSettingsBtn ||
-    !settingsStatusEl ||
-    !llmApiBaseUrlInput ||
-    !llmApiKeyInput ||
-    !llmModelInput ||
-    !saveLlmConfigBtn ||
-    !testLlmConnectionBtn ||
-    !llmStatusEl
-  ) {
-    console.error('Options page 初始化失败：元素未找到');
+  const ui = Object.fromEntries([
+    'profileSelect',
+    'newProfileBtn',
+    'profileDisplayName',
+    'userName',
+    'userEmail',
+    'userPassword',
+    'passwordConfiguredStatus',
+    'saveProfileBtn',
+    'clearPasswordBtn',
+    'deleteProfileBtn',
+    'promotionSiteSelect',
+    'newPromotionSiteBtn',
+    'promotionSiteName',
+    'websiteUrl',
+    'websiteContent',
+    'promotionSiteEnabled',
+    'savePromotionSiteBtn',
+    'deletePromotionSiteBtn',
+    'pairSelect',
+    'newPairBtn',
+    'pairProfileSelect',
+    'pairPromotionSiteSelect',
+    'pairWeight',
+    'pairEnabled',
+    'savePairBtn',
+    'deletePairBtn',
+    'defaultPairSelect',
+    'quotaBatch',
+    'quotaProfile',
+    'quotaPromotionSite',
+    'quotaTargetDomain',
+    'savePolicyBtn',
+    'settingsStatus',
+    'llmApiBaseUrl',
+    'llmApiKey',
+    'llmModel',
+    'saveLlmConfigBtn',
+    'testLlmConnectionBtn',
+    'llmStatus',
+    'exportConfigBtn',
+    'importConfigBtn',
+    'importConfigFileInput',
+    'applyImportConfigBtn',
+    'importExportStatus',
+    'openBatchBtn',
+    'openHistoryBtn',
+    'toggleExportOutlinksFloatingBtn'
+  ].map((id) => [id, element(id)]));
+  if (Object.values(ui).some((value) => !value)) {
+    console.error('[options] Required options controls are missing');
     return;
   }
 
-  function showStatus(el, text, timeout = 1600) {
-    if (!el) return;
-    el.textContent = text;
-    el.style.opacity = '1';
-    setTimeout(() => {
-      el.style.opacity = '0';
-    }, timeout);
+  function showStatus(target, text, isError = false, timeout = 2600) {
+    target.textContent = text;
+    target.style.color = isError ? '#dc2626' : '#059669';
+    target.classList.add('visible');
+    setTimeout(() => target.classList.remove('visible'), timeout);
   }
 
-  let showExportOutlinksFloatingButton = true;
+  const configRepository = createDomainConfigRepository(chrome.storage.local);
+  const secretRepository = createProfileSecretClient(chrome.runtime);
+  const controller = createDomainConfigOptionsController({
+    configRepository,
+    secretRepository
+  });
+  let snapshot = await controller.snapshot();
+  let editingProfileId = snapshot.profiles[0]?.id ?? null;
+  let editingSiteId = snapshot.promotionSites[0]?.id ?? null;
+  let editingPairId = snapshot.pairs[0]?.id ?? null;
+  let pendingImportPreview = null;
 
-  function renderExportOutlinksFloatingToggle() {
-    if (!toggleExportOutlinksFloatingBtn) return;
-    toggleExportOutlinksFloatingBtn.textContent = showExportOutlinksFloatingButton ? '隐藏导出外链按钮' : '显示导出外链按钮';
-    toggleExportOutlinksFloatingBtn.classList.toggle('btn-primary', !showExportOutlinksFloatingButton);
-    toggleExportOutlinksFloatingBtn.classList.toggle('btn-secondary', showExportOutlinksFloatingButton);
-    toggleExportOutlinksFloatingBtn.title = showExportOutlinksFloatingButton
-      ? '点击后页面不再显示“导出外链”浮动按钮'
-      : '点击后页面显示“导出外链”浮动按钮';
+  function replaceOptions(select, items, selectedId, label) {
+    select.replaceChildren();
+    for (const item of items) {
+      const option = document.createElement('option');
+      option.value = item.id;
+      option.textContent = label(item);
+      option.selected = item.id === selectedId;
+      select.appendChild(option);
+    }
+    select.disabled = items.length === 0;
   }
 
-  function pickLegacyPromptValue(values, keywords) {
-    if (!values || typeof values !== 'object') return '';
-    const normalizedKeywords = keywords.map((keyword) => String(keyword).toLowerCase());
-    const entry = Object.entries(values).find(([key, value]) => {
-      if (!value) return false;
-      const normalizedKey = String(key || '').toLowerCase();
-      return normalizedKeywords.some((keyword) => normalizedKey.includes(keyword));
-    });
-    return entry ? String(entry[1] || '').trim() : '';
+  function profileById(id) {
+    return snapshot.profiles.find((profile) => profile.id === id) || null;
   }
 
-  function getLegacyWebsiteUrl(data) {
-    return pickLegacyPromptValue(data[LEGACY_PROMPT_FIELD_VALUES_STORAGE_KEY], [
-      '网站链接',
-      '网址',
-      'website link',
-      'website url',
-      'url'
-    ]);
+  function siteById(id) {
+    return snapshot.promotionSites.find((site) => site.id === id) || null;
   }
 
-  function getLegacyWebsiteContent(data) {
-    return pickLegacyPromptValue(data[LEGACY_PROMPT_FIELD_VALUES_STORAGE_KEY], [
-      '网站内容',
-      '网站介绍',
-      'website content',
-      'site content',
-      'description'
-    ]);
+  function pairById(id) {
+    return snapshot.pairs.find((pair) => pair.id === id) || null;
   }
 
-  function getInputValue(input) {
-    return input && typeof input.value === 'string' ? input.value.trim() : '';
+  function renderProfile() {
+    const profile = profileById(editingProfileId);
+    ui.profileDisplayName.value = profile?.displayName || '';
+    ui.userName.value = profile?.name || '';
+    ui.userEmail.value = profile?.email || '';
+    ui.userPassword.value = '';
+    const configured = Boolean(
+      profile && snapshot.passwordConfigured[profile.id]
+    );
+    ui.passwordConfiguredStatus.textContent = configured
+      ? '已配置本机密码（不会预填）'
+      : '未配置密码';
+    ui.clearPasswordBtn.disabled = !configured;
+    ui.deleteProfileBtn.disabled = !profile;
   }
 
-  function mergeCurrentFormValues(data) {
-    const merged = { ...(data || {}) };
-    const currentValues = {
-      [WEBSITE_URL_STORAGE_KEY]: getInputValue(websiteUrlInput),
-      [WEBSITE_CONTENT_STORAGE_KEY]: getInputValue(websiteContentInput),
-      [USER_NAME_STORAGE_KEY]: getInputValue(userNameInput),
-      [USER_EMAIL_STORAGE_KEY]: getInputValue(userEmailInput),
-      [USER_PASSWORD_STORAGE_KEY]: getInputValue(userPasswordInput),
-      [LLM_SYNC_KEYS.apiBaseUrl]: getInputValue(llmApiBaseUrlInput),
-      [LLM_SYNC_KEYS.model]: getInputValue(llmModelInput)
-    };
+  function renderSite() {
+    const site = siteById(editingSiteId);
+    ui.promotionSiteName.value = site?.name || '';
+    ui.websiteUrl.value = site?.url || '';
+    ui.websiteContent.value = site?.content || '';
+    ui.promotionSiteEnabled.checked = site?.enabled ?? true;
+    ui.deletePromotionSiteBtn.disabled = !site;
+  }
 
-    ACTIVE_STORAGE_KEYS.forEach((key) => {
-      if (currentValues[key] !== '') {
-        merged[key] = currentValues[key];
+  function renderPair() {
+    const pair = pairById(editingPairId);
+    ui.pairProfileSelect.value =
+      pair?.profileId || snapshot.profiles[0]?.id || '';
+    ui.pairPromotionSiteSelect.value =
+      pair?.promotionSiteId || snapshot.promotionSites[0]?.id || '';
+    ui.pairWeight.value = String(pair?.weight ?? 1);
+    ui.pairEnabled.checked = pair?.enabled ?? true;
+    ui.deletePairBtn.disabled = !pair;
+  }
+
+  function renderAll() {
+    if (!profileById(editingProfileId)) {
+      editingProfileId = snapshot.profiles[0]?.id ?? editingProfileId;
+    }
+    if (!siteById(editingSiteId)) {
+      editingSiteId =
+        snapshot.promotionSites[0]?.id ?? editingSiteId;
+    }
+    if (!pairById(editingPairId)) {
+      editingPairId = snapshot.pairs[0]?.id ?? editingPairId;
+    }
+    replaceOptions(
+      ui.profileSelect,
+      snapshot.profiles,
+      editingProfileId,
+      ({ displayName }) => displayName
+    );
+    replaceOptions(
+      ui.promotionSiteSelect,
+      snapshot.promotionSites,
+      editingSiteId,
+      ({ name, enabled }) => `${name}${enabled ? '' : '（停用）'}`
+    );
+    replaceOptions(
+      ui.pairProfileSelect,
+      snapshot.profiles,
+      pairById(editingPairId)?.profileId,
+      ({ displayName }) => displayName
+    );
+    replaceOptions(
+      ui.pairPromotionSiteSelect,
+      snapshot.promotionSites,
+      pairById(editingPairId)?.promotionSiteId,
+      ({ name }) => name
+    );
+    replaceOptions(
+      ui.pairSelect,
+      snapshot.pairs,
+      editingPairId,
+      (pair) => {
+        const profile = profileById(pair.profileId);
+        const site = siteById(pair.promotionSiteId);
+        return `${profile?.displayName || pair.profileId} → ${
+          site?.name || pair.promotionSiteId
+        }${pair.enabled ? '' : '（停用）'}`;
       }
-    });
-
-    return merged;
-  }
-
-  function getImportedData(config) {
-    if (!config || typeof config !== 'object') return null;
-    if (config.data && typeof config.data === 'object') return config.data;
-    return config;
-  }
-
-  function normalizeStringSetting(value) {
-    if (value === undefined || value === null) return '';
-    return String(value).trim();
-  }
-
-  function getSettingsPayloadFromInputs() {
-    return {
-      [WEBSITE_URL_STORAGE_KEY]: normalizeStringSetting(websiteUrlInput.value),
-      [WEBSITE_CONTENT_STORAGE_KEY]: normalizeStringSetting(websiteContentInput.value),
-      [USER_NAME_STORAGE_KEY]: normalizeStringSetting(userNameInput.value),
-      [USER_EMAIL_STORAGE_KEY]: normalizeStringSetting(userEmailInput.value),
-      [USER_PASSWORD_STORAGE_KEY]: normalizeStringSetting(userPasswordInput.value)
-    };
-  }
-
-  function applySettingsToForm(data) {
-    if (!data || typeof data !== 'object') return;
-    if (data[WEBSITE_URL_STORAGE_KEY] !== undefined) websiteUrlInput.value = normalizeStringSetting(data[WEBSITE_URL_STORAGE_KEY]);
-    if (data[WEBSITE_CONTENT_STORAGE_KEY] !== undefined) websiteContentInput.value = normalizeStringSetting(data[WEBSITE_CONTENT_STORAGE_KEY]);
-    if (data[USER_NAME_STORAGE_KEY] !== undefined) userNameInput.value = normalizeStringSetting(data[USER_NAME_STORAGE_KEY]);
-    if (data[USER_EMAIL_STORAGE_KEY] !== undefined) userEmailInput.value = normalizeStringSetting(data[USER_EMAIL_STORAGE_KEY]);
-    if (data[USER_PASSWORD_STORAGE_KEY] !== undefined) userPasswordInput.value = normalizeStringSetting(data[USER_PASSWORD_STORAGE_KEY]);
-    if (data[LLM_SYNC_KEYS.apiBaseUrl] !== undefined) llmApiBaseUrlInput.value = normalizeStringSetting(data[LLM_SYNC_KEYS.apiBaseUrl]);
-    if (data[LLM_SYNC_KEYS.model] !== undefined) llmModelInput.value = normalizeStringSetting(data[LLM_SYNC_KEYS.model]);
-    if (data[SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY] !== undefined) {
-      showExportOutlinksFloatingButton = data[SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY] !== false;
-      renderExportOutlinksFloatingToggle();
-    }
-  }
-
-  function buildImportPayload(importedData) {
-    const toSave = {};
-    IMPORT_COMPAT_STORAGE_KEYS.forEach((key) => {
-      if (importedData[key] !== undefined) toSave[key] = importedData[key];
-    });
-    [
-      WEBSITE_URL_STORAGE_KEY,
-      WEBSITE_CONTENT_STORAGE_KEY,
-      USER_NAME_STORAGE_KEY,
-      USER_EMAIL_STORAGE_KEY,
-      USER_PASSWORD_STORAGE_KEY,
-      LLM_SYNC_KEYS.apiBaseUrl,
-      LLM_SYNC_KEYS.model
-    ].forEach((key) => {
-      if (importedData[key] !== undefined) toSave[key] = normalizeStringSetting(importedData[key]);
-    });
-    if (!toSave[WEBSITE_URL_STORAGE_KEY]) {
-      const legacyWebsiteUrl = getLegacyWebsiteUrl(importedData);
-      if (legacyWebsiteUrl) toSave[WEBSITE_URL_STORAGE_KEY] = legacyWebsiteUrl;
-    }
-    if (!toSave[WEBSITE_CONTENT_STORAGE_KEY]) {
-      const legacyWebsiteContent = getLegacyWebsiteContent(importedData);
-      if (legacyWebsiteContent) toSave[WEBSITE_CONTENT_STORAGE_KEY] = legacyWebsiteContent;
-    }
-    if (importedData[SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY] !== undefined) {
-      toSave[SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY] =
-        importedData[SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY] !== false;
-    }
-    return toSave;
-  }
-
-  function loadSettings() {
-    chrome.storage.sync.get(IMPORT_COMPAT_STORAGE_KEYS, (result) => {
-      if (chrome.runtime.lastError) {
-        console.error('读取设置失败：', chrome.runtime.lastError);
-        return;
+    );
+    replaceOptions(
+      ui.defaultPairSelect,
+      snapshot.pairs.filter(({ enabled }) => enabled),
+      snapshot.defaultPairId,
+      (pair) => {
+        const profile = profileById(pair.profileId);
+        const site = siteById(pair.promotionSiteId);
+        return `${profile?.displayName || pair.profileId} → ${
+          site?.name || pair.promotionSiteId
+        }`;
       }
-      const data = result || {};
-      websiteUrlInput.value = typeof data[WEBSITE_URL_STORAGE_KEY] === 'string'
-        ? data[WEBSITE_URL_STORAGE_KEY]
-        : getLegacyWebsiteUrl(data);
-      websiteContentInput.value = typeof data[WEBSITE_CONTENT_STORAGE_KEY] === 'string'
-        ? data[WEBSITE_CONTENT_STORAGE_KEY]
-        : getLegacyWebsiteContent(data);
-      userNameInput.value = typeof data[USER_NAME_STORAGE_KEY] === 'string' ? data[USER_NAME_STORAGE_KEY] : '';
-      userEmailInput.value = typeof data[USER_EMAIL_STORAGE_KEY] === 'string' ? data[USER_EMAIL_STORAGE_KEY] : '';
-      userPasswordInput.value = typeof data[USER_PASSWORD_STORAGE_KEY] === 'string' ? data[USER_PASSWORD_STORAGE_KEY] : '';
-      showExportOutlinksFloatingButton = data[SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY] !== false;
-      renderExportOutlinksFloatingToggle();
-    });
+    );
+    ui.quotaBatch.value = String(snapshot.quotas.batch);
+    ui.quotaProfile.value = String(snapshot.quotas.perProfile);
+    ui.quotaPromotionSite.value =
+      String(snapshot.quotas.perPromotionSite);
+    ui.quotaTargetDomain.value =
+      String(snapshot.quotas.perTargetDomain);
+    renderProfile();
+    renderSite();
+    renderPair();
   }
 
-  const requiredSettingsFields = [
-    { el: websiteUrlInput, label: '网站链接' },
-    { el: websiteContentInput, label: '网站内容' },
-    { el: userNameInput, label: '姓名/昵称' },
-    { el: userEmailInput, label: '邮箱' }
-  ];
-
-  function validateRequiredSettings() {
-    let firstInvalid = null;
-    const missingLabels = [];
-    requiredSettingsFields.forEach(({ el, label }) => {
-      const isValid = el.checkValidity() && !!el.value.trim();
-      el.classList.toggle('is-invalid', !isValid);
-      if (!isValid) {
-        missingLabels.push(label);
-        if (!firstInvalid) firstInvalid = el;
-      }
-    });
-    if (firstInvalid) {
-      firstInvalid.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      firstInvalid.focus();
-      showStatus(settingsStatusEl, `请先填写必填项：${missingLabels.join('、')}`, 2600);
-      return false;
+  async function runConfigCommand(command, successText) {
+    try {
+      snapshot = await command();
+      renderAll();
+      showStatus(ui.settingsStatus, successText);
+    } catch (error) {
+      showStatus(
+        ui.settingsStatus,
+        error?.message || '保存失败',
+        true,
+        4200
+      );
     }
-    return true;
   }
 
-  function showImportExportStatus(text, isError) {
-    if (!importExportStatus) return;
-    importExportStatus.textContent = text;
-    importExportStatus.style.color = isError ? '#dc2626' : '#b45309';
-    importExportStatus.style.opacity = '1';
-    setTimeout(() => {
-      importExportStatus.style.opacity = '0';
-    }, 3000);
-  }
-
-  requiredSettingsFields.forEach(({ el }) => {
-    el.addEventListener('input', () => {
-      el.classList.toggle('is-invalid', !(el.checkValidity() && !!el.value.trim()));
-    });
+  ui.profileSelect.addEventListener('change', () => {
+    editingProfileId = ui.profileSelect.value;
+    renderProfile();
+  });
+  ui.newProfileBtn.addEventListener('click', () => {
+    editingProfileId = generatedId('profile');
+    renderProfile();
+    ui.profileDisplayName.focus();
+  });
+  ui.saveProfileBtn.addEventListener('click', () => runConfigCommand(
+    async () => {
+      const displayName = ui.profileDisplayName.value.trim();
+      const name = ui.userName.value.trim();
+      const email = ui.userEmail.value.trim();
+      if (!displayName || !name || !email) {
+        throw new Error('请填写显示名、姓名和邮箱');
+      }
+      const profileId = editingProfileId || generatedId('profile');
+      editingProfileId = profileId;
+      await controller.saveProfile({
+        id: profileId,
+        displayName,
+        name,
+        email
+      });
+      if (ui.userPassword.value !== '') {
+        await controller.savePassword(
+          editingProfileId,
+          ui.userPassword.value
+        );
+      }
+      return controller.snapshot();
+    },
+    'Profile 已保存'
+  ));
+  ui.clearPasswordBtn.addEventListener('click', () => runConfigCommand(
+    async () => {
+      await controller.clearPassword(editingProfileId);
+      return controller.snapshot();
+    },
+    '密码已清除'
+  ));
+  ui.deleteProfileBtn.addEventListener('click', () => {
+    if (!confirm('确认删除此 Profile？已被 Pair 使用时不会删除。')) return;
+    void runConfigCommand(
+      () => controller.deleteProfile(editingProfileId),
+      'Profile 已删除'
+    );
   });
 
-  saveLlmConfigBtn.addEventListener('click', async () => {
+  ui.promotionSiteSelect.addEventListener('change', () => {
+    editingSiteId = ui.promotionSiteSelect.value;
+    renderSite();
+  });
+  ui.newPromotionSiteBtn.addEventListener('click', () => {
+    editingSiteId = generatedId('site');
+    renderSite();
+    ui.promotionSiteName.focus();
+  });
+  ui.savePromotionSiteBtn.addEventListener('click', () => runConfigCommand(
+    () => {
+      const siteId = editingSiteId || generatedId('site');
+      editingSiteId = siteId;
+      return controller.savePromotionSite({
+        id: siteId,
+        name: ui.promotionSiteName.value.trim(),
+        url: ui.websiteUrl.value.trim(),
+        content: ui.websiteContent.value.trim(),
+        enabled: ui.promotionSiteEnabled.checked
+      });
+    },
+    'Promotion Site 已保存'
+  ));
+  ui.deletePromotionSiteBtn.addEventListener('click', () => {
+    if (!confirm('确认删除此 Promotion Site？已被 Pair 使用时不会删除。')) {
+      return;
+    }
+    void runConfigCommand(
+      () => controller.deletePromotionSite(editingSiteId),
+      'Promotion Site 已删除'
+    );
+  });
+
+  ui.pairSelect.addEventListener('change', () => {
+    editingPairId = ui.pairSelect.value;
+    renderPair();
+  });
+  ui.newPairBtn.addEventListener('click', () => {
+    editingPairId = generatedId('pair');
+    renderPair();
+  });
+  ui.savePairBtn.addEventListener('click', () => runConfigCommand(
+    () => {
+      const pairId = editingPairId || generatedId('pair');
+      editingPairId = pairId;
+      return controller.savePair({
+        id: pairId,
+        profileId: ui.pairProfileSelect.value,
+        promotionSiteId: ui.pairPromotionSiteSelect.value,
+        weight: positiveInteger(ui.pairWeight, '权重'),
+        enabled: ui.pairEnabled.checked
+      });
+    },
+    'Pair 已保存'
+  ));
+  ui.deletePairBtn.addEventListener('click', () => {
+    if (!confirm('确认删除此 Pair？')) return;
+    void runConfigCommand(
+      () => controller.deletePair(editingPairId),
+      'Pair 已删除'
+    );
+  });
+  ui.savePolicyBtn.addEventListener('click', () => runConfigCommand(
+    () => controller.savePolicy({
+      defaultPairId: ui.defaultPairSelect.value || null,
+      quotas: {
+        batch: positiveInteger(ui.quotaBatch, '批次上限'),
+        perProfile: positiveInteger(ui.quotaProfile, '每 Profile 上限'),
+        perPromotionSite: positiveInteger(
+          ui.quotaPromotionSite,
+          '每 Promotion Site 上限'
+        ),
+        perTargetDomain: positiveInteger(
+          ui.quotaTargetDomain,
+          '每目标域名上限'
+        )
+      }
+    }),
+    '分配策略已保存'
+  ));
+
+  ui.exportConfigBtn.addEventListener('click', async () => {
+    try {
+      const exported = await controller.exportConfig();
+      downloadJson(
+        exported,
+        `autocomment-domain-config-${
+          new Date().toISOString().slice(0, 10)
+        }.json`
+      );
+      showStatus(ui.importExportStatus, '非敏感配置已导出');
+    } catch (error) {
+      showStatus(ui.importExportStatus, error.message, true);
+    }
+  });
+  ui.importConfigBtn.addEventListener(
+    'click',
+    () => ui.importConfigFileInput.click()
+  );
+  ui.importConfigFileInput.addEventListener('change', async () => {
+    const file = ui.importConfigFileInput.files?.[0];
+    ui.importConfigFileInput.value = '';
+    if (!file) return;
+    try {
+      const input = JSON.parse(await file.text());
+      pendingImportPreview = await controller.previewImport(input);
+      const conflictText = pendingImportPreview.conflicts
+        .map(({ code }) => code)
+        .join('、');
+      if (conflictText) {
+        ui.applyImportConfigBtn.hidden = true;
+        showStatus(
+          ui.importExportStatus,
+          `导入被阻止：${conflictText}`,
+          true,
+          6000
+        );
+        return;
+      }
+      ui.applyImportConfigBtn.hidden = false;
+      showStatus(
+        ui.importExportStatus,
+        `预览：新增 ${pendingImportPreview.creates.length}，更新 ${
+          pendingImportPreview.updates.length
+        }。请确认应用。`,
+        false,
+        8000
+      );
+    } catch (error) {
+      pendingImportPreview = null;
+      ui.applyImportConfigBtn.hidden = true;
+      showStatus(ui.importExportStatus, `导入失败：${error.message}`, true);
+    }
+  });
+  ui.applyImportConfigBtn.addEventListener('click', () => {
+    if (!pendingImportPreview) return;
+    const preview = pendingImportPreview;
+    pendingImportPreview = null;
+    ui.applyImportConfigBtn.hidden = true;
+    void runConfigCommand(
+      () => controller.applyImport(preview),
+      '导入已应用'
+    );
+  });
+
+  const modelDependencies = {
+    storage: chrome.storage,
+    permissions: chrome.permissions,
+    runtime: chrome.runtime
+  };
+  const modelConfig = await loadLlmConfig(chrome.storage);
+  ui.llmApiBaseUrl.value =
+    modelConfig.apiBaseUrl || DEFAULT_LLM_CONFIG.apiBaseUrl;
+  ui.llmModel.value = modelConfig.model || DEFAULT_LLM_CONFIG.model;
+  ui.llmApiKey.value = modelConfig.apiKey;
+  ui.saveLlmConfigBtn.addEventListener('click', async () => {
     try {
       await saveOptionsModelConfig(modelDependencies, {
-        apiBaseUrl: llmApiBaseUrlInput.value,
-        apiKey: llmApiKeyInput.value,
-        model: llmModelInput.value
+        apiBaseUrl: ui.llmApiBaseUrl.value,
+        apiKey: ui.llmApiKey.value,
+        model: ui.llmModel.value
       });
-      showStatus(llmStatusEl, '模型配置已保存');
+      showStatus(ui.llmStatus, '模型配置已保存');
     } catch (error) {
-      showStatus(llmStatusEl, error.message || '模型配置保存失败', 3000);
+      showStatus(ui.llmStatus, error.message, true);
     }
   });
-
-  testLlmConnectionBtn.addEventListener('click', async () => {
-    testLlmConnectionBtn.disabled = true;
-    showStatus(llmStatusEl, '正在真实调用模型…', 60000);
+  ui.testLlmConnectionBtn.addEventListener('click', async () => {
+    ui.testLlmConnectionBtn.disabled = true;
     try {
       const text = await testOptionsModelConfig(modelDependencies, {
-        apiBaseUrl: llmApiBaseUrlInput.value,
-        apiKey: llmApiKeyInput.value,
-        model: llmModelInput.value
+        apiBaseUrl: ui.llmApiBaseUrl.value,
+        apiKey: ui.llmApiKey.value,
+        model: ui.llmModel.value
       });
-      showStatus(llmStatusEl, `连接成功：${text}`, 5000);
+      showStatus(ui.llmStatus, `连接成功：${text}`, false, 5000);
     } catch (error) {
-      showStatus(llmStatusEl, error.message || '连接测试失败', 5000);
+      showStatus(ui.llmStatus, error.message, true, 5000);
     } finally {
-      testLlmConnectionBtn.disabled = false;
+      ui.testLlmConnectionBtn.disabled = false;
     }
   });
 
-  saveSettingsBtn.addEventListener('click', () => {
-    if (!validateRequiredSettings()) return;
-    chrome.storage.sync.set(getSettingsPayloadFromInputs(), () => {
-      if (chrome.runtime.lastError) {
-        console.error('保存设置失败：', chrome.runtime.lastError);
-        showStatus(settingsStatusEl, '保存失败', 2000);
-        return;
-      }
-      showStatus(settingsStatusEl, '已保存');
+  let showOutlinks = (
+    await chrome.storage.sync.get([
+      SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY
+    ])
+  )[SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY] !== false;
+  function renderOutlinksToggle() {
+    ui.toggleExportOutlinksFloatingBtn.textContent = showOutlinks
+      ? '隐藏导出外链按钮'
+      : '显示导出外链按钮';
+  }
+  renderOutlinksToggle();
+  ui.toggleExportOutlinksFloatingBtn.addEventListener('click', async () => {
+    showOutlinks = !showOutlinks;
+    await chrome.storage.sync.set({
+      [SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY]: showOutlinks
     });
+    renderOutlinksToggle();
   });
 
-  if (toggleExportOutlinksFloatingBtn) {
-    renderExportOutlinksFloatingToggle();
-    toggleExportOutlinksFloatingBtn.addEventListener('click', () => {
-      const nextValue = !showExportOutlinksFloatingButton;
-      chrome.storage.sync.set({ [SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY]: nextValue }, () => {
-        if (chrome.runtime.lastError) {
-          console.error('保存导出外链浮动按钮设置失败：', chrome.runtime.lastError);
-          showStatus(settingsStatusEl, '保存失败', 2000);
-          return;
-        }
-        showExportOutlinksFloatingButton = nextValue;
-        renderExportOutlinksFloatingToggle();
-        showStatus(settingsStatusEl, nextValue ? '已显示导出外链按钮' : '已隐藏导出外链按钮');
-      });
+  ui.openBatchBtn.addEventListener(
+    'click',
+    () => chrome.tabs.create({ url: 'batch.html' })
+  );
+  ui.openHistoryBtn.addEventListener(
+    'click',
+    () => chrome.tabs.create({ url: 'history.html' })
+  );
+
+  const cloudSyncElements = Object.fromEntries([
+    'cloudSyncCreateBtn',
+    'cloudSyncImportInput',
+    'cloudSyncImportBtn',
+    'cloudSyncCopyBtn',
+    'cloudSyncRunBtn',
+    'cloudSyncDisconnectBtn',
+    'cloudSyncDeleteBtn',
+    'cloudSyncStatus',
+    'cloudSyncLastSuccess',
+    'cloudSyncPendingCount',
+    'cloudSyncDeviceId'
+  ].map((id) => [id, element(id)]));
+  if (Object.values(cloudSyncElements).every(Boolean)) {
+    const cloudSyncController = createCloudSyncOptionsController({
+      elements: cloudSyncElements,
+      sendMessage: (message) => chrome.runtime.sendMessage(message),
+      clipboard: navigator.clipboard,
+      prompt: window.prompt.bind(window)
     });
+    cloudSyncController.bind();
+    await cloudSyncController.refresh();
   }
 
-  if (exportConfigBtn) {
-    exportConfigBtn.addEventListener('click', () => {
-      chrome.storage.sync.get(ACTIVE_STORAGE_KEYS, (result) => {
-        if (chrome.runtime.lastError) {
-          showImportExportStatus('导出失败：' + chrome.runtime.lastError.message, true);
-          return;
-        }
-        const mergedData = mergeCurrentFormValues(result);
-        const config = { _version: CONFIG_VERSION, _exportTime: new Date().toISOString(), data: {} };
-        ACTIVE_STORAGE_KEYS.forEach((key) => {
-          if (mergedData[key] !== undefined) config.data[key] = mergedData[key];
-        });
-        if (!config.data[WEBSITE_CONTENT_STORAGE_KEY]) {
-          showImportExportStatus('导出失败：请先填写你的网站内容。', true);
-          return;
-        }
-        const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'autocomment-config-' + new Date().toISOString().slice(0, 10) + '.json';
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
-        showImportExportStatus('配置已导出！', false);
-      });
-    });
-  }
-
-  if (importConfigBtn && importConfigFileInput) {
-    importConfigBtn.addEventListener('click', () => importConfigFileInput.click());
-    importConfigFileInput.addEventListener('change', (event) => {
-      const file = event.target.files && event.target.files[0];
-      if (!file) return;
-      const reader = new FileReader();
-      reader.onload = (loadEvent) => {
-        try {
-          const importedData = getImportedData(JSON.parse(loadEvent.target.result));
-          if (!importedData) {
-            showImportExportStatus('文件格式无效，不是有效的配置文件。', true);
-            return;
-          }
-          const toSave = buildImportPayload(importedData);
-          applySettingsToForm(toSave);
-          if (!validateRequiredSettings()) {
-            showImportExportStatus('导入失败：配置缺少网站链接、网站内容、姓名或邮箱。', true);
-            return;
-          }
-          chrome.storage.sync.set(toSave, () => {
-            if (chrome.runtime.lastError) {
-              showImportExportStatus('导入失败：' + chrome.runtime.lastError.message, true);
-              return;
-            }
-            showStatus(settingsStatusEl, '已保存');
-            showImportExportStatus('配置已导入并保存！页面将自动刷新...', false);
-            setTimeout(() => location.reload(), 1500);
-          });
-        } catch (error) {
-          showImportExportStatus('解析文件失败：' + error.message, true);
-        }
-      };
-      reader.readAsText(file);
-      importConfigFileInput.value = '';
-    });
-  }
-
-  if (openBatchBtn) {
-    openBatchBtn.addEventListener('click', () => chrome.tabs.create({ url: 'batch.html' }));
-  }
-  if (openHistoryBtn) {
-    openHistoryBtn.addEventListener('click', () => chrome.tabs.create({ url: 'history.html' }));
-  }
-
-  const modelConfig = await loadLlmConfig(chrome.storage);
-  llmApiBaseUrlInput.value = modelConfig.apiBaseUrl || DEFAULT_LLM_CONFIG.apiBaseUrl;
-  llmModelInput.value = modelConfig.model || DEFAULT_LLM_CONFIG.model;
-  llmApiKeyInput.value = modelConfig.apiKey;
-  loadSettings();
+  renderAll();
 });

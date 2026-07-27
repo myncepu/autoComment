@@ -1,10 +1,12 @@
 {
   "manifest_version": 3,
+  "minimum_chrome_version": "102",
   "name": "Auto Register Filler",
-  "version": "1.5.3",
+  "version": "1.6.0",
   "description": "自动填充注册表单，并为当前网站生成推广文案。",
   "permissions": [
     "activeTab",
+    "tabs",
     "storage",
     "unlimitedStorage",
     "alarms",
@@ -12,7 +14,8 @@
     "power"
   ],
   "host_permissions": [
-    "https://openrouter.ai/*"
+    "https://openrouter.ai/*",
+    "https://auto-comment-sync.yan2010.workers.dev/*"
   ],
   "optional_host_permissions": [
     "https://*/*",
@@ -22,6 +25,15 @@
     "service_worker": "background.js",
     "type": "module"
   },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; default-src 'self'; connect-src https: http:; base-uri 'none'"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["worker-pending.html"],
+      "matches": ["<all_urls>"]
+    }
+  ],
   "action": {
     "default_title": "Auto Register Filler - 网站自动填表与推广文案助手"
   },
@@ -29,7 +41,7 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["illegal-site-filter.js", "lib/llm-content-bridge.js", "lib/batch-submit-context-client.js", "lib/comment-history-capture.js", "content.js"],
+      "js": ["illegal-site-filter.js", "lib/llm-content-bridge.js", "lib/batch-task-config.js", "lib/batch-handle-dispatch.js", "lib/batch-submit-context-client.js", "lib/comment-history-capture.js", "lib/batch-phase-reporter.js", "content.js"],
       "run_at": "document_idle"
     }
   ]

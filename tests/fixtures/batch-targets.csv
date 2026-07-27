@@ -1,0 +1,6 @@
+页面AS,原URL,URL对应域名,目标域名,类型,外部链接数量
+1,http://127.0.0.1:4173/target/1?delay=3500,127.0.0.1,fixture.local,comment,0
+2,http://127.0.0.1:4173/target/2?delay=3000,127.0.0.1,fixture.local,comment,0
+3,http://127.0.0.1:4173/target/3?delay=2500,127.0.0.1,fixture.local,comment,0
+4,http://127.0.0.1:4173/target/4?delay=2000,127.0.0.1,fixture.local,comment,0
+5,http://127.0.0.1:4173/target/5?delay=1500,127.0.0.1,fixture.local,comment,0

@@ -30,7 +30,7 @@ test('uses a BOM and one fixed stable column order', () => {
   assert.equal(COMMENT_CSV_HEADER.charCodeAt(0), 0xfeff);
   assert.equal(
     COMMENT_CSV_HEADER,
-    '\ufeffid,batchId,urlIndex,submittedAt,targetPageUrl,targetDomain,promotedWebsiteUrl,promotedDomain,commentHtml,commentText,anchorTexts,anchorHrefRaws,anchorHrefResolveds,submitStatus,source\r\n'
+    '\ufeffid,batchId,urlIndex,submittedAt,targetPageUrl,targetDomain,promotedWebsiteUrl,promotedDomain,profileId,profileDisplayName,promotionSiteId,promotionSiteName,promotionSiteUrl,assignmentPairId,assignmentSource,configRevision,attemptCount,errorCode,skipReason,commentHtml,commentText,anchorTexts,anchorHrefRaws,anchorHrefResolveds,submitStatus,source\r\n'
   );
 });
 
@@ -44,6 +44,17 @@ test('builds rows in header order with local timestamp and anchor JSON arrays', 
     targetDomain: 'target.test',
     promotedWebsiteUrl: 'https://promo.test/',
     promotedDomain: 'promo.test',
+    profileId: 'profile-a',
+    profileDisplayName: 'Operator A',
+    promotionSiteId: 'site-a',
+    promotionSiteName: 'Promo A',
+    promotionSiteUrl: 'https://promo.test/',
+    assignmentPairId: 'pair-a',
+    assignmentSource: 'weighted',
+    configRevision: 7,
+    attemptCount: 1,
+    errorCode: '',
+    skipReason: '',
     commentHtml: '<p>中文, "评论"</p>',
     commentText: '=unsafe',
     submitStatus: 'submitted',

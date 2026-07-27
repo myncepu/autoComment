@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <title>批次控制台 Fixture</title>
+    <link rel="stylesheet" href="../../styles/tokens.css" />
+    <link rel="stylesheet" href="../../styles/app-shell.css" />
+    <link rel="stylesheet" href="../../styles/batch-console.css" />
+  </head>
+  <body class="batch-console-page">
+    <header data-app-shell></header>
+    <section class="batch-console__fixture-lab" aria-labelledby="fixture-lab-title">
+      <div>
+        <p class="batch-console__eyebrow">LOCAL WEB FIXTURE</p>
+        <h1 id="fixture-lab-title">批次控制台交互实验室</h1>
+        <p>所有状态和命令都由 fixture-only adapter 确定性驱动。</p>
+      </div>
+      <label for="fixture-scenario">演练状态</label>
+      <select id="fixture-scenario" data-fixture-scenario>
+        <option value="running">运行中</option>
+        <option value="offline">离线暂停</option>
+        <option value="recovery">检查点恢复</option>
+        <option value="persistence">持久化待处理</option>
+        <option value="error">运行时错误</option>
+        <option value="empty">空状态</option>
+      </select>
+      <p class="batch-console__notice" data-fixture-navigation-status aria-live="polite">
+        当前为普通 HTTP 标签页，不需要扩展 API。
+      </p>
+      <p data-fixture-command-status aria-live="polite">尚未开始批次</p>
+    </section>
+    <main data-batch-console id="main-content"></main>
+    <dialog data-batch-wizard></dialog>
+    <script type="module" src="./batch-console-app.mjs"></script>
+  </body>
+</html>

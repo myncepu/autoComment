@@ -132,5 +132,8 @@ test('loads the capture helper before content code', () => {
   const manifest = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'manifest.json'), 'utf8'));
   const scripts = manifest.content_scripts[0].js;
 
-  assert.equal(scripts.indexOf('lib/comment-history-capture.js') + 1, scripts.indexOf('content.js'));
+  assert.ok(
+    scripts.indexOf('lib/comment-history-capture.js') <
+      scripts.indexOf('content.js')
+  );
 });

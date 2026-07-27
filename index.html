@@ -52,7 +52,7 @@
 </head>
 <body>
   <h1>Privacy Policy – AutoComment Chrome Extension</h1>
-  <p class="muted">Last updated: <span id="last-updated">2026-07-23</span></p>
+  <p class="muted">Last updated: <span id="last-updated">2026-07-25</span></p>
 
   <p>
     This privacy policy explains how the <strong>AutoComment</strong> Chrome extension
@@ -103,17 +103,51 @@
     </li>
     <li><strong>Successful-comment history in IndexedDB</strong>:
       <ul>
-        <li>Successful-comment history stays on this device in IndexedDB and is not sent to the AutoComment backend.</li>
+        <li>Successful-comment history is written to IndexedDB on this device first. It leaves the device only if you choose to enable optional cloud synchronization.</li>
         <li>It preserves the exact submitted comment HTML (the editor value), plus a whitespace-normalized plain-text representation derived from that HTML, target page URL and domain, promoted website URL and domain, submission time and status, batch/task identifiers, source, and each anchor's whitespace-normalized text and raw/resolved URL.</li>
         <li>This history does not separately capture names, email addresses, passwords, API keys, or other form credentials.</li>
       </ul>
     </li>
   </ul>
   <p>
-    All of this data is stored on your device using Chrome's storage APIs. It is not sold or shared with advertisers.
+    Local data is stored on your device using Chrome's storage APIs. It is not sold or shared with advertisers.
   </p>
 
-  <h2>3. Data we read from the page</h2>
+  <h2>3. Optional cloud synchronization</h2>
+  <p>
+    Cloud synchronization is optional and off until you enable it. When enabled, the extension
+    sends successful-comment history and only the following allowlisted, non-sensitive settings to
+    the AutoComment Cloudflare Worker for storage in Cloudflare D1: promotion URL and content,
+    auto-fill name and email, AI API Base URL and model ID, whether to show the outbound-link export
+    control, batch checkbox settings, batch concurrency, batch timeout, and the public comment user
+    ID.
+  </p>
+  <p>
+    The synchronized comment record contains the exact history fields listed above. Your form
+    password and AI API key remain only in this browser's local storage and are not uploaded to
+    Cloudflare D1. Cookies, page credentials, temporary batch URL queues, submit contexts, and
+    recovery checkpoints are also excluded from cloud synchronization.
+  </p>
+  <p>
+    A sync key connects browsers to the same cloud vault. Anyone you share the sync key with can
+    access, change, and delete the synchronized vault, so keep it private. If you lose the sync key,
+    it cannot be recovered and the vault cannot be reconnected from a new browser. AutoComment does
+    not currently provide sync-key rotation.
+  </p>
+  <p>
+    Cloud history is retained until you permanently delete individual records from all devices or
+    delete the cloud vault. The 90-day local cache eviction applies only after the cloud has
+    confirmed the exact synchronized revision; records that are not cloud-confirmed are not
+    automatically evicted. When cloud synchronization is disabled, the existing export reminder and
+    explicit local deletion flow remains in effect.
+  </p>
+  <p>
+    Uninstalling the extension from one device deletes that device's local extension data, but does
+    not delete the cloud vault or its copies available to other connected devices. Delete the cloud
+    vault explicitly before uninstalling if you want its synchronized data removed.
+  </p>
+
+  <h2>4. Data we read from the page</h2>
   <p>
     To work, the extension needs to read some information from the page you are viewing:
   </p>
@@ -144,7 +178,7 @@
     The extension does <strong>not</strong> read your full browsing history and does not track you across websites. Static content scripts match <code>&lt;all_urls&gt;</code> and run on matching pages after they load, including tabs opened for batch processing.
   </p>
 
-  <h2>4. Data sent to third‑party services (AI API)</h2>
+  <h2>5. Data sent to third‑party services (AI API)</h2>
   <p>
     Only when you request a promotional comment, the extension sends a minimal summary of the current page directly to the OpenAI-compatible API provider you configured:
   </p>
@@ -165,7 +199,7 @@
     Please refer to the AI API provider's own privacy policy to understand how they handle data sent to their service.
   </p>
 
-  <h2>5. What we do <em>not</em> do</h2>
+  <h2>6. What we do <em>not</em> do</h2>
   <ul>
     <li>We do <strong>not</strong> sell your data.</li>
     <li>We do <strong>not</strong> use your data for targeted advertising.</li>
@@ -174,18 +208,18 @@
     <li>We do <strong>not</strong> override or modify third‑party scripts on visited pages.</li>
   </ul>
 
-  <h2>6. Permissions explained</h2>
+  <h2>7. Permissions explained</h2>
   <ul>
     <li><strong><code>activeTab</code></strong>: Available for user-initiated tab interactions; it does not grant or describe the static content scripts' page access.</li>
     <li><strong>Content-script matches</strong>: Static content scripts use <code>&lt;all_urls&gt;</code> to run on matching loaded pages, including user-initiated batch tabs, where they read the page data and fill recognized form fields described above.</li>
     <li><strong>Model API host permissions</strong>: OpenRouter has default model API host permission; saving or testing another HTTP(S) API Base URL requests optional permission only for that provider host.</li>
-    <li><strong><code>storage</code></strong>: Used to store your profile data, API Base URL, model ID, locally stored API key, preferences, and cooldown records as described above.</li>
+    <li><strong><code>storage</code></strong>: Used to store your profile data, API Base URL, model ID, locally stored API key and sync key, preferences, and cooldown records as described above.</li>
     <li><strong><code>unlimitedStorage</code></strong>: This permission prevents the normal extension storage quota from blocking local comment history as it grows.</li>
-    <li><strong><code>alarms</code></strong>: This permission schedules local retention checks and history reminders; an alarm never deletes history.</li>
+    <li><strong><code>alarms</code></strong>: This permission schedules cloud synchronization, local retention checks, and history reminders. Automatic local cache eviction remains subject to the cloud-confirmation guard described above.</li>
     <li><strong><code>notifications</code></strong>: This permission shows local reminders when history approaches or passes the 90-day cleanup threshold.</li>
   </ul>
 
-  <h2>7. Data retention</h2>
+  <h2>8. Data retention</h2>
   <p>
     Profile data, API configuration, preferences, and cooldown records are kept on your device until you change or clear them, reset the extension, or uninstall it.
   </p>
@@ -193,35 +227,37 @@
     Short‑term "cooldown" records used to avoid regenerating content for the same domain are automatically cleaned after a limited time window.
   </p>
   <p>
-    History becomes eligible for cleanup after 90 days on a rolling basis, but the reminder alarm never deletes it. Deletion is available only after export and your explicit confirmation; canceling leaves the records untouched.
+    With cloud synchronization disabled, history becomes eligible for cleanup after 90 days on a rolling basis, but the reminder alarm never deletes it. Deletion is available only after export and your explicit confirmation; canceling leaves the records untouched.
   </p>
   <p>
-    Uninstalling the extension deletes its IndexedDB history with the rest of the extension's local data.
+    With cloud synchronization enabled, cloud-confirmed local cache entries may be evicted as
+    described above, while the cloud copy remains until explicit deletion. Uninstall behavior is
+    described in the optional cloud synchronization section.
   </p>
 
-  <h2>8. Security</h2>
+  <h2>9. Security</h2>
   <p>
     We rely on Chrome's extension security model, <code>chrome.storage</code> for settings, and IndexedDB for comment history. However, no method of storage or transmission is 100% secure. You should not store highly sensitive passwords or confidential information in the extension if you are uncomfortable doing so.
   </p>
 
-  <h2>9. Children's privacy</h2>
+  <h2>10. Children's privacy</h2>
   <p>
     This extension is intended for use by adults. It is not directed to children and does not knowingly collect personal information from children.
   </p>
 
-  <h2>10. Your choices</h2>
+  <h2>11. Your choices</h2>
   <ul>
     <li>You can disable or remove the extension at any time in your browser's extension settings.</li>
     <li>You can clear or change the data stored by the extension (such as your profile, API key, or preferences) at any time via the extension's options page.</li>
     <li>You may choose not to enter an AI API key; in that case, the AI comment generation feature will be disabled.</li>
   </ul>
 
-  <h2>11. Changes to this policy</h2>
+  <h2>12. Changes to this policy</h2>
   <p>
     We may update this privacy policy from time to time. The "Last updated" date at the top indicates the latest revision. Your continued use of the extension after any changes signifies your acceptance of the updated policy.
   </p>
 
-  <h2>12. Contact</h2>
+  <h2>13. Contact</h2>
   <p>
     If you have any questions about this privacy policy, you can contact the developer at:
   </p>
@@ -256,11 +292,28 @@
       <li>用于调用 AI 的 API Key（仅保存在 <code>chrome.storage.local</code>，不会同步或导出）。</li>
       <li>开关类偏好设置：是否自动打开浮窗、是否显示可选的外链导出控件等。</li>
       <li>用于避免在同一域名过于频繁生成文案的短期本地冷却记录（会定期清理）。</li>
-      <li>成功评论历史仅保留在本设备的 IndexedDB 中，不会发送到 AutoComment 后端。它会精确保留实际提交的评论 HTML（即编辑器值），并保存从该 HTML 派生且经过空白规范化的纯文本表示、目标页面 URL 和域名、推广网站 URL 和域名、提交时间与状态、批次/任务标识、来源，以及每个链接经空白规范化的锚文本和原始/解析后 URL。该历史不会另行收集姓名、邮箱地址、密码、API Key 或其他表单凭据。</li>
+      <li>成功评论历史会先写入本设备的 IndexedDB；只有当你主动启用可选的云同步时，它才会离开本设备。它会精确保留实际提交的评论 HTML（即编辑器值），并保存从该 HTML 派生且经过空白规范化的纯文本表示、目标页面 URL 和域名、推广网站 URL 和域名、提交时间与状态、批次/任务标识、来源，以及每个链接经空白规范化的锚文本和原始/解析后 URL。该历史不会另行收集姓名、邮箱地址、密码、API Key 或其他表单凭据。</li>
     </ul>
-    <p>这些数据仅保存在你的浏览器中，不会出售，不用于投放广告。</p>
+    <p>本地数据通过 Chrome 浏览器存储 API 保存在你的设备上，不会出售，不用于投放广告。</p>
 
-    <h2>三、从网页读取的数据</h2>
+    <h2>三、可选的云同步</h2>
+    <p>
+      云同步是可选功能，只有你主动启用后才会运行。启用后，扩展会把成功评论历史以及以下白名单内的非敏感设置发送到 AutoComment Cloudflare Worker，并存储在 Cloudflare D1：推广 URL 与文案、自动填表的姓名与邮箱、AI API Base URL 与模型 ID、是否显示外链导出控件、批处理复选框设置、批处理并发数、批处理超时时间，以及公开的评论用户 ID。
+    </p>
+    <p>
+      同步的评论记录包含上文列出的精确历史字段。你的表单密码和 AI API Key 只保存在当前浏览器本地，不会上传到 Cloudflare D1。Cookie、页面凭据、临时批量 URL 队列、提交上下文和恢复检查点也不会参与云同步。
+    </p>
+    <p>
+      同步密钥用于让不同浏览器连接同一个云端仓库。任何获得同步密钥的人都能访问、修改和删除该同步仓库中的数据，因此请妥善保管。同步密钥丢失后无法恢复，也无法重新连接该云端仓库；AutoComment 目前不支持轮换同步密钥。
+    </p>
+    <p>
+      云端历史会一直保留，直到你从所有设备永久删除单条记录，或删除整个云端仓库。本地超过 90 天的缓存记录，只有在云端已确认完全相同的同步版本后才可能自动清理；未经云端确认的记录不会被自动清理。关闭云同步时，原有的导出提醒和明确确认后本地删除流程保持不变。
+    </p>
+    <p>
+      从一台设备卸载扩展会删除该设备上的本地扩展数据，但不会删除云端仓库，也不会删除其他已连接设备可访问的副本。如果希望移除同步数据，请在卸载前明确删除云端仓库。
+    </p>
+
+    <h2>四、从网页读取的数据</h2>
     <p>为实现自动填表、识别评论框和生成文案，扩展会在当前页面读取：</p>
     <ul>
       <li>表单字段（input/textarea）信息，用于识别并填写姓名、邮箱、网站、密码等。</li>
@@ -269,7 +322,7 @@
     </ul>
     <p>扩展不会读取你的全局浏览历史，也不会跨站跟踪你。静态内容脚本通过 <code>&lt;all_urls&gt;</code> 在匹配的已加载页面运行，包括用户发起的批量处理标签页。</p>
 
-    <h2>四、发送到第三方 AI 服务的数据</h2>
+    <h2>五、发送到第三方 AI 服务的数据</h2>
     <p>
       仅当你主动请求生成推广文案时，扩展才会将当前页面的精简摘要（URL、标题、描述、截断后的正文内容）以及提示词模板直接发送给你配置的 OpenAI 兼容 API 服务商，以便生成一段评论文案。
     </p>
@@ -278,7 +331,7 @@
     </p>
     <p>API Key 只会在你请求生成文案或主动测试连接时作为授权信息发送给你配置的服务商；只有生成请求会发送上述有限的页面上下文。</p>
 
-    <h2>五、我们不会做的事情</h2>
+    <h2>六、我们不会做的事情</h2>
     <ul>
       <li>不会出售你的数据。</li>
       <li>不会用你的数据做定向广告或跨站画像。</li>
@@ -286,20 +339,20 @@
       <li>不会篡改第三方网站的脚本逻辑。</li>
     </ul>
 
-    <h2>六、权限说明</h2>
+    <h2>七、权限说明</h2>
     <ul>
       <li><strong><code>activeTab</code></strong>：可用于用户发起的标签页交互；它不授予也不描述静态内容脚本对页面 DOM 的访问。</li>
       <li><strong>内容脚本匹配范围</strong>：静态内容脚本通过 <code>&lt;all_urls&gt;</code> 在匹配的已加载页面运行，包括用户发起的批量处理标签页；它们会读取上述页面数据并填写识别到的表单字段。</li>
       <li><strong>模型 API 主机权限</strong>：OpenRouter 默认拥有模型 API 主机权限；保存或测试其他 HTTP(S) API Base URL 时，只会为该服务商主机请求可选权限。</li>
-      <li><strong><code>storage</code></strong>：用于保存上述资料、API Base URL、模型 ID、仅本地保存的 API Key、偏好设置和冷却记录。</li>
+      <li><strong><code>storage</code></strong>：用于保存上述资料、API Base URL、模型 ID、仅本地保存的 API Key 与同步密钥、偏好设置和冷却记录。</li>
       <li><strong><code>unlimitedStorage</code></strong>：此权限用于避免常规扩展存储配额阻碍本地评论历史持续增长。</li>
-      <li><strong><code>alarms</code></strong>：此权限用于安排本地保留期限检查和历史提醒；闹钟绝不会删除历史。</li>
+      <li><strong><code>alarms</code></strong>：此权限用于安排云同步、本地保留期限检查和历史提醒。自动清理本地缓存仍受上文云端确认条件约束。</li>
       <li><strong><code>notifications</code></strong>：此权限用于在历史记录接近或超过 90 天清理阈值时显示本地提醒。</li>
     </ul>
 
-    <h2>七、你的选择</h2>
+    <h2>八、你的选择</h2>
     <p>
-      历史记录按滚动周期在满 90 天后才具备清理资格，但提醒闹钟绝不会删除记录。只有先导出并由你明确确认后才会删除；取消操作会保留全部记录。卸载扩展会随扩展的其他本地数据一并删除其 IndexedDB 历史。
+      关闭云同步时，历史记录按滚动周期在满 90 天后才具备清理资格，但提醒闹钟绝不会删除记录。只有先导出并由你明确确认后才会删除；取消操作会保留全部记录。启用云同步时，只有符合上文云端确认条件的本地缓存才会自动清理，云端副本仍会保留到你明确删除为止。
     </p>
     <ul>
       <li>你可以随时在浏览器中禁用或卸载本扩展。</li>
@@ -307,7 +360,7 @@
       <li>如果你不填写 API Key，则不会调用 AI，文案生成功能将保持关闭。</li>
     </ul>
 
-    <h2>八、联系方式</h2>
+    <h2>九、联系方式</h2>
     <p>
       如对本隐私政策有任何问题，可通过以下邮箱联系开发者：<br />
       <strong>邮箱：</strong> <a href="mailto:cloudhu2000@gmail.com">cloudhu2000@gmail.com</a>

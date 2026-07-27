@@ -4,6 +4,9 @@ import {
   buildCommentCsvRow,
   buildCsvPartName
 } from './lib/comment-history-csv.mjs';
+import { createCloudHistoryDataSource } from './lib/cloud-history-data-source.mjs';
+import { createCloudHistoryController } from './lib/cloud-history-controller.mjs';
+import { bootAppShell } from './lib/app-shell.mjs';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const EXPIRY_DAYS = 90;
@@ -59,6 +62,8 @@ export function buildHistoryFilter(values = {}) {
     to,
     targetDomain: normalizedText(values.targetDomain, { lowercase: true }),
     promotedDomain: normalizedText(values.promotedDomain, { lowercase: true }),
+    profileId: normalizedText(values.profileId),
+    promotionSiteId: normalizedText(values.promotionSiteId),
     anchorTextPrefix: normalizedText(values.anchorTextPrefix, { lowercase: true }),
     hrefDomain: normalizedText(values.hrefDomain, { lowercase: true }),
     limit: normalizedPageSize(values.pageSize ?? values.limit)
@@ -136,7 +141,12 @@ export function createPaginationState() {
 }
 
 export function advancePagination(state, nextCursor) {
-  const safeCursor = normalizedCursor(nextCursor);
+  const safeCursor = (
+    nextCursor
+    && typeof nextCursor === 'object'
+    && ['local', 'cloud'].includes(nextCursor.phase)
+    && Number.isFinite(nextCursor.cutoff)
+  ) ? nextCursor : normalizedCursor(nextCursor);
   if (!safeCursor) return state;
   const pageIndex = state.pageIndex + 1;
   const cursors = state.cursors.slice(0, pageIndex);
@@ -264,6 +274,8 @@ function formValues(elements) {
     dateTo: elements.dateTo.value,
     targetDomain: elements.targetDomain.value,
     promotedDomain: elements.promotedDomain.value,
+    profileId: elements.profileId.value,
+    promotionSiteId: elements.promotionSiteId.value,
     anchorTextPrefix: elements.anchorTextPrefix.value,
     hrefDomain: elements.hrefDomain.value,
     pageSize: elements.pageSize.value
@@ -275,7 +287,7 @@ function setPageStatus(elements, message, isError = false) {
   elements.pageStatus.classList.toggle('error', isError);
 }
 
-function renderSummary(elements, summary, estimatedUsage) {
+function renderSummary(elements, summary, estimatedUsage, cloudEnabled = false) {
   setStoredText(elements.summaryTotal, summary?.totalCount ?? 0);
   setStoredText(elements.summaryLast24Hours, summary?.last24HoursCount ?? 0);
   setStoredText(elements.summaryDueSoon, summary?.dueSoonCount ?? 0);
@@ -288,12 +300,16 @@ function renderSummary(elements, summary, estimatedUsage) {
   if (expiredCount > 0) {
     setStoredText(
       elements.retentionBanner,
-      `有 ${expiredCount} 条记录已满 90 天，仍会保留，直到你完成导出并明确确认删除。`
+      cloudEnabled
+        ? `有 ${expiredCount} 条记录已满 90 天；其中已确认同步且无待处理更改的本机缓存会自动清理，其他记录继续保留。`
+        : `有 ${expiredCount} 条记录已满 90 天，仍会保留，直到你完成导出并明确确认删除。`
     );
   } else if (dueSoonCount > 0) {
     setStoredText(
       elements.retentionBanner,
-      `有 ${dueSoonCount} 条记录将在近期达到 90 天，请提前安排导出归档。`
+      cloudEnabled
+        ? `有 ${dueSoonCount} 条本机缓存将在近期达到 90 天；仅已确认同步且无待处理更改的记录会自动清理。`
+        : `有 ${dueSoonCount} 条记录将在近期达到 90 天，请提前安排导出归档。`
     );
   }
 }
@@ -342,7 +358,7 @@ function renderRecords(documentRef, elements, records) {
   if (!Array.isArray(records) || records.length === 0) {
     const row = documentRef.createElement('tr');
     const cell = createTextCell(documentRef, '没有符合条件的评论历史。', 'empty-cell');
-    cell.colSpan = 6;
+    cell.colSpan = 8;
     row.appendChild(cell);
     elements.historyTableBody.appendChild(row);
     return;
@@ -361,6 +377,14 @@ function renderRecords(documentRef, elements, records) {
     row.appendChild(createTextCell(documentRef, formatDateTime(record.submittedAt), 'time-cell'));
     row.appendChild(createUrlCell(documentRef, record.targetPageUrl));
     row.appendChild(createUrlCell(documentRef, record.promotedWebsiteUrl));
+    row.appendChild(createTextCell(
+      documentRef,
+      record.profileDisplayName || record.profileId || '—'
+    ));
+    row.appendChild(createTextCell(
+      documentRef,
+      record.promotionSiteName || record.promotionSiteId || '—'
+    ));
     row.appendChild(createTextCell(documentRef, record.commentText || record.commentHtml, 'comment-cell'));
     row.appendChild(createTextCell(documentRef, record.source === 'legacy' ? '旧记录' : '当前记录'));
 
@@ -368,7 +392,7 @@ function renderRecords(documentRef, elements, records) {
     detailRow.className = 'detail-row';
     detailRow.hidden = true;
     const detailCell = documentRef.createElement('td');
-    detailCell.colSpan = 6;
+    detailCell.colSpan = 8;
     const detailContainer = documentRef.createElement('div');
     detailContainer.className = 'detail-content';
     detailCell.appendChild(detailContainer);
@@ -421,6 +445,8 @@ function getElements(documentRef) {
     'dateTo',
     'targetDomain',
     'promotedDomain',
+    'profileId',
+    'promotionSiteId',
     'anchorTextPrefix',
     'hrefDomain',
     'pageSize',
@@ -456,6 +482,13 @@ async function estimateStorage() {
 
 export function bootHistoryPage(documentRef = document, {
   requestMessage = sendHistoryMessage,
+  dataSource: dataSourceOverride,
+  isOnline = () => (
+    typeof navigator === 'undefined' || navigator.onLine !== false
+  ),
+  confirmDelete = async (message) => (
+    documentRef.defaultView?.confirm?.(message) === true
+  ),
   search = typeof location !== 'undefined' ? location.search : '',
   now = Date.now(),
   estimateStorage: estimateStorageForPage = estimateStorage,
@@ -465,9 +498,37 @@ export function bootHistoryPage(documentRef = document, {
   const elements = getElements(documentRef);
   if (Object.values(elements).some((element) => !element)) return;
 
+  const dataSource = dataSourceOverride ?? createCloudHistoryDataSource({
+    sendMessage: async (message) => {
+      try {
+        return { ok: true, data: await requestMessage(message) };
+      } catch (error) {
+        return {
+          ok: false,
+          error: {
+            code: typeof error?.code === 'string'
+              ? error.code
+              : 'HISTORY_REQUEST_FAILED',
+            message: error?.message || '评论历史请求失败。',
+            retryable: error?.retryable !== false
+          }
+        };
+      }
+    },
+    now: () => now
+  });
+  const historyController = createCloudHistoryController({
+    document: documentRef,
+    dataSource,
+    confirmDelete,
+    loadLocalAnchors: (commentId) => requestMessage(
+      buildAnchorsRequest(commentId)
+    )
+  });
   let pagination = createPaginationState();
   let nextCursor = null;
   let requestGeneration = 0;
+  let cloudSyncStatus = Object.freeze({ enabled: false, state: 'unavailable' });
   let completedExportSessionId = '';
   let exportInProgress = false;
   let exportFilterGeneration = 0;
@@ -501,25 +562,34 @@ export function bootHistoryPage(documentRef = document, {
     const generation = ++requestGeneration;
     const pageState = {
       filter: { ...activeFilter },
-      cursor: normalizedCursor(pagination.cursor),
+      cursor: pagination.cursor,
       pageIndex: pagination.pageIndex
     };
     elements.previousPageBtn.disabled = true;
     elements.nextPageBtn.disabled = true;
     setPageStatus(elements, '正在加载…');
     try {
-      const request = buildActiveHistoryListRequest(pageState.filter, pageState.cursor);
-      const page = await requestMessage(request);
+      const page = await dataSource.list({
+        ...pageState.filter,
+        syncEnabled: cloudSyncStatus.enabled === true,
+        online: isOnline()
+      }, pageState.cursor);
       if (generation !== requestGeneration) return;
-      nextCursor = normalizedCursor(page?.nextCursor);
-      renderRecords(documentRef, elements, page?.records);
+      nextCursor = page?.nextCursor && typeof page.nextCursor === 'object'
+        ? page.nextCursor
+        : null;
+      historyController.renderRecords(page?.records);
       setStoredText(elements.pageLabel, `第 ${pageState.pageIndex + 1} 页`);
       setPageStatus(elements, `本页 ${page?.records?.length || 0} 条`);
+      return true;
     } catch (error) {
-      if (generation !== requestGeneration) return;
-      nextCursor = null;
-      renderRecords(documentRef, elements, []);
-      setPageStatus(elements, error.message, true);
+      if (generation !== requestGeneration) return false;
+      setPageStatus(
+        elements,
+        error?.message || '评论历史请求失败，请稍后重试。',
+        true
+      );
+      return false;
     } finally {
       if (generation !== requestGeneration) return;
       elements.previousPageBtn.disabled = pageState.pageIndex === 0;
@@ -537,7 +607,8 @@ export function bootHistoryPage(documentRef = document, {
     renderSummary(
       elements,
       summary,
-      estimatedUsage.status === 'fulfilled' ? estimatedUsage.value : undefined
+      estimatedUsage.status === 'fulfilled' ? estimatedUsage.value : undefined,
+      cloudSyncStatus.enabled === true
     );
     renderArchiveEvents(
       documentRef,
@@ -684,7 +755,8 @@ export function bootHistoryPage(documentRef = document, {
     const successMessage = `已删除 ${result?.deletedCount || 0} 条已归档记录。`;
     setExportStatus(successMessage);
     try {
-      await Promise.all([loadOverview(), loadPage()]);
+      const [, pageLoaded] = await Promise.all([loadOverview(), loadPage()]);
+      if (!pageLoaded) throw new Error('page refresh failed');
     } catch (_) {
       setExportStatus(`${successMessage} 页面数据刷新失败，请手动刷新。`, true);
     }
@@ -733,10 +805,22 @@ export function bootHistoryPage(documentRef = document, {
     } catch (_) {
       // The page remains usable if the retry status cannot be refreshed.
     }
+    try {
+      cloudSyncStatus = Object.freeze(await dataSource.status());
+    } catch (_) {
+      cloudSyncStatus = Object.freeze({
+        enabled: false,
+        state: 'unavailable'
+      });
+    }
+    historyController.renderStatus(cloudSyncStatus, isOnline());
     await Promise.all([loadOverview(), loadPage()]);
   })();
 }
 
 if (typeof document !== 'undefined') {
-  document.addEventListener('DOMContentLoaded', () => bootHistoryPage(document));
+  document.addEventListener('DOMContentLoaded', () => {
+    bootAppShell(document, { currentUrl: window.location.href });
+    bootHistoryPage(document);
+  });
 }
