@@ -200,6 +200,69 @@ test('accepts removed-tab checkpoint and replenishes the freed worker slot', asy
   assert.deepEqual(harness.tabsApi.removeCalls, []);
 });
 
+test('keeps an unrelated recovery pause after adopting a removed-tab checkpoint', async () => {
+  const harness = createWorkerHarness({ concurrency: 1, taskCount: 2 });
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  const events = [];
+  runtime.subscribe((event) => events.push(event));
+  await runtime.start(harness.checkpoint);
+  harness.tabsApi.update = async () => {
+    throw new Error('focus failed before worker removal');
+  };
+
+  assert.equal(await runtime.focus(0), null);
+  harness.tabsApi.emitRemoved(100);
+  await Promise.resolve();
+
+  const terminalCheckpoint = structuredClone(harness.checkpoint);
+  terminalCheckpoint.updatedAt += 1;
+  Object.assign(terminalCheckpoint.tasks['0'], {
+    state: 'terminal',
+    phase: null,
+    tabId: null,
+    windowId: null,
+    startedAt: null,
+    updatedAt: terminalCheckpoint.updatedAt
+  });
+  terminalCheckpoint.results.push({
+    originalIndex: 0,
+    attempt: 1,
+    result: 'fail',
+    errorCode: 'task_failed',
+    errorMessage: 'Worker tab closed',
+    timestamp: terminalCheckpoint.updatedAt
+  });
+
+  assert.equal(await runtime.acceptRemovedTabCheckpoint({
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 100,
+    checkpoint: terminalCheckpoint
+  }), true);
+  assert.deepEqual(
+    harness.sentHandles.map(({ urlIndex }) => urlIndex),
+    [0],
+    'an unrelated safety pause must not refill automatically'
+  );
+  assert.equal(harness.intervalCallbacks.length, 1);
+  assert.equal(
+    events.some(
+      ({ transition, recovered }) => (
+        transition === 'BATCH_WORKER_TAB_REMOVED' &&
+        recovered === true
+      )
+    ),
+    false
+  );
+
+  assert.equal(await runtime.resume(terminalCheckpoint), true);
+  assert.deepEqual(
+    harness.sentHandles.map(({ urlIndex }) => urlIndex),
+    [0, 1]
+  );
+});
+
 test('ignores stale removed-tab checkpoint identities and duplicate delivery', async () => {
   const harness = createWorkerHarness({ concurrency: 1, taskCount: 2 });
   const runtime = createBatchWorkerRuntime(harness.dependencies);
