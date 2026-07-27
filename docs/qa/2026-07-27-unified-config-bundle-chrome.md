@@ -94,13 +94,14 @@ constant.
 
 | Command | Result |
 | --- | --- |
-| `npm test` | PASS — 918/918 |
+| `npm test` | PASS — 931/931 |
 | `npm run test:sync-worker` | PASS — 99/99 across 7 files |
 | `npm run typecheck:sync-worker` | PASS |
 | `npm --prefix cloudflare-sync run deploy:dry` | PASS — Wrangler 4.114.0 dry run |
 | `npm run test:chrome:config-bundle` | PASS — result JSON above |
 | `npm run test:chrome:console` | PASS — 1440/1024 table and 640 card layouts, no page errors or third-party requests |
-| `node --check` for every tracked `.js` and `.mjs` file | PASS |
+| `node --check` for every repository `.js` and `.mjs` file | PASS |
+| `git diff --check origin/master...HEAD` | PASS |
 | `git diff --check` | PASS |
 
 ## Extension-host limitation

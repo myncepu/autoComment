@@ -53,7 +53,7 @@ test('options composition uses restricted domain, secret, and portable-settings 
   assert.match(source, /createOptionsConfigBundleView/);
   assert.match(
     source,
-    /createSafeOptionsSettingsAdapter\(chrome\.storage\.sync\)/
+    /createSafeOptionsSettingsAdapter\(\s*chrome\.storage\.sync,\s*\{\s*permissions:\s*chrome\.permissions\s*\}\s*\)/
   );
   assert.doesNotMatch(source, /createProfileSecretRepository/);
   assert.doesNotMatch(source, /PROFILE_SECRETS_KEY/);

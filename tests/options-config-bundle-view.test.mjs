@@ -255,8 +255,43 @@ test('exports with the injected downloader and reports command errors', async ()
   });
   failed.exportButton.click();
   await flush();
-  assert.match(failed.status.textContent, /export_unavailable/);
+  assert.match(failed.status.textContent, /未知错误/);
   assert.equal(failed.status.classList.contains('status-warning'), true);
+});
+
+test('never renders a secret-bearing raw exception message', async () => {
+  const secret = 'sk-view-secret';
+  const harness = createViewHarness({
+    controller: {
+      async exportConfig() {
+        throw new Error(`upstream rejected api_key=${secret}`);
+      }
+    }
+  });
+
+  harness.exportButton.click();
+  await flush();
+
+  assert.match(harness.status.textContent, /未知错误/);
+  assert.doesNotMatch(harness.status.textContent, /sk-view-secret|api_key/);
+});
+
+test('renders only allowlisted stable config bundle error codes', async () => {
+  const harness = createViewHarness({
+    controller: {
+      async exportConfig() {
+        const error = new Error('internal details must stay hidden');
+        error.code = 'config_bundle_apply_failed';
+        throw error;
+      }
+    }
+  });
+
+  harness.exportButton.click();
+  await flush();
+
+  assert.match(harness.status.textContent, /config_bundle_apply_failed/);
+  assert.doesNotMatch(harness.status.textContent, /internal details/);
 });
 
 test('reports refresh failure distinctly after the import is already committed', async () => {

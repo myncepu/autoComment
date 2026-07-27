@@ -97,8 +97,8 @@ test('local dry-run preset parses as a safe deterministic 3×3 assignment bundle
   assert.equal(domainConfig.assignmentPolicy.quotas.perPromotionSite, 30);
   assert.equal(domainConfig.assignmentPolicy.quotas.perTargetDomain, 1);
   assert.deepEqual(parsed.llm, {
-    apiBaseUrl: 'http://127.0.0.1:4173/v1',
-    model: 'local-dry-run-model'
+    apiBaseUrl: 'https://openrouter.ai/api/v1',
+    model: 'qwen/qwen-plus'
   });
   assert.deepEqual(batchDefaults, {
     autoOpenPanel: true,

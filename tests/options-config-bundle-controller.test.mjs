@@ -10,6 +10,9 @@ import {
 import {
   buildDomainConfigExport
 } from '../lib/domain-config-import-export.mjs';
+import {
+  createSafeOptionsSettingsAdapter
+} from '../lib/options-safe-settings-adapter.mjs';
 
 function domainConfig({ profileCount = 1 } = {}) {
   const config = createDefaultDomainConfig({
@@ -97,9 +100,11 @@ function deferred() {
 function createHarness({
   failSettingsSave = false,
   failRollback = false,
-  deferSettingsSave = false
+  deferSettingsSave = false,
+  initialDomain = domainConfig(),
+  settingsAdapterOverride = null
 } = {}) {
-  let currentDomain = domainConfig();
+  let currentDomain = structuredClone(initialDomain);
   let currentSettings = settings();
   let domainWrites = 0;
   let settingsWrites = 0;
@@ -123,7 +128,7 @@ function createHarness({
       return this.replace(next);
     }
   };
-  const settingsAdapter = {
+  const defaultSettingsAdapter = {
     async load() { return structuredClone(currentSettings); },
     async save(next) {
       settingsWrites += 1;
@@ -133,6 +138,7 @@ function createHarness({
       currentSettings = structuredClone(next);
     }
   };
+  const settingsAdapter = settingsAdapterOverride || defaultSettingsAdapter;
   const domainController = {
     async previewImport(input) {
       domainControllerCalls.push(['preview', input]);
@@ -180,6 +186,22 @@ test('exports domain and public settings as one v3 bundle', async () => {
   assert.doesNotMatch(JSON.stringify(exported), /local-api-key|profile-password/);
 });
 
+test('export refuses a credential-bearing promotion URL without echoing its secret', async () => {
+  const secret = 'sk-export-secret';
+  const initialDomain = domainConfig();
+  initialDomain.promotionSites[0].url =
+    `https://product.example/?api_key=${secret}`;
+  const harness = createHarness({ initialDomain });
+
+  await assert.rejects(
+    harness.controller.exportConfig(),
+    (error) => (
+      error?.code === 'sensitive_config_bundle_url'
+        && !error.message.includes(secret)
+    )
+  );
+});
+
 test('previews v3 changes without writing either repository', async () => {
   const harness = createHarness();
   const before = harness.writeCounts();
@@ -220,6 +242,47 @@ test('restores domain content when public settings save fails', async () => {
     stripRevision(await harness.configRepository.load()),
     stripRevision(before)
   );
+});
+
+test('permission denial rolls back domain apply and leaves portable settings unchanged', async () => {
+  const stored = {
+    llm_api_base_url: 'https://openrouter.ai/api/v1',
+    llm_model: 'qwen/qwen-plus',
+    batch_concurrency: 2
+  };
+  const writes = [];
+  const storage = {
+    async get(keys) {
+      return Object.fromEntries(keys.flatMap((key) => (
+        Object.hasOwn(stored, key) ? [[key, structuredClone(stored[key])]] : []
+      )));
+    },
+    async set(values) {
+      writes.push(structuredClone(values));
+      Object.assign(stored, structuredClone(values));
+    }
+  };
+  const settingsAdapter = createSafeOptionsSettingsAdapter(storage, {
+    permissions: {
+      async contains() { return false; },
+      async request() { return false; }
+    }
+  });
+  const harness = createHarness({ settingsAdapterOverride: settingsAdapter });
+  const beforeDomain = await harness.configRepository.load();
+  const beforeSettings = structuredClone(stored);
+  const preview = await harness.controller.previewImport(bundleFixture());
+
+  await assert.rejects(
+    harness.controller.applyImport(preview),
+    (error) => error?.code === 'config_bundle_apply_failed'
+  );
+  assert.deepEqual(
+    stripRevision(await harness.configRepository.load()),
+    stripRevision(beforeDomain)
+  );
+  assert.deepEqual(stored, beforeSettings);
+  assert.deepEqual(writes, []);
 });
 
 test('reports a dedicated error when rollback cannot restore the domain', async () => {

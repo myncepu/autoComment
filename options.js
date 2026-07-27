@@ -140,7 +140,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     secretRepository
   });
   const safeSettingsAdapter =
-    createSafeOptionsSettingsAdapter(chrome.storage.sync);
+    createSafeOptionsSettingsAdapter(chrome.storage.sync, {
+      permissions: chrome.permissions
+    });
   const bundleController = createOptionsConfigBundleController({
     configRepository,
     domainController,

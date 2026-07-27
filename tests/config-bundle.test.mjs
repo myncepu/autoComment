@@ -55,6 +55,18 @@ function portableFixture() {
   return structuredClone(bundleFixture().data);
 }
 
+function addPromotionSite(data, url) {
+  data.domainConfig.promotionSites.push({
+    id: 'promotion-site-a',
+    name: 'Promotion site A',
+    url,
+    content: 'Public promotion content',
+    enabled: true,
+    createdAt: 100,
+    updatedAt: 100
+  });
+}
+
 function assertCode(action, code) {
   assert.throws(action, (error) => error?.code === code);
 }
@@ -160,6 +172,50 @@ test('build rejects API URLs with query or hash credentials without echoing them
         && !error.message.includes(secret)
     ));
   }
+});
+
+test('parse rejects promotion URLs with query or hash credentials without echoing them', () => {
+  const secret = 'sk-promotion-secret';
+  for (const promotionUrl of [
+    `https://promo.example/landing?api_key=${secret}`,
+    `https://promo.example/landing#access_token=${secret}`
+  ]) {
+    const input = bundleFixture();
+    addPromotionSite(input.data, promotionUrl);
+    assert.throws(() => parseConfigBundle(input), (error) => (
+      error?.code === 'sensitive_config_bundle_url'
+        && !error.message.includes(secret)
+    ));
+  }
+});
+
+test('build rejects promotion URLs with query or hash credentials without echoing them', () => {
+  const secret = 'sk-promotion-secret';
+  for (const promotionUrl of [
+    `https://promo.example/landing?client_secret=${secret}`,
+    `https://promo.example/landing#password=${secret}`
+  ]) {
+    const data = portableFixture();
+    addPromotionSite(data, promotionUrl);
+    assert.throws(() => buildConfigBundle(data), (error) => (
+      error?.code === 'sensitive_config_bundle_url'
+        && !error.message.includes(secret)
+    ));
+  }
+});
+
+test('promotion URLs retain safe ordinary query parameters and fragments', () => {
+  const input = bundleFixture();
+  addPromotionSite(
+    input.data,
+    'https://promo.example/landing?utm_source=autocomment&campaign=summer#comments'
+  );
+
+  const parsed = parseConfigBundle(input);
+  assert.equal(
+    parsed.domainConfig.promotionSites[0].url,
+    'https://promo.example/landing?utm_source=autocomment&campaign=summer#comments'
+  );
 });
 
 test('rejects invalid batch defaults', () => {

@@ -95,8 +95,8 @@
       }
     },
     "llm": {
-      "apiBaseUrl": "http://127.0.0.1:4173/v1",
-      "model": "local-dry-run-model"
+      "apiBaseUrl": "https://openrouter.ai/api/v1",
+      "model": "qwen/qwen-plus"
     },
     "batchDefaults": {
       "autoOpenPanel": true,
