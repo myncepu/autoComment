@@ -132,6 +132,36 @@ test('rejects invalid public LLM settings', () => {
   }
 });
 
+test('parse rejects API URLs with query or hash credentials without echoing them', () => {
+  const secret = 'sk-query-hash-secret';
+  for (const apiBaseUrl of [
+    `https://provider.example/v1?api_key=${secret}`,
+    `https://provider.example/v1#token=${secret}`
+  ]) {
+    const input = bundleFixture();
+    input.data.llm.apiBaseUrl = apiBaseUrl;
+    assert.throws(() => parseConfigBundle(input), (error) => (
+      error?.code === 'invalid_config_bundle_llm'
+        && !error.message.includes(secret)
+    ));
+  }
+});
+
+test('build rejects API URLs with query or hash credentials without echoing them', () => {
+  const secret = 'sk-query-hash-secret';
+  for (const apiBaseUrl of [
+    `https://provider.example/v1?api_key=${secret}`,
+    `https://provider.example/v1#token=${secret}`
+  ]) {
+    const data = portableFixture();
+    data.llm.apiBaseUrl = apiBaseUrl;
+    assert.throws(() => buildConfigBundle(data), (error) => (
+      error?.code === 'invalid_config_bundle_llm'
+        && !error.message.includes(secret)
+    ));
+  }
+});
+
 test('rejects invalid batch defaults', () => {
   for (const mutate of [
     (input) => { input.data.batchDefaults.concurrency = 0; },
