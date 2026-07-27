@@ -40,6 +40,7 @@ import {
 } from './lib/batch-session-journal.mjs';
 import {
   createBatchSubmitContextStore,
+  createSubmitContextMatch,
   installBatchSubmitContextListener
 } from './lib/batch-submit-context-store.mjs';
 import { isDurableBatchConfirmation } from './lib/batch-scheduler.mjs';
@@ -207,12 +208,21 @@ function batchIngressError(code) {
 }
 
 function submitContextMatches(context, message) {
-  return Boolean(
-    context &&
-    context.batchId === message.batchId &&
-    context.urlIndex === message.urlIndex &&
-    context.attempt === message.attempt
-  );
+  if (!context) return false;
+  let expected;
+  try {
+    expected = createSubmitContextMatch(message);
+  } catch (_) {
+    return false;
+  }
+  return [
+    'batchId',
+    'taskId',
+    'urlIndex',
+    'profileId',
+    'promotionSiteId',
+    'attempt'
+  ].every((field) => context[field] === expected[field]);
 }
 
 async function clearExactSubmitContext(message, sender) {
@@ -225,12 +235,7 @@ async function clearExactSubmitContext(message, sender) {
   try {
     released = await batchSubmitContextStore.clearIfMatches(
       sender.tab.id,
-      {
-        batchId: message.batchId,
-        urlIndex: message.urlIndex,
-        attempt: message.attempt,
-        historyRevision: message.history?.historyRevision
-      }
+      createSubmitContextMatch(message)
     );
     if (!released) {
       released = await batchSubmitContextStore.get(sender.tab.id) === null;
@@ -520,11 +525,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         console.log('[background] BATCH_REPORT_RESULT <<< sendResponse({ok:true})');
         sendResponse({ ok: true });
       } catch (e) {
-        console.error('[background] BATCH_REPORT_RESULT 错误:', e);
         if (e?.code === 'submit_context_unresolved') {
+          console.log(
+            '[background] BATCH_REPORT_RESULT 延迟：提交上下文尚待确认'
+          );
           sendResponse({ ok: true, deferred: true });
           return;
         }
+        console.error('[background] BATCH_REPORT_RESULT 错误:', e);
         sendResponse({
           ok: false,
           error: e?.code || 'batch_report_failed'

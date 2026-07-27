@@ -4635,7 +4635,7 @@
       console.log('[content] background 响应:', confirmation.acknowledgement);
       console.log('[content] handleBatchTask 完成 <<<', { batchId, urlIndex });
     } catch (err) {
-      console.warn('[content] handleBatchTask 捕获错误', {
+      console.log('[content] handleBatchTask 转入队列错误处理', {
         errorCode: typeof err?.code === 'string'
           ? err.code
           : (

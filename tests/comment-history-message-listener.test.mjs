@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { webcrypto } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
@@ -11,6 +12,10 @@ import {
 import {
   openCommentHistoryDb
 } from '../lib/comment-history-db.mjs';
+import {
+  createPlanConfirmation,
+  finalizeBatchPlan
+} from '../lib/batch-plan-confirmation.mjs';
 
 function createFixture(service = {}) {
   const listeners = [];
@@ -322,6 +327,7 @@ test('background migrates an old record before its startup retention check and c
   const previousConsoleLog = console.log;
   const previousConsoleError = console.error;
   const previousDateNow = Date.now;
+  const backgroundErrorLogs = [];
   const fixedNow = Date.UTC(2026, 6, 24, 12, 0, 0);
   const runtimeListeners = [];
   const runtimeMessages = [];
@@ -497,7 +503,9 @@ test('background migrates an old record before its startup retention check and c
   Date.now = () => fixedNow;
   process.emitWarning = () => {};
   console.log = () => {};
-  console.error = () => {};
+  console.error = (...args) => {
+    backgroundErrorLogs.push(args);
+  };
   t.after(() => {
     globalThis.chrome = previousChrome;
     globalThis.indexedDB = previousIndexedDb;
@@ -1331,6 +1339,7 @@ globalThis.confirmBatchHistoryDurably = confirmBatchHistoryDurably;`,
   const messagesBeforeAmbiguousFailure = runtimeMessages.length;
   const resultsBeforeAmbiguousFailure =
     structuredClone(storageData.batchResults);
+  const errorsBeforeAmbiguousFailure = backgroundErrorLogs.length;
   assert.deepEqual(await dispatchConfirm({
     type: 'BATCH_REPORT_RESULT',
     batchId: message.batchId,
@@ -1355,6 +1364,11 @@ globalThis.confirmBatchHistoryDurably = confirmBatchHistoryDurably;`,
     'submitting'
   );
   assert.equal(tabData.has(42), true);
+  assert.equal(
+    backgroundErrorLogs.length,
+    errorsBeforeAmbiguousFailure,
+    'an expected unresolved submit must not create a Chrome extension error'
+  );
 
   assert.deepEqual(await dispatchConfirm({
     type: 'BATCH_CLEAR_SUBMIT_CONTEXT',
@@ -1383,4 +1397,148 @@ globalThis.confirmBatchHistoryDurably = confirmBatchHistoryDurably;`,
   assert.equal(runtimeMessages.at(-1).type, 'BATCH_CONFIRMED');
   assert.equal(runtimeMessages.at(-1).attempt, 1);
   assert.equal(runtimeMessages.at(-1).result, 'fail');
+
+  assert.deepEqual(await dispatchConfirm({
+    type: 'BATCH_SESSION_STOP',
+    batchId: message.batchId
+  }, {
+    id: 'extension-id',
+    tab: { id: 900, windowId: 52 },
+    url: 'chrome-extension://extension-id/batch.html'
+  }).then((responses) => responses.map((response) => ({
+    ok: response.ok,
+    status: response.checkpoint?.status
+  }))), [{
+    ok: true,
+    status: 'terminated'
+  }]);
+
+  const assignedTask = {
+    taskId: 'assigned-plan:1',
+    urlIndex: 0,
+    rowNumber: 1,
+    targetUrl: 'https://assigned-target.test/post',
+    canonicalTargetUrl: 'https://assigned-target.test/post',
+    targetDomain: 'assigned-target.test',
+    sourceDomain: 'assigned-target.test',
+    profileId: 'default-profile',
+    promotionSiteId: 'default-promotion-site',
+    assignmentPairId: 'assigned-pair',
+    assignmentSource: 'weighted',
+    state: 'eligible',
+    blockReason: null,
+    recentSuccessOverride: false
+  };
+  const assignedPlan = await finalizeBatchPlan({
+    version: 2,
+    planId: 'assigned-plan',
+    planFingerprint: null,
+    configRevision: storageData.autoCommentDomainConfig.revision,
+    createdAt: fixedNow,
+    illegalSiteRulesVersion: 'integration-v1',
+    quotas: {
+      batch: 100,
+      perProfile: 50,
+      perPromotionSite: 50,
+      perTargetDomain: 3
+    },
+    repeatOverrides: [],
+    profiles: {
+      'default-profile': {
+        id: 'default-profile',
+        displayName: 'Legacy Alice',
+        name: 'Legacy Alice',
+        email: 'alice@example.test'
+      }
+    },
+    promotionSites: {
+      'default-promotion-site': {
+        id: 'default-promotion-site',
+        name: '默认推广网站',
+        url: 'https://promo.test/',
+        content: 'Legacy promotion content'
+      }
+    },
+    tasks: [assignedTask],
+    warnings: [],
+    confirmationRequirements: []
+  }, webcrypto);
+  const assignedIdentity = {
+    batchId: 'assigned-plan',
+    taskId: assignedTask.taskId,
+    urlIndex: assignedTask.urlIndex,
+    profileId: assignedTask.profileId,
+    promotionSiteId: assignedTask.promotionSiteId,
+    attempt: 1
+  };
+  const assignedHistory = {
+    ...message.history,
+    targetPageUrl: assignedTask.targetUrl,
+    historyRevision: {
+      capturedAt: fixedNow + 30,
+      recordedAt: fixedNow + 31,
+      sequence: 5,
+      id: 'revision-assigned-confirm'
+    }
+  };
+  const assignedStartResponses = await dispatchConfirm({
+    type: 'BATCH_SESSION_START',
+    batchId: assignedIdentity.batchId,
+    plan: assignedPlan,
+    confirmation: createPlanConfirmation(assignedPlan, {
+      normalConfirmed: true,
+      highRiskConfirmed: false
+    }, () => fixedNow),
+    settings: {
+      autoOpenPanel: true,
+      autoGenerate: true,
+      autoSubmit: true,
+      timeoutSeconds: 60,
+      concurrency: 1
+    }
+  }, {
+    id: 'extension-id',
+    tab: { id: 900, windowId: 52 },
+    url: 'chrome-extension://extension-id/batch.html'
+  });
+  assert.equal(
+    assignedStartResponses[0]?.ok,
+    true,
+    JSON.stringify(assignedStartResponses)
+  );
+  assert.deepEqual(await dispatchConfirm({
+    type: 'BATCH_CREATE_WORKER_TAB',
+    ...assignedIdentity,
+    requestId: 'assigned-plan:0:1'
+  }, {
+    id: 'extension-id',
+    tab: { id: 900, windowId: 52 },
+    url: 'chrome-extension://extension-id/batch.html'
+  }).then((responses) => responses.map((response) => response.ok)), [true]);
+  assert.deepEqual(await dispatchConfirm({
+    type: 'BATCH_TASK_SUBMITTING',
+    ...assignedIdentity
+  }).then((responses) => responses.map((response) => response.ok)), [true]);
+  assert.deepEqual(await dispatchConfirm({
+    type: 'BATCH_SAVE_SUBMIT_CONTEXT',
+    context: {
+      ...assignedIdentity,
+      result: 'success',
+      history: assignedHistory
+    }
+  }), [{ ok: true }]);
+  assert.ok(storageData.batchSubmitContextsByTab['42']);
+  assert.deepEqual(await dispatchConfirm({
+    type: 'BATCH_HANDLE_CONFIRM',
+    ...assignedIdentity,
+    result: 'success',
+    url: assignedTask.targetUrl,
+    aiContent: 'Assigned content',
+    history: assignedHistory
+  }), [{
+    ok: true,
+    historySaveStatus: 'saved',
+    historyPendingCount: 0
+  }]);
+  assert.equal(storageData.batchSubmitContextsByTab['42'], undefined);
 });
