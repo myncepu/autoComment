@@ -67,21 +67,17 @@ function createViewHarness(overrides = {}) {
     downloadJson(value, fileName) {
       calls.downloads.push({ value, fileName });
     },
-    onApplied(value) {
+    async onApplied(value) {
       calls.applied.push(value);
+      return overrides.onApplied?.(value);
     }
   });
   const fileInput = document.getElementById('importConfigFileInput');
 
-  function selectText(text, fileName = 'config.json') {
+  function selectFile(file, fileName = file.name || 'config.json') {
     Object.defineProperty(fileInput, 'files', {
       configurable: true,
-      value: [{
-        name: fileName,
-        async text() {
-          return text;
-        }
-      }]
+      value: [file]
     });
     Object.defineProperty(fileInput, 'value', {
       configurable: true,
@@ -89,6 +85,15 @@ function createViewHarness(overrides = {}) {
       value: `C:\\fakepath\\${fileName}`
     });
     fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  function selectText(text, fileName = 'config.json') {
+    selectFile({
+      name: fileName,
+      async text() {
+        return text;
+      }
+    }, fileName);
   }
 
   return {
@@ -102,6 +107,7 @@ function createViewHarness(overrides = {}) {
     applyButton: document.getElementById('applyImportConfigBtn'),
     status: document.getElementById('importExportStatus'),
     summary: document.getElementById('importPreviewSummary'),
+    selectFile,
     selectText
   };
 }
@@ -238,6 +244,7 @@ test('exports with the injected downloader and reports command errors', async ()
   );
   assert.match(harness.calls.downloads[0].fileName, /\.json$/);
   assert.match(harness.status.textContent, /已导出/);
+  assert.equal(harness.status.classList.contains('status-warning'), false);
 
   const failed = createViewHarness({
     controller: {
@@ -249,6 +256,45 @@ test('exports with the injected downloader and reports command errors', async ()
   failed.exportButton.click();
   await flush();
   assert.match(failed.status.textContent, /export_unavailable/);
+  assert.equal(failed.status.classList.contains('status-warning'), true);
+});
+
+test('reports refresh failure distinctly after the import is already committed', async () => {
+  const harness = createViewHarness({
+    async onApplied() {
+      throw new Error('refresh_failed');
+    }
+  });
+  harness.selectText('{}');
+  await flush();
+
+  harness.applyButton.click();
+  await flush();
+
+  assert.equal(harness.calls.apply.length, 1);
+  assert.equal(harness.calls.applied.length, 1);
+  assert.match(harness.status.textContent, /已应用/);
+  assert.match(harness.status.textContent, /页面刷新失败/);
+  assert.doesNotMatch(harness.status.textContent, /^应用失败/);
+  assert.equal(harness.applyButton.hidden, true);
+});
+
+test('destroy during a deferred file read never invokes preview', async () => {
+  const fileRead = deferred();
+  const harness = createViewHarness();
+  harness.selectFile({
+    name: 'deferred.json',
+    text() {
+      return fileRead.promise;
+    }
+  });
+  assert.equal(harness.calls.preview.length, 0);
+
+  harness.view.destroy();
+  fileRead.resolve('{}');
+  await flush();
+
+  assert.equal(harness.calls.preview.length, 0);
 });
 
 test('destroy removes all registered action listeners', async () => {
