@@ -168,6 +168,18 @@ assert.equal((await controller.handleWorkerTabRemoved(11)).changed, false);
 assert.equal((await controller.handleWorkerTabRemoved(999)).changed, false);
 ```
 
+Add a race case where the page-owned terminal path has already persisted
+`paused_recovery` with `recoveryCleanup.reason: 'ownership_unverified'` and the
+same active task still owns removed `tabId: 11`. The background removal must
+finish the terminal transition and clear that recovery condition:
+
+```js
+assert.equal(racedResponse.ok, true);
+assert.equal(racedResponse.changed, true);
+assert.equal(racedResponse.checkpoint.tasks['0'].state, 'terminal');
+assert.notEqual(racedResponse.checkpoint.status, 'paused_recovery');
+```
+
 Also assert the session journal entry for the terminalized request is removed
 after checkpoint persistence.
 
@@ -205,6 +217,15 @@ journal. Return `changed: false` for absent, stale, or already-terminal
 ownership. Do not call `removeTaskWithProof`: `tabs.onRemoved` is itself the
 authoritative fact that this exact `tabId` is gone. Keep the existing
 `terminalTask()` proof path unchanged for all message-driven terminalization.
+
+When the checkpoint is already `paused_recovery` because the page-side close
+path lost the ownership-proof race, accept only
+`recoveryCleanup.reason: 'ownership_unverified'` with
+`recoveryCleanup.diagnostic: 'tab_missing'`, set
+`terminalCleanupRetry: true`, and, after the exact task becomes terminal,
+restore checkpoint status to `running` and remove that recovery marker before
+validation and persistence. This makes listener order irrelevant without
+accepting unrelated recovery states.
 
 Expose `handleWorkerTabRemoved` on the returned controller object.
 
