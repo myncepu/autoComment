@@ -29,6 +29,8 @@ function createChromeHarness() {
   const localRemoves = [];
   const windowCreates = [];
   const windowRemoves = [];
+  const permissionChecks = [];
+  const permissionRequests = [];
   const runtimeOnMessage = new FakeChromeEvent();
   const tabsOnRemoved = new FakeChromeEvent();
   const tabsOnUpdated = new FakeChromeEvent();
@@ -139,6 +141,16 @@ function createChromeHarness() {
       async remove(windowId) {
         windowRemoves.push(windowId);
       }
+    },
+    permissions: {
+      async contains(details) {
+        permissionChecks.push(structuredClone(details));
+        return false;
+      },
+      async request(details) {
+        permissionRequests.push(structuredClone(details));
+        return true;
+      }
     }
   };
   return {
@@ -150,7 +162,9 @@ function createChromeHarness() {
     localSets,
     localRemoves,
     windowCreates,
-    windowRemoves
+    windowRemoves,
+    permissionChecks,
+    permissionRequests
   };
 }
 
@@ -450,6 +464,51 @@ test('loads only whitelisted profile and automation settings', async () => {
   assert.equal(JSON.stringify(await dependencies.loadBatchSettings()).includes(
     'must-not-be-requested'
   ), false);
+});
+
+test('requests one deduplicated permission set for batch target origins', async () => {
+  const harness = createChromeHarness();
+  const dependencies = createChromeBatchDependencies(harness.chromeApi);
+
+  await dependencies.requestTargetPermissions([
+    'https://blog.example.test/post-1',
+    'https://blog.example.test/post-2?draft=1',
+    'http://legacy.example.test:8080/comment',
+    'chrome://settings/'
+  ]);
+
+  assert.deepEqual(harness.permissionRequests, [{
+    origins: [
+      'http://legacy.example.test/*',
+      'https://blog.example.test/*'
+    ]
+  }]);
+  assert.deepEqual(harness.permissionChecks, harness.permissionRequests);
+});
+
+test('reports a stable error when batch target permission is denied', async () => {
+  const harness = createChromeHarness();
+  harness.chromeApi.permissions.request = async () => false;
+  const dependencies = createChromeBatchDependencies(harness.chromeApi);
+
+  await assert.rejects(
+    dependencies.requestTargetPermissions([
+      'https://blog.example.test/post'
+    ]),
+    (error) => error?.code === 'batch_target_permission_denied'
+  );
+});
+
+test('does not request target permissions that Chrome already granted', async () => {
+  const harness = createChromeHarness();
+  harness.chromeApi.permissions.contains = async () => true;
+  const dependencies = createChromeBatchDependencies(harness.chromeApi);
+
+  await dependencies.requestTargetPermissions([
+    'https://blog.example.test/post'
+  ]);
+
+  assert.deepEqual(harness.permissionRequests, []);
 });
 
 test('keeps the model key out of profile state and supports durable local compatibility stores', async () => {
