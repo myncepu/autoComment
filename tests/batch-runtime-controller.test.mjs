@@ -2434,6 +2434,51 @@ test('same-URL user tab without journal or opener remains owned for manual recov
   assert.equal(harness.tabStore.has(777), true);
 });
 
+test('stop releases stale ownership without deleting an unverified live tab', async () => {
+  const harness = createHarness({
+    existingTabs: [{
+      id: 777,
+      windowId: 42,
+      url: 'https://example.test/0'
+    }]
+  });
+  await harness.controller.handleMessage(startMessage(1));
+  await harness.controller.handleMessage({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 777,
+    windowId: 42
+  });
+  delete harness.sessionData[
+    'batchWorkerOwnershipV1:batch-1:0:1'
+  ];
+  harness.tabStore.set(777, {
+    id: 777,
+    windowId: 42,
+    url: 'https://example.test/0'
+  });
+
+  const response = await harness.controller.handleMessage({
+    type: 'BATCH_SESSION_STOP',
+    batchId: 'batch-1'
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.checkpoint.status, 'terminated');
+  assert.equal(response.checkpoint.tasks['0'].state, 'queued');
+  assert.equal(response.checkpoint.tasks['0'].tabId, null);
+  assert.deepEqual(harness.removedTabs, []);
+  assert.equal(harness.tabStore.has(777), true);
+
+  const replacement = await harness.controller.handleMessage(
+    startMessage(1)
+  );
+  assert.equal(replacement.ok, true);
+  assert.equal(replacement.checkpoint.status, 'running');
+});
+
 test('stale journal epoch cannot authorize target deletion', async () => {
   const harness = createHarness();
   await harness.controller.handleMessage(startMessage(1));

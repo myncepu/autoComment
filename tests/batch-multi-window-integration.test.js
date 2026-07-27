@@ -923,6 +923,22 @@ test('restart requeues a missing worker and opens a replacement without a stale-
     harness.document.body.textContent.includes('stale_worker_tab'),
     false
   );
+
+  click(harness.document, '[data-action="stop"]');
+  click(harness.document, '[data-action="confirm-layer"]');
+  await waitFor(
+    () => harness.storageLocal.data.batchRuntimeCheckpoint.status === 'terminated',
+    'stale recovery terminated'
+  );
+
+  assert.doesNotMatch(
+    harness.document.body.textContent,
+    /worker_stop_rejected/
+  );
+  assert.equal(
+    harness.document.querySelector('[data-action="new-batch"]').disabled,
+    false
+  );
 });
 
 test('running console disables the new-batch preview entry and cannot open its wizard', async (t) => {

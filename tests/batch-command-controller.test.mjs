@@ -680,27 +680,18 @@ test('pauses recoverably when terminal persistence fails after worker stop', asy
   });
 });
 
-test('does not terminate when worker stop cannot close every owned tab', async () => {
+test('background stop remains available when the page worker cannot close stale tabs', async () => {
   const harness = createCommandHarness({
     workerFailures: { stop: 'reject' }
   });
 
-  await assert.rejects(
-    harness.controller.stop(true),
-    (error) => error?.code === 'worker_stop_rejected'
-  );
+  await harness.controller.stop(true);
 
-  assert.equal(
-    harness.calls.some(
-      ([name, type]) => name === 'runtime' && type === 'BATCH_SESSION_STOP'
-    ),
-    false
-  );
-  assert.deepEqual(
-    harness.calls.filter(([name]) => name === 'runtime').map((call) => call[1]),
-    ['BATCH_SESSION_PAUSE']
-  );
-  assert.equal(harness.checkpoint.status, 'paused_recovery');
+  assert.deepEqual(harness.calls, [
+    ['worker.stop'],
+    ['runtime', 'BATCH_SESSION_STOP', { batchId: 'batch-1' }]
+  ]);
+  assert.equal(harness.checkpoint.status, 'terminated');
 });
 
 test('persists a safe retry before refilling a running worker runtime', async () => {
