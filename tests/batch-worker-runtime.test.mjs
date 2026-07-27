@@ -693,23 +693,28 @@ test('refill reclaims a safely retried attempt after current terminal tasks', as
   });
 });
 
-test('timeout seals and closes the expired tab before replenishing capacity', async () => {
+test('timeout closes a non-submitting tab without waiting for page sealing and replenishes capacity', async () => {
   let now = 1000;
   const harness = createWorkerHarness({
     concurrency: 1,
     taskCount: 2,
     timeoutSeconds: 1,
-    clock: () => now
+    clock: () => now,
+    sealTimeoutMs: 5_000
   });
+  harness.dependencies.sealSubmitContext = () => new Promise(() => {});
   const runtime = createBatchWorkerRuntime(harness.dependencies);
   await runtime.start(harness.checkpoint);
   harness.calls.length = 0;
   now = 2100;
 
-  await harness.intervalCallbacks[0]();
+  const outcome = await Promise.race([
+    harness.intervalCallbacks[0]().then(() => 'finalized'),
+    new Promise((resolve) => setTimeout(() => resolve('hung'), 100))
+  ]);
 
+  assert.equal(outcome, 'finalized');
   assert.deepEqual(harness.calls, [
-    ['seal', 0, 1, 'timeout'],
     ['runtime', 'BATCH_TASK_TERMINAL', 0, 1],
     ['close', 100],
     ['runtime', 'BATCH_TASK_ACTIVE', 1, 1],
@@ -793,6 +798,10 @@ test('timeout finalizes and replenishes when submit-context sealing never settle
   harness.dependencies.sealSubmitContext = () => new Promise(() => {});
   const runtime = createBatchWorkerRuntime(harness.dependencies);
   await runtime.start(harness.checkpoint);
+  Object.assign(harness.checkpoint.tasks['0'], {
+    state: 'submitting',
+    phase: 'confirming'
+  });
 
   const outcome = await Promise.race([
     expire(armed[0]).then(() => 'finalized'),
@@ -1223,6 +1232,10 @@ test('a deferred timeout scan cleans only its old tab after lifecycle replacemen
   };
   const runtime = createBatchWorkerRuntime(harness.dependencies);
   await runtime.start(harness.checkpoint);
+  Object.assign(harness.checkpoint.tasks['0'], {
+    state: 'submitting',
+    phase: 'confirming'
+  });
   now = 2100;
 
   const scanning = harness.intervalCallbacks[0]();
