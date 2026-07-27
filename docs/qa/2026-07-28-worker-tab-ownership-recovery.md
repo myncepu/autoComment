@@ -7,7 +7,7 @@
   # tests 960
   # pass 960
   # fail 0
-  # duration_ms 6097.300208
+  # duration_ms 5968.293666
   ```
 
 - Syntax checks: PASS
@@ -507,6 +507,31 @@ observed through context close, and worker console/errors were empty.
 Real-extension recovery submitted `0` comments; the legacy and whole-command
 local-fixture counts were both `6`; configured third-party submission
 destinations were `0`.
+
+### Independent re-review follow-up
+
+The independent final diff review then identified three narrower proof gaps.
+They were resolved before final handoff:
+
+- Reservation monotonicity now preserves `windowId`, `ownerPageTabId`, and
+  `ownershipEpoch`, and a v3 candidate must pass full checkpoint validation.
+- `workerErrorReported` events are never discarded for missing or
+  not-yet-observed attribution; every report is retained and fails the
+  acceptance, while the post-restart audit separately requires the exact
+  extension origin, version, and registration.
+- The post-stop running signal must carry a non-empty target ID that resolves
+  to the live service-worker target. It is explicitly compared with the
+  bootstrap target; this Chrome run truthfully observed
+  `reused-bootstrap-target`.
+
+The new reservation-ownership test was RED (`true !== false`) before the
+comparison was implemented. The tightened Chrome assertions were RED with
+undefined identity/attribution fields and the former broader scope label.
+They are GREEN with `restartedTargetIdentityVerified`,
+`restartedTargetComparisonVerified`, and
+`workerErrorAttributionComplete` all `true`; all worker-error ledgers are
+empty. Independent re-review verdict: PASS with no remaining actionable
+findings.
 
 ## Safety Review
 

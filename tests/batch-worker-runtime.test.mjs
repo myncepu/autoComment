@@ -341,6 +341,12 @@ test('rejects equal-time removed snapshots that regress unrelated task, result, 
     candidate.openingReservations['batch-1:2:1'].cleanupOnly = false;
     candidate.openingReservations['batch-1:2:1'].updatedAt = 4000;
   });
+  for (const field of ['windowId', 'ownerPageTabId', 'ownershipEpoch']) {
+    await runProbe((candidate) => {
+      candidate.openingReservations['batch-1:2:1'][field] =
+        Number(candidate.openingReservations['batch-1:2:1'][field] || 0) + 1;
+    });
+  }
 });
 
 test('ignores removed-tab checkpoint with a different frozen profile identity', async () => {

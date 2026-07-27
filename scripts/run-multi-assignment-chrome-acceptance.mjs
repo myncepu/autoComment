@@ -686,8 +686,15 @@ async function main() {
   let monitoredReloadReady = false;
   let monitoredWorkerClosed = false;
   let monitoredWorkerIdentityVerified = false;
+  let restartedTargetIdentityVerified = false;
+  let restartedTargetComparisonVerified = false;
+  let restartedTargetMode = '';
+  let workerErrorAttributionComplete = false;
   let monitoredWorkerObjectMode = '';
   let monitoredWorkerVersionId = null;
+  let monitoredWorkerRegistrationId = null;
+  let monitoredWorkerTargetId = null;
+  let monitorRestartedWorkerErrors = false;
   let monitoredServiceWorkerObjectCount = 0;
   let active = 0;
   let maxActive = 0;
@@ -1127,8 +1134,10 @@ async function main() {
       && target.url === bootstrapServiceWorker.url()
     ));
     assert.ok(bootstrapTarget);
+    assert.equal(typeof bootstrapTarget.targetId, 'string');
+    assert.ok(bootstrapTarget.targetId.length > 0);
     const serviceWorkerVersionSignals = [];
-    const monitoredServiceWorkerErrors = [];
+    const serviceWorkerErrorReports = [];
     const observedServiceWorkerVersionIds = new Set();
     const observedServiceWorkerRegistrationIds = new Set();
     cdpSession.on('ServiceWorker.workerVersionUpdated', ({ versions }) => {
@@ -1160,37 +1169,21 @@ async function main() {
       }
     });
     cdpSession.on('ServiceWorker.workerErrorReported', ({ errorMessage }) => {
+      if (!monitorExtensionSignals) return;
+      const sourceURL = String(errorMessage?.sourceURL || '').slice(0, 500);
       let sourceOrigin = null;
       try {
-        sourceOrigin = errorMessage?.sourceURL
-          ? new URL(errorMessage.sourceURL).origin
+        sourceOrigin = sourceURL
+          ? new URL(sourceURL).origin
           : null;
-      } catch (_) {
-        return;
-      }
-      if (
-        sourceOrigin !== null &&
-        sourceOrigin !== extensionOrigin
-      ) {
-        return;
-      }
-      if (
-        errorMessage?.versionId &&
-        !observedServiceWorkerVersionIds.has(errorMessage.versionId)
-      ) {
-        return;
-      }
-      if (
-        errorMessage?.registrationId &&
-        !observedServiceWorkerRegistrationIds.has(
-          errorMessage.registrationId
-        )
-      ) {
-        return;
-      }
-      monitoredServiceWorkerErrors.push({
+      } catch (_) {}
+      serviceWorkerErrorReports.push({
+        phase: monitorRestartedWorkerErrors
+          ? 'restarted-target-through-context-close'
+          : 'restart-transition',
         message: String(errorMessage?.errorMessage || '').slice(0, 500),
-        sourceURL: String(errorMessage?.sourceURL || '').slice(0, 500),
+        sourceURL,
+        sourceOrigin,
         versionId: errorMessage?.versionId || null,
         registrationId: errorMessage?.registrationId || null,
         lineNumber: errorMessage?.lineNumber ?? null,
@@ -1242,6 +1235,8 @@ async function main() {
     );
     assert.ok(restartedRunningSignal);
     monitoredWorkerVersionId = restartedRunningSignal.versionId;
+    monitoredWorkerRegistrationId =
+      restartedRunningSignal.registrationId;
     const liveExtensionWorkers = context.serviceWorkers().filter(
       (worker) => worker.url() === `${extensionOrigin}/background.js`
     );
@@ -1261,24 +1256,32 @@ async function main() {
     monitoredServiceWorkerObjectCount = observedServiceWorkers.size;
     assert.ok(monitoredServiceWorkerObjectCount >= 1);
     const restartedTargets = await cdpSession.send('Target.getTargets');
-    if (restartedRunningSignal.targetId) {
-      assert.equal(
-        restartedTargets.targetInfos.some((target) => (
-          target.targetId === restartedRunningSignal.targetId &&
-          target.type === 'service_worker' &&
-          target.url === monitoredServiceWorker.url()
-        )),
-        true
-      );
-    }
+    assert.equal(typeof restartedRunningSignal.targetId, 'string');
+    assert.ok(restartedRunningSignal.targetId.length > 0);
+    const restartedTarget = restartedTargets.targetInfos.find((target) => (
+      target.targetId === restartedRunningSignal.targetId &&
+      target.type === 'service_worker' &&
+      target.url === monitoredServiceWorker.url()
+    ));
+    assert.ok(restartedTarget);
+    monitoredWorkerTargetId = restartedTarget.targetId;
+    restartedTargetMode =
+      monitoredWorkerTargetId === bootstrapTarget.targetId
+        ? 'reused-bootstrap-target'
+        : 'new-post-stop-target';
+    restartedTargetComparisonVerified = true;
+    restartedTargetIdentityVerified = true;
     monitoredWorkerIdentityVerified = true;
+    monitorRestartedWorkerErrors = true;
     monitoredServiceWorkerSignals.push({
       kind: 'running',
       source: 'cdp-service-worker-version',
       objectMode: monitoredWorkerObjectMode,
       objectCount: monitoredServiceWorkerObjectCount,
       versionId: monitoredWorkerVersionId,
-      targetId: restartedRunningSignal.targetId
+      registrationId: monitoredWorkerRegistrationId,
+      targetId: monitoredWorkerTargetId,
+      bootstrapTargetId: bootstrapTarget.targetId
     });
     assert.match(monitoredServiceWorker.url(), /\/background\.js$/);
     await smokePage.reload({ waitUntil: 'domcontentloaded' });
@@ -1597,29 +1600,43 @@ async function main() {
       monitoredServiceWorkerSignals.filter((signal) => (
         signal.kind === 'console' && signal.level === 'error'
       )).map(({ text }) => text);
+    const monitoredServiceWorkerErrors = serviceWorkerErrorReports.filter(
+      ({ phase }) => phase === 'restarted-target-through-context-close'
+    );
+    const unattributedMonitoredWorkerErrors =
+      monitoredServiceWorkerErrors.filter((error) => (
+        error.sourceOrigin !== extensionOrigin ||
+        error.versionId !== monitoredWorkerVersionId ||
+        error.registrationId !== monitoredWorkerRegistrationId
+      ));
+    workerErrorAttributionComplete =
+      unattributedMonitoredWorkerErrors.length === 0;
     assert.deepEqual(monitoredServiceWorkerConsoleErrors, []);
+    assert.deepEqual(serviceWorkerErrorReports, []);
     assert.deepEqual(monitoredServiceWorkerErrors, []);
     assert.equal(monitoredReloadReady, true);
     assert.equal(monitoredWorkerClosed, true);
     assert.equal(monitoredWorkerIdentityVerified, true);
+    assert.equal(restartedTargetIdentityVerified, true);
+    assert.equal(restartedTargetComparisonVerified, true);
+    assert.equal(
+      ['reused-bootstrap-target', 'new-post-stop-target'].includes(
+        restartedTargetMode
+      ),
+      true
+    );
+    assert.equal(workerErrorAttributionComplete, true);
     assert.equal(
       observedServiceWorkerVersionIds.has(monitoredWorkerVersionId),
       true
     );
-    assert.equal(monitoredServiceWorkerObjectCount >= 1, true);
     assert.equal(
-      monitoredServiceWorkerErrors.every((error) => (
-        (
-          !error.sourceURL ||
-          new URL(error.sourceURL).origin === extensionOrigin
-        ) &&
-        (
-          !error.versionId ||
-          observedServiceWorkerVersionIds.has(error.versionId)
-        )
-      )),
+      observedServiceWorkerRegistrationIds.has(
+        monitoredWorkerRegistrationId
+      ),
       true
     );
+    assert.equal(monitoredServiceWorkerObjectCount >= 1, true);
     assert.equal(legacyObservedPages.length, 10);
     assert.deepEqual(legacyPageErrors, []);
     const serviceWorkerRunningStatuses = serviceWorkerVersionSignals.reduce(
@@ -1686,14 +1703,22 @@ async function main() {
         monitoredReloadReady,
         monitoredWorkerClosed,
         monitoredWorkerIdentityVerified,
+        restartedTargetIdentityVerified,
+        restartedTargetComparisonVerified,
+        restartedTargetMode,
+        workerErrorAttributionComplete,
         monitoredWorkerObjectMode,
         monitoredWorkerObjectCount: monitoredServiceWorkerObjectCount,
         monitoredWorkerVersionId,
+        monitoredWorkerRegistrationId,
+        monitoredWorkerTargetId,
         monitoredWorkerErrorScope:
-          'exact-extension-origin-and-monitored-worker-version',
+          'post-restart-target-window-exact-origin-version-registration',
         monitoredWorkerConsoleErrors:
           monitoredServiceWorkerConsoleErrors,
         monitoredWorkerErrors: monitoredServiceWorkerErrors,
+        allWorkerErrorReports: serviceWorkerErrorReports,
+        unattributedMonitoredWorkerErrors,
         monitoredPageErrors: monitoredExtensionPageErrors,
         serviceWorkerVersionSignals,
         serviceWorkerRunningStatuses,
@@ -1779,6 +1804,12 @@ async function main() {
           result.functionalErrorAudit?.serviceWorkerRunningStatuses,
         monitoredWorkerIdentityVerified:
           result.functionalErrorAudit?.monitoredWorkerIdentityVerified,
+        restartedTargetIdentityVerified:
+          result.functionalErrorAudit?.restartedTargetIdentityVerified,
+        restartedTargetComparisonVerified:
+          result.functionalErrorAudit?.restartedTargetComparisonVerified,
+        workerErrorAttributionComplete:
+          result.functionalErrorAudit?.workerErrorAttributionComplete,
         monitoredWorkerErrorScope:
           result.functionalErrorAudit?.monitoredWorkerErrorScope,
         workerOwnershipVerified:
@@ -1832,8 +1863,11 @@ async function main() {
         serviceWorkerRunningStatuses:
           ['running', 'stopping', 'stopped', 'starting', 'running'],
         monitoredWorkerIdentityVerified: true,
+        restartedTargetIdentityVerified: true,
+        restartedTargetComparisonVerified: true,
+        workerErrorAttributionComplete: true,
         monitoredWorkerErrorScope:
-          'exact-extension-origin-and-monitored-worker-version',
+          'post-restart-target-window-exact-origin-version-registration',
         workerOwnershipVerified: true,
         workerLedgerBoundEvents: 8,
         workerWindowMatchesConsole: true,
