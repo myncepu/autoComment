@@ -7,6 +7,36 @@ const submitHandlerPath = path.join(__dirname, '..', 'tests', 'fixtures', 'comme
 const fixtureHtml = fs.readFileSync(fixturePath, 'utf8');
 const submitHandler = fs.readFileSync(submitHandlerPath, 'utf8');
 const fixtureTemplate = fixtureHtml.replace('<!-- LOCAL_SUBMIT_HANDLER -->', `<script>${submitHandler}</script>`);
+const CONFIG_BUNDLE_FIXTURE_PATH = path.join(
+  __dirname,
+  '..',
+  'tests',
+  'fixtures',
+  'options-config-bundle-page.html'
+);
+const STATIC_FIXTURE_ROUTES = new Map([
+  [
+    '/options-config-bundle/',
+    {
+      contentType: 'text/html; charset=utf-8',
+      filePath: CONFIG_BUNDLE_FIXTURE_PATH
+    }
+  ],
+  ...[
+    '/tests/fixtures/options-config-bundle-app.mjs',
+    '/lib/options-config-bundle-view.mjs',
+    '/lib/options-config-bundle-controller.mjs',
+    '/lib/config-bundle.mjs',
+    '/lib/domain-config-import-export.mjs',
+    '/lib/domain-config-schema.mjs'
+  ].map((route) => [
+    route,
+    {
+      contentType: 'text/javascript; charset=utf-8',
+      filePath: path.join(__dirname, '..', route)
+    }
+  ])
+]);
 const MODEL_PATH = '/v1/chat/completions';
 const MAX_JSON_BODY_BYTES = 64 * 1024;
 const CORS_HEADERS = {
@@ -130,6 +160,26 @@ function createFixtureServer(options = {}) {
 
   return http.createServer(async (request, response) => {
     const requestUrl = new URL(request.url, 'http://127.0.0.1');
+    const staticFixture = STATIC_FIXTURE_ROUTES.get(requestUrl.pathname);
+
+    if (request.method === 'GET' && staticFixture) {
+      response.writeHead(200, {
+        'Cache-Control': 'no-store',
+        'Content-Security-Policy': [
+          "default-src 'self'",
+          "script-src 'self'",
+          "style-src 'self'",
+          "img-src 'self' data:",
+          "connect-src 'self'",
+          "object-src 'none'",
+          "base-uri 'none'",
+          "form-action 'none'"
+        ].join('; '),
+        'Content-Type': staticFixture.contentType
+      });
+      response.end(fs.readFileSync(staticFixture.filePath));
+      return;
+    }
 
     if (
       request.method === 'GET'

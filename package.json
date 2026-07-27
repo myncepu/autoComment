@@ -10,6 +10,7 @@
     "verify:cloud-sync": "npm test && npm run test:sync-worker && npm run typecheck:sync-worker && npm --prefix cloudflare-sync run deploy:dry",
     "test:fixture": "node scripts/serve-extension-fixture.js",
     "test:chrome:console": "node scripts/run-batch-console-chrome-acceptance.mjs",
+    "test:chrome:config-bundle": "node scripts/run-options-config-bundle-chrome-acceptance.mjs",
     "test:chrome:multi-assignment": "node scripts/run-multi-assignment-chrome-acceptance.mjs",
     "test:chrome:auto-submit-30": "node scripts/run-auto-submit-load-chrome-acceptance.mjs",
     "start": "node server.js",

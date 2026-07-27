@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AutoComment 配置包本地验收</title>
+  </head>
+  <body>
+    <main>
+      <h1>AutoComment 配置包本地验收</h1>
+      <p>此页面只使用内存仓库和本地文件，不会访问或提交到第三方网站。</p>
+
+      <section aria-labelledby="backup-heading">
+        <h2 id="backup-heading">配置备份与恢复</h2>
+        <p>
+          配置包包含 Profile、推广网站、分配策略、非敏感模型设置和批处理默认值；
+          API Key、Profile 密码与云同步密钥不会导出。
+        </p>
+        <div>
+          <button id="exportConfigBtn" type="button">导出配置</button>
+          <button id="importConfigBtn" type="button">导入配置</button>
+          <input
+            id="importConfigFileInput"
+            type="file"
+            accept=".json,application/json"
+            aria-label="选择配置文件"
+          />
+          <button id="applyImportConfigBtn" type="button" hidden>确认应用导入</button>
+          <span
+            id="importExportStatus"
+            role="status"
+            aria-live="polite"
+          ></span>
+        </div>
+        <div
+          id="importPreviewSummary"
+          role="status"
+          aria-live="polite"
+          hidden
+        ></div>
+      </section>
+
+      <section aria-labelledby="fixture-state-heading">
+        <h2 id="fixture-state-heading">确定性本地状态</h2>
+        <output id="fixturePreviewDetails" aria-live="polite">尚未预览</output>
+        <dl>
+          <dt>Profiles</dt>
+          <dd id="fixtureProfileCount">0</dd>
+          <dt>Promotion Sites</dt>
+          <dd id="fixturePromotionSiteCount">0</dd>
+          <dt>Pairs</dt>
+          <dd id="fixturePairCount">0</dd>
+          <dt>Domain writes</dt>
+          <dd id="fixtureDomainWrites">0</dd>
+          <dt>Settings writes</dt>
+          <dd id="fixtureSettingsWrites">0</dd>
+        </dl>
+        <label>
+          <input id="fixtureAutoGenerate" type="checkbox" disabled />
+          自动生成
+        </label>
+        <label>
+          <input id="fixtureAutoSubmit" type="checkbox" disabled />
+          自动提交
+        </label>
+        <label>
+          并发
+          <input id="fixtureConcurrency" type="number" value="1" readonly />
+        </label>
+        <label>
+          单页超时（秒）
+          <input id="fixtureTimeoutSeconds" type="number" value="60" readonly />
+        </label>
+        <label>
+          <input id="fixtureFailSettingsSave" type="checkbox" />
+          下一次应用模拟设置保存失败
+        </label>
+        <output id="fixtureRollbackStatus" aria-live="polite"></output>
+        <output id="fixtureExportStatus" aria-live="polite"></output>
+      </section>
+    </main>
+
+    <script type="module" src="/tests/fixtures/options-config-bundle-app.mjs"></script>
+  </body>
+</html>
