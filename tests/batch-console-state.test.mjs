@@ -301,6 +301,25 @@ test('presents the ownership error as actionable recovery guidance', () => {
   assert.equal(snapshot.command.canCreate, false);
 });
 
+test('presents a stale worker tab as actionable recovery guidance', () => {
+  const activeCheckpoint = createConsoleCheckpointFixture();
+  activeCheckpoint.status = 'paused_recovery';
+
+  const snapshot = createBatchConsoleSnapshot(activeCheckpoint, {
+    runtimeError: 'stale_worker_tab'
+  });
+
+  assert.equal(snapshot.banners.at(-1).title, '旧 worker 标签页已失效');
+  assert.equal(
+    snapshot.banners.at(-1).message,
+    '检测到已失效的 worker 标签页；请关闭旧标签页后继续处理当前批次。'
+  );
+  assert.doesNotMatch(
+    snapshot.banners.at(-1).message,
+    /stale_worker_tab/
+  );
+});
+
 test('durable opening reservations block creating a replacement batch', () => {
   const checkpoint = createConsoleCheckpointFixture();
   checkpoint.status = 'paused_recovery';

@@ -267,6 +267,11 @@ async function createProductionHarness(options = {}) {
   const storageSync = createStorageArea();
   const storageSession = createStorageArea();
   const tabsApi = createTabsApi();
+  for (const tab of options.existingTabs || []) {
+    if (Number.isInteger(tab?.id)) {
+      tabsApi.tabs.set(tab.id, clone(tab));
+    }
+  }
   const runtimeMessages = [];
   const runtimePageListeners = new Set();
   const backgroundBroadcasts = [];
@@ -794,7 +799,18 @@ test('boot renders ownership recovery instead of rejecting when worker proof is 
     updatedAt: 2000
   });
 
-  const harness = await createProductionHarness({ checkpoint });
+  const harness = await createProductionHarness({
+    checkpoint,
+    existingTabs: [{
+      id: 777,
+      windowId: 42,
+      openerTabId: 50,
+      url: 'https://target.test/0',
+      status: 'complete',
+      discarded: false,
+      active: false
+    }]
+  });
   t.after(async () => {
     harness.storageLocal.data.batchRuntimeCheckpoint = pausedCheckpoint({
       taskCount: 2,
@@ -838,6 +854,74 @@ test('boot renders ownership recovery instead of rejecting when worker proof is 
   assert.equal(
     harness.document.querySelector('[data-action="new-batch"]').disabled,
     true
+  );
+});
+
+test('restart requeues a missing worker and opens a replacement without a stale-tab error', async (t) => {
+  const checkpoint = pausedCheckpoint({
+    taskCount: 2,
+    concurrency: 1
+  });
+  Object.assign(checkpoint, {
+    status: 'paused_recovery',
+    recoveryCleanup: {
+      reason: 'ownership_unverified',
+      diagnostic: 'ownership_proof_mismatch',
+      updatedAt: 2000
+    }
+  });
+  Object.assign(checkpoint.tasks['0'], {
+    state: 'active',
+    phase: 'generating',
+    requestId: 'batch-1:0:1',
+    tabId: 777,
+    windowId: 42,
+    ownerPageTabId: 49,
+    ownershipEpoch: 'lost-session-epoch',
+    startedAt: 1500,
+    updatedAt: 2000
+  });
+
+  const harness = await createProductionHarness({ checkpoint });
+  t.after(async () => {
+    await harness.page.destroy();
+    harness.dom.window.close();
+  });
+
+  assert.equal(
+    harness.storageLocal.data.batchRuntimeCheckpoint.tasks['0'].state,
+    'queued'
+  );
+  assert.equal(
+    harness.storageLocal.data.batchRuntimeCheckpoint.tasks['0'].tabId,
+    null
+  );
+  assert.equal(
+    harness.document.querySelector('[data-runtime-error]'),
+    null
+  );
+
+  click(harness.document, '[data-action="resume"]');
+  await waitFor(
+    () => harness.storageLocal.data.batchRuntimeCheckpoint.tasks['0']
+      .state === 'active',
+    'replacement worker activity'
+  );
+
+  const replacement =
+    harness.storageLocal.data.batchRuntimeCheckpoint.tasks['0'];
+  assert.notEqual(replacement.tabId, 777);
+  assert.match(
+    harness.document.querySelector('[data-command-result]').textContent,
+    /resume_complete/
+  );
+  assert.equal(
+    harness.document.querySelector('[data-runtime-error]'),
+    null
+  );
+  assert.equal(
+    harness.document.body.textContent.includes('stale_worker_tab'),
+    false
   );
 });
 
