@@ -281,6 +281,38 @@ test('locks derived commands while offline or while another command is in flight
   });
 });
 
+test('presents the ownership error as actionable recovery guidance', () => {
+  const activeCheckpoint = createConsoleCheckpointFixture();
+  activeCheckpoint.status = 'paused_recovery';
+
+  const snapshot = createBatchConsoleSnapshot(activeCheckpoint, {
+    runtimeError: 'batch_ownership_active'
+  });
+
+  assert.equal(snapshot.banners.at(-1).title, '当前批次仍在运行');
+  assert.equal(
+    snapshot.banners.at(-1).message,
+    '当前批次仍有活动任务，请继续处理或停止批次。'
+  );
+  assert.doesNotMatch(
+    snapshot.banners.at(-1).message,
+    /batch_ownership_active/
+  );
+  assert.equal(snapshot.command.canCreate, false);
+});
+
+test('keeps an unknown runtime error visible for support diagnostics', () => {
+  const snapshot = createBatchConsoleSnapshot(null, {
+    runtimeError: 'worker_tab_reconcile_failed'
+  });
+
+  assert.equal(snapshot.banners.at(-1).title, '运行时发生错误');
+  assert.equal(
+    snapshot.banners.at(-1).message,
+    'worker_tab_reconcile_failed'
+  );
+});
+
 test('allows legacy-only result export without treating it as an active batch', () => {
   const snapshot = createBatchConsoleSnapshot(null, {
     now: 70000,

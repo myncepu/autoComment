@@ -783,6 +783,56 @@ test('running console disables the new-batch preview entry and cannot open its w
   );
 });
 
+test('rejected new batch keeps active ownership selected and explains recovery', async (t) => {
+  const harness = await createProductionHarness();
+  t.after(() => harness.page.destroy());
+  const activeCheckpoint = clone(harness.storageLocal.data.batchRuntimeCheckpoint);
+  activeCheckpoint.tasks['0'] = {
+    ...activeCheckpoint.tasks['0'],
+    state: 'active',
+    phase: 'generating',
+    tabId: 901,
+    windowId: 42,
+    startedAt: 3_000
+  };
+  harness.storageLocal.data.batchRuntimeCheckpoint = activeCheckpoint;
+
+  await prepareWizardForStart(harness);
+  click(harness.document, '[data-action="wizard-start"]');
+  await waitFor(
+    () => /当前批次仍有活动任务，请继续处理或停止批次。/.test(
+      harness.document.body.textContent
+    ),
+    'ownership recovery guidance'
+  );
+
+  assert.doesNotMatch(
+    harness.document.body.textContent,
+    /batch_ownership_active/
+  );
+
+  assert.equal(
+    harness.document.querySelector('[data-batch-name]').textContent,
+    'targets.csv'
+  );
+  assert.equal(
+    harness.document.querySelector('[data-batch-status]').textContent,
+    '已暂停，可恢复'
+  );
+  assert.equal(
+    harness.runtimeMessages.filter(
+      (message) => message.type === 'BATCH_SESSION_START'
+    ).length,
+    1
+  );
+  assert.equal(
+    harness.runtimeMessages.some(
+      (message) => message.type === 'BATCH_SESSION_CLEAR'
+    ),
+    false
+  );
+});
+
 test('retry advances to attempt 2 and ignores an old attempt confirmation', async (t) => {
   const harness = await createProductionHarness({
     checkpoint: pausedCheckpoint({ manualFirst: true })
