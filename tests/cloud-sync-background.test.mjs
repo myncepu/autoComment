@@ -347,6 +347,7 @@ test('lazy repository facade exposes and delegates every history and cloud sync 
     'insertLegacyIfAbsent',
     'getRecord',
     'queryRecords',
+    'listRecentSuccessfulTargetUrls',
     'countRecords',
     'getRetentionSummary',
     'getExportChunk',
