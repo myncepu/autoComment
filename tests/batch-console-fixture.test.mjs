@@ -56,15 +56,18 @@ test('batch fixture is a CSP-safe local module page with a responsive wizard mou
   }), false);
 });
 
-test('batch console CSS exposes desktop, overview, card and compact layout modes', () => {
+test('batch console CSS keeps the queue full-width across responsive modes', () => {
   const document = new JSDOM('<!doctype html><style></style>').window.document;
   document.querySelector('style').textContent = read('styles/batch-console.css');
   const mediaRules = [...document.styleSheets[0].cssRules]
     .filter((rule) => rule.constructor.name === 'CSSMediaRule');
   const conditions = mediaRules.map((rule) => rule.conditionText);
 
-  assert.ok(conditions.includes('(min-width: 1280px)'));
-  assert.ok(conditions.includes('(min-width: 900px) and (max-width: 1279px)'));
+  assert.equal(conditions.includes('(min-width: 1280px)'), false);
+  assert.equal(
+    conditions.includes('(min-width: 900px) and (max-width: 1279px)'),
+    false
+  );
   assert.ok(conditions.includes('(max-width: 899px)'));
   assert.ok(conditions.includes('(max-width: 639px)'));
   assert.ok(conditions.includes('(max-width: 1024px)'));
@@ -83,6 +86,31 @@ test('batch console CSS exposes desktop, overview, card and compact layout modes
     rule.selectorText === '.batch-console__layout > *'
   ));
   assert.equal(layoutChildRule.style.getPropertyValue('min-width'), '0');
+  const layoutRule = [...document.styleSheets[0].cssRules].find((rule) => (
+    rule.selectorText === '.batch-console__layout'
+  ));
+  assert.equal(
+    layoutRule.style.getPropertyValue('grid-template-columns'),
+    'minmax(0, 1fr)'
+  );
+  const summariesRule = [...document.styleSheets[0].cssRules].find((rule) => (
+    rule.selectorText === '.batch-console__overview-summaries'
+  ));
+  assert.equal(
+    summariesRule.style.getPropertyValue('grid-template-columns'),
+    'repeat(2, minmax(0, 1fr))'
+  );
+  const slotsRule = [...document.styleSheets[0].cssRules].find((rule) => (
+    rule.selectorText === '.batch-console__slots'
+  ));
+  assert.equal(
+    slotsRule.style.getPropertyValue('grid-template-columns'),
+    'repeat(auto-fit, minmax(210px, 1fr))'
+  );
+  assert.match(
+    mediaRules.find((rule) => rule.conditionText === '(max-width: 899px)').cssText,
+    /\.batch-console__overview-summaries\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s
+  );
 });
 
 test('fixture adapter runs real CSV preflight and returns deterministic command results', async () => {

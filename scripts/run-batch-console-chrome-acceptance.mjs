@@ -99,25 +99,64 @@ function closeServer(server) {
 }
 
 async function layoutState(page) {
-  return page.evaluate(() => ({
-    cards: document.querySelectorAll('[data-task-card]').length,
-    cardsDisplay: getComputedStyle(
-      document.querySelector('.batch-console__cards')
-    ).display,
-    clientWidth: document.documentElement.clientWidth,
-    documentWidth: document.documentElement.scrollWidth,
-    horizontalOverflow: (
-      document.documentElement.scrollWidth
-      > document.documentElement.clientWidth
-    ),
-    previewTitles: Array.from(document.querySelectorAll(
-      '[data-task-row="18"] [data-preview-value]'
-    )).map((node) => node.title),
-    slots: document.querySelectorAll('[data-worker-slot]').length,
-    tableDisplay: getComputedStyle(
-      document.querySelector('.batch-console__table-wrap')
-    ).display
-  }));
+  return page.evaluate(() => {
+    const contentRect = document.querySelector(
+      '[data-console-content]'
+    ).getBoundingClientRect();
+    const overviewRect = document.querySelector(
+      '[data-console-overview]'
+    ).getBoundingClientRect();
+    const queueRect = document.querySelector(
+      '.batch-console__queue'
+    ).getBoundingClientRect();
+    const slotGrid = document.querySelector('.batch-console__slots');
+    const slotGridColumns = getComputedStyle(slotGrid)
+      .gridTemplateColumns
+      .split(/\s+/)
+      .filter((column) => Number.parseFloat(column) > 0);
+    return {
+      cards: document.querySelectorAll('[data-task-card]').length,
+      cardsDisplay: getComputedStyle(
+        document.querySelector('.batch-console__cards')
+      ).display,
+      clientWidth: document.documentElement.clientWidth,
+      contentLeft: contentRect.left,
+      contentRight: contentRect.right,
+      documentWidth: document.documentElement.scrollWidth,
+      horizontalOverflow: (
+        document.documentElement.scrollWidth
+        > document.documentElement.clientWidth
+      ),
+      overviewBottom: overviewRect.bottom,
+      overviewRect: {
+        top: overviewRect.top,
+        right: overviewRect.right,
+        bottom: overviewRect.bottom,
+        left: overviewRect.left,
+        width: overviewRect.width,
+        height: overviewRect.height
+      },
+      previewTitles: Array.from(document.querySelectorAll(
+        '[data-task-row="18"] [data-preview-value]'
+      )).map((node) => node.title),
+      queueLeft: queueRect.left,
+      queueRight: queueRect.right,
+      queueRect: {
+        top: queueRect.top,
+        right: queueRect.right,
+        bottom: queueRect.bottom,
+        left: queueRect.left,
+        width: queueRect.width,
+        height: queueRect.height
+      },
+      queueTop: queueRect.top,
+      slotGridColumns,
+      slots: document.querySelectorAll('[data-worker-slot]').length,
+      tableDisplay: getComputedStyle(
+        document.querySelector('.batch-console__table-wrap')
+      ).display
+    };
+  });
 }
 
 async function main() {
@@ -156,6 +195,10 @@ async function main() {
       assert.equal(state.clientWidth, width);
       assert.equal(state.documentWidth, width);
       assert.equal(state.horizontalOverflow, false);
+      assert.ok(state.overviewBottom <= state.queueTop);
+      assert.ok(Math.abs(state.queueLeft - state.contentLeft) <= 1);
+      assert.ok(Math.abs(state.queueRight - state.contentRight) <= 1);
+      assert.ok(state.slotGridColumns.length >= 1);
       assert.equal(state.slots, 3);
       assert.equal(
         expectedMode === 'table' ? state.tableDisplay : state.cardsDisplay,
@@ -260,6 +303,9 @@ async function main() {
         ([width, state]) => [width, {
           mode: state.tableDisplay === 'block' ? 'table' : 'cards',
           horizontalOverflow: state.horizontalOverflow,
+          overviewRect: state.overviewRect,
+          queueRect: state.queueRect,
+          slotGridColumns: state.slotGridColumns,
           slots: state.slots
         }]
       )),
