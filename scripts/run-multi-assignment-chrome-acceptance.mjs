@@ -298,11 +298,12 @@ function createRecoveryLifecycleLedger(context, origin) {
   const events = [];
   const openCounts = new Map();
   const activeWorkerByPage = new Map();
-  const trackedPages = new WeakSet();
+  const trackedPages = new Map();
   const pageIds = new WeakMap();
   let nextPageId = 0;
   let sequence = 0;
   let maxConcurrentWorkerTabs = 0;
+  let disposed = false;
 
   const pageId = (page) => {
     if (!pageIds.has(page)) pageIds.set(page, ++nextPageId);
@@ -321,11 +322,9 @@ function createRecoveryLifecycleLedger(context, origin) {
       activeWorkerTabs: activeWorkerByPage.size
     });
   };
-  const openWorker = (page, rawUrl, source) => {
+  const openWorker = (page, rawUrl) => {
     const urlIndex = recoveryTargetIndex(rawUrl, origin);
     if (urlIndex === null) return;
-    if (activeWorkerByPage.get(page) === urlIndex) return;
-    closeWorker(page, 'navigation-replaced');
     activeWorkerByPage.set(page, urlIndex);
     openCounts.set(urlIndex, (openCounts.get(urlIndex) || 0) + 1);
     maxConcurrentWorkerTabs = Math.max(
@@ -337,40 +336,40 @@ function createRecoveryLifecycleLedger(context, origin) {
       type: 'open',
       urlIndex,
       pageId: pageId(page),
-      source,
+      source: 'main-frame-navigation',
       activeWorkerTabs: activeWorkerByPage.size
     });
   };
   const trackPage = (page) => {
-    if (trackedPages.has(page)) return;
-    trackedPages.add(page);
+    if (disposed || trackedPages.has(page)) return;
     pageId(page);
-    openWorker(page, page.url(), 'existing-page');
-    page.on('framenavigated', (frame) => {
+    const onFrameNavigated = (frame) => {
       if (frame === page.mainFrame()) {
-        openWorker(page, frame.url(), 'main-frame-navigation');
+        closeWorker(page, 'main-frame-navigation');
+        openWorker(page, frame.url());
       }
-    });
-    page.on('close', () => closeWorker(page, 'page-close'));
+    };
+    const onClose = () => closeWorker(page, 'page-close');
+    trackedPages.set(page, { onFrameNavigated, onClose });
+    page.on('framenavigated', onFrameNavigated);
+    page.on('close', onClose);
   };
 
   context.pages().forEach(trackPage);
   context.on('page', trackPage);
-  context.on('request', (request) => {
-    if (!request.isNavigationRequest()) return;
-    let frame;
-    try {
-      frame = request.frame();
-    } catch (_) {
-      return;
-    }
-    if (frame !== frame.page().mainFrame()) return;
-    const page = frame.page();
-    trackPage(page);
-    openWorker(page, request.url(), 'navigation-request');
-  });
 
   return {
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      context.off('page', trackPage);
+      for (const [page, handlers] of trackedPages) {
+        page.off('framenavigated', handlers.onFrameNavigated);
+        page.off('close', handlers.onClose);
+      }
+      trackedPages.clear();
+      activeWorkerByPage.clear();
+    },
     snapshot() {
       return {
         events: events.map((event) => ({ ...event })),
@@ -379,6 +378,17 @@ function createRecoveryLifecycleLedger(context, origin) {
         )),
         openedUrlIndexCounts: Object.fromEntries(
           [...openCounts.entries()].sort(([left], [right]) => left - right)
+        ),
+        closedUrlIndexCounts: Object.fromEntries(
+          events.reduce((counts, event) => {
+            if (event.type === 'close') {
+              counts.set(
+                event.urlIndex,
+                (counts.get(event.urlIndex) || 0) + 1
+              );
+            }
+            return counts;
+          }, new Map())
         ),
         maxConcurrentWorkerTabs,
         activeWorkerTabs: activeWorkerByPage.size
@@ -542,9 +552,12 @@ async function main() {
   let extensionProxy;
   const requestedUrls = [];
   const extensionRequestedUrls = [];
+  const monitoredExtensionRequestedUrls = [];
   const extensionProxyLedger = [];
   const pageErrors = [];
   const extensionPageErrors = [];
+  const monitoredExtensionPageErrors = [];
+  const monitoredServiceWorkerSignals = [];
   const outcomes = [];
   let chromeVersion = '';
   let extensionAutomationVersion = '';
@@ -563,8 +576,11 @@ async function main() {
   let runtimeErrorText = '';
   let batchVisibleText = '';
   let thirdPartyRequests = [];
-  let extensionThirdPartyRequests = [];
-  let blockedChromiumBackgroundAttempts = [];
+  let monitoredWindowThirdPartyRequests = [];
+  let unknownOriginBlockedThirdPartyAttempts = [];
+  let monitorExtensionSignals = false;
+  let monitoredReloadReady = false;
+  let monitoredWorkerClosed = false;
   let active = 0;
   let maxActive = 0;
 
@@ -876,10 +892,14 @@ async function main() {
       ]
       }
     );
-    extensionLifecycle = createRecoveryLifecycleLedger(context, origin);
     context.on(
       'request',
-      (request) => extensionRequestedUrls.push(request.url())
+      (request) => {
+        extensionRequestedUrls.push(request.url());
+        if (monitorExtensionSignals) {
+          monitoredExtensionRequestedUrls.push(request.url());
+        }
+      }
     );
     const pageErrorListeners = new WeakSet();
     const trackPageErrors = (page) => {
@@ -888,26 +908,203 @@ async function main() {
       page.on('pageerror', (error) => {
         pageErrors.push(error.message);
         extensionPageErrors.push(error.message);
+        if (monitorExtensionSignals) {
+          monitoredExtensionPageErrors.push(error.message);
+        }
       });
     };
     context.pages().forEach(trackPageErrors);
     context.on('page', trackPageErrors);
-    let serviceWorker = context.serviceWorkers().find(
+    const lifecycleMutationLedger = createRecoveryLifecycleLedger(
+      context,
+      origin
+    );
+    const lifecycleMutationPage = await context.newPage();
+    await lifecycleMutationPage.goto(
+      `${origin}/multi/1?lifecycle-mutation=1`,
+      { waitUntil: 'domcontentloaded' }
+    );
+    await lifecycleMutationPage.reload({ waitUntil: 'domcontentloaded' });
+    await lifecycleMutationPage.goto('about:blank');
+    await lifecycleMutationPage.goto(
+      `${origin}/multi/1?lifecycle-mutation=2`,
+      { waitUntil: 'domcontentloaded' }
+    );
+    await lifecycleMutationPage.close();
+    const lifecycleMutation = lifecycleMutationLedger.snapshot();
+    assert.equal(lifecycleMutation.openedUrlIndexCounts['0'], 3);
+    assert.equal(
+      lifecycleMutation.events.filter((event) => (
+        event.type === 'close' && event.urlIndex === 0
+      )).length,
+      3
+    );
+    lifecycleMutationLedger.dispose();
+    extensionLifecycle = createRecoveryLifecycleLedger(context, origin);
+    let bootstrapServiceWorker = context.serviceWorkers().find(
       (worker) => worker.url().startsWith('chrome-extension://')
     );
-    if (!serviceWorker) {
-      serviceWorker = await context.waitForEvent('serviceworker', {
+    if (!bootstrapServiceWorker) {
+      bootstrapServiceWorker = await context.waitForEvent('serviceworker', {
         predicate: (worker) => worker.url().startsWith('chrome-extension://'),
         timeout: 15_000
       });
     }
-    assert.match(serviceWorker.url(), /\/background\.js$/);
+    assert.match(bootstrapServiceWorker.url(), /\/background\.js$/);
     extensionAutomationVersion = await context.browser()?.version();
-    const extensionId = new URL(serviceWorker.url()).hostname;
+    const extensionId = new URL(bootstrapServiceWorker.url()).hostname;
+    let monitoredServiceWorker = null;
+    let monitoredServiceWorkerCount = 0;
+    bootstrapServiceWorker.on('close', () => {
+      if (monitorExtensionSignals) {
+        monitoredWorkerClosed = true;
+        monitoredServiceWorkerSignals.push({
+          kind: 'close',
+          source: 'playwright-worker'
+        });
+      }
+    });
+    bootstrapServiceWorker.on('console', (message) => {
+      if (!monitorExtensionSignals) return;
+      monitoredServiceWorkerSignals.push({
+        kind: 'console',
+        level: message.type(),
+        text: message.text().slice(0, 500)
+      });
+    });
+    context.on('serviceworker', (worker) => {
+      if (
+        worker === bootstrapServiceWorker
+        || !worker.url().startsWith(`chrome-extension://${extensionId}/`)
+      ) {
+        return;
+      }
+      monitoredServiceWorkerCount += 1;
+      if (!monitoredServiceWorker) monitoredServiceWorker = worker;
+      monitoredServiceWorkerSignals.push({
+        kind: 'created',
+        workerNumber: monitoredServiceWorkerCount
+      });
+      worker.on('console', (message) => {
+        monitoredServiceWorkerSignals.push({
+          kind: 'console',
+          level: message.type(),
+          text: message.text().slice(0, 500)
+        });
+      });
+      worker.on('close', () => {
+        monitoredServiceWorkerSignals.push({
+          kind: 'close',
+          workerNumber: monitoredServiceWorkerCount
+        });
+        if (worker === monitoredServiceWorker) monitoredWorkerClosed = true;
+      });
+    });
     const smokePage = await context.newPage();
     await smokePage.goto(`chrome-extension://${extensionId}/batch.html`, {
       waitUntil: 'domcontentloaded'
     });
+    const cdpSession = await context.newCDPSession(smokePage);
+    const targetInfos = await cdpSession.send('Target.getTargets');
+    const bootstrapTarget = targetInfos.targetInfos.find((target) => (
+      target.type === 'service_worker'
+      && target.url === bootstrapServiceWorker.url()
+    ));
+    assert.ok(bootstrapTarget);
+    const serviceWorkerVersionSignals = [];
+    const monitoredServiceWorkerErrors = [];
+    cdpSession.on('ServiceWorker.workerVersionUpdated', ({ versions }) => {
+      for (const version of versions) {
+        if (
+          version.scriptURL
+          !== `chrome-extension://${extensionId}/background.js`
+        ) {
+          continue;
+        }
+        const signal = {
+          status: version.status,
+          runningStatus: version.runningStatus
+        };
+        const previous = serviceWorkerVersionSignals.at(-1);
+        if (
+          previous?.status !== signal.status
+          || previous?.runningStatus !== signal.runningStatus
+        ) {
+          serviceWorkerVersionSignals.push(signal);
+        }
+      }
+    });
+    cdpSession.on('ServiceWorker.workerErrorReported', ({ errorMessage }) => {
+      if (
+        errorMessage?.sourceURL
+        && errorMessage.sourceURL
+          !== `chrome-extension://${extensionId}/background.js`
+      ) {
+        return;
+      }
+      monitoredServiceWorkerErrors.push({
+        message: String(errorMessage?.errorMessage || '').slice(0, 500),
+        sourceURL: String(errorMessage?.sourceURL || '').slice(0, 500),
+        lineNumber: errorMessage?.lineNumber ?? null,
+        columnNumber: errorMessage?.columnNumber ?? null
+      });
+    });
+    monitorExtensionSignals = true;
+    await cdpSession.send('ServiceWorker.enable');
+    await waitForValue(
+      () => serviceWorkerVersionSignals,
+      (signals) => signals.some(
+        ({ runningStatus }) => runningStatus === 'running'
+      )
+    );
+    await cdpSession.send('ServiceWorker.stopAllWorkers');
+    await waitForValue(
+      () => serviceWorkerVersionSignals,
+      (signals) => signals.some(
+        ({ runningStatus }) => runningStatus === 'stopped'
+      )
+    );
+    const stoppedSignalIndex = serviceWorkerVersionSignals.findIndex(
+      ({ runningStatus }) => runningStatus === 'stopped'
+    );
+    await waitForValue(
+      () => smokePage.evaluate(async () => {
+        try {
+          return await chrome.runtime.sendMessage({
+            type: 'BATCH_SESSION_GET'
+          });
+        } catch (_) {
+          return null;
+        }
+      }),
+      (response) => response?.ok === true
+    );
+    await waitForValue(
+      () => serviceWorkerVersionSignals,
+      (signals) => signals.some((signal, index) => (
+        index > stoppedSignalIndex
+        && signal.runningStatus === 'running'
+      ))
+    );
+    monitoredServiceWorker = bootstrapServiceWorker;
+    monitoredServiceWorkerSignals.push({
+      kind: 'running',
+      source: 'cdp-service-worker-version'
+    });
+    assert.match(monitoredServiceWorker.url(), /\/background\.js$/);
+    await smokePage.reload({ waitUntil: 'domcontentloaded' });
+    await waitForValue(
+      () => smokePage.evaluate(async () => {
+        try {
+          return await chrome.runtime.sendMessage({
+            type: 'BATCH_SESSION_GET'
+          });
+        } catch (_) {
+          return null;
+        }
+      }),
+      (response) => response?.ok === true
+    );
     assert.equal(
       await smokePage.locator('[data-batch-console]').count(),
       1
@@ -928,6 +1125,7 @@ async function main() {
       }),
       (response) => response?.ok === true
     );
+    monitoredReloadReady = true;
     await smokePage.evaluate(async ({
       config,
       fixtureOrigin
@@ -1106,23 +1304,23 @@ async function main() {
     workerTabsAfterStop = stoppedWorkerTabs.length;
     assert.equal(workerTabsAfterStop, 0);
 
-    await smokePage.close();
     await context.close();
     context = null;
+    monitorExtensionSignals = false;
     finalLifecycle = extensionLifecycle.snapshot();
     assert.equal(finalLifecycle.activeWorkerTabs, 0);
     assert.equal(finalLifecycle.maxConcurrentWorkerTabs, 3);
     await closeServer(extensionProxy);
     extensionProxy = null;
 
-    blockedChromiumBackgroundAttempts = extensionProxyLedger.filter(
+    unknownOriginBlockedThirdPartyAttempts = extensionProxyLedger.filter(
       (entry) => entry.allowed === false
     );
     thirdPartyRequests = extensionProxyLedger.filter((entry) => {
       if (entry.allowed === false) return false;
       return new URL(entry.url).origin !== origin;
     });
-    extensionThirdPartyRequests = extensionRequestedUrls.filter(
+    monitoredWindowThirdPartyRequests = monitoredExtensionRequestedUrls.filter(
       (requestedUrl) => {
         const parsed = new URL(requestedUrl);
         return ['http:', 'https:'].includes(parsed.protocol)
@@ -1134,7 +1332,7 @@ async function main() {
       'local recovery traffic did not traverse the pre-launch audit proxy'
     );
     assert.deepEqual(
-      [...new Set(blockedChromiumBackgroundAttempts.map((entry) => (
+      [...new Set(unknownOriginBlockedThirdPartyAttempts.map((entry) => (
         new URL(entry.url).hostname
       )))],
       ['www.google.com']
@@ -1150,11 +1348,31 @@ async function main() {
       0,
       JSON.stringify(thirdPartyRequests, null, 2)
     );
-    assert.deepEqual(extensionThirdPartyRequests, []);
+    assert.deepEqual(monitoredWindowThirdPartyRequests, []);
     assert.equal(commentsSubmitted, 0);
     assert.equal(wholeCommandCommentsSubmitted, 6);
     assert.deepEqual(pageErrors, []);
     assert.deepEqual(extensionPageErrors, []);
+    assert.deepEqual(monitoredExtensionPageErrors, []);
+    const monitoredServiceWorkerConsoleErrors =
+      monitoredServiceWorkerSignals.filter((signal) => (
+        signal.kind === 'console' && signal.level === 'error'
+      )).map(({ text }) => text);
+    assert.deepEqual(monitoredServiceWorkerConsoleErrors, []);
+    assert.deepEqual(monitoredServiceWorkerErrors, []);
+    assert.equal(monitoredReloadReady, true);
+    assert.equal(monitoredWorkerClosed, true);
+    const serviceWorkerRunningStatuses = serviceWorkerVersionSignals.reduce(
+      (statuses, { runningStatus }) => {
+        if (statuses.at(-1) !== runningStatus) statuses.push(runningStatus);
+        return statuses;
+      },
+      []
+    );
+    assert.deepEqual(
+      serviceWorkerRunningStatuses,
+      ['running', 'stopping', 'stopped', 'starting', 'running']
+    );
     extensionSmoke =
       'automation-chromium-service-worker-batch-page-and-worker-refill';
 
@@ -1170,22 +1388,48 @@ async function main() {
       openedUrlIndices: finalLifecycle.openedUrlIndices,
       openedUrlIndexCounts: finalLifecycle.openedUrlIndexCounts,
       workerTabsAfterStop,
-      thirdPartyRequests: extensionThirdPartyRequests.length,
+      thirdPartyRequests: thirdPartyRequests.length,
       commentsSubmitted,
       commentsSubmittedScope: 'real-extension-recovery',
-      pageErrors,
+      pageErrors: monitoredExtensionPageErrors,
       commentLedger: {
         legacyPhase: legacyPhaseCommentsSubmitted,
         realExtensionRecovery: commentsSubmitted,
         wholeCommand: wholeCommandCommentsSubmitted
       },
       pageErrorLedger: {
-        realExtensionRecovery: extensionPageErrors,
-        wholeCommand: pageErrors
+        bootstrap: 'functional-signals-unobserved',
+        monitoredReloadThroughContextClose: monitoredExtensionPageErrors,
+        postBootstrapExtensionObserved: extensionPageErrors,
+        wholeCommandObserved: pageErrors
       },
       workerLifecycle: {
         events: finalLifecycle.events,
-        activeWorkerTabsAtFinalization: finalLifecycle.activeWorkerTabs
+        activeWorkerTabsAtFinalization: finalLifecycle.activeWorkerTabs,
+        mutationProbe: {
+          events: lifecycleMutation.events,
+          openedUrlIndexCounts:
+            lifecycleMutation.openedUrlIndexCounts,
+          closedUrlIndexCounts:
+            lifecycleMutation.closedUrlIndexCounts
+        }
+      },
+      functionalErrorAudit: {
+        bootstrap:
+          'network-enforced-functional-signals-unobserved',
+        monitoredScope:
+          'observer-attached-service-worker-restart-through-context-close',
+        monitoredReloadReady,
+        monitoredWorkerClosed,
+        monitoredWorkerConsoleErrors:
+          monitoredServiceWorkerConsoleErrors,
+        monitoredWorkerErrors: monitoredServiceWorkerErrors,
+        monitoredPageErrors: monitoredExtensionPageErrors,
+        serviceWorkerVersionSignals,
+        serviceWorkerRunningStatuses,
+        serviceWorkerSignals: monitoredServiceWorkerSignals,
+        additionalPlaywrightWorkerObjects:
+          monitoredServiceWorkerCount
       },
       assignments: sorted.map((record) => ({
         targetId: record.targetId,
@@ -1201,7 +1445,12 @@ async function main() {
         installedChrome: 'post-launch-page-lifetime',
         extensionChromium:
           'pre-launch-to-context-close-local-only-proxy',
-        thirdPartyRequestsScope: 'extension-attributed-http(s)',
+        thirdPartyRequestsScope:
+          'forwarded-completed-third-party-egress',
+        bootstrapRequestAttribution:
+          'unknown-origin-proxy-enforced-only',
+        monitoredRequestScope:
+          'observer-attached-service-worker-restart-through-context-close',
         temporaryManifestHostPermissions:
           localExtensionManifest.host_permissions,
         temporaryManifestOptionalHostPermissions:
@@ -1210,17 +1459,19 @@ async function main() {
         allowedFixtureRequests: extensionProxyLedger.filter(
           (entry) => entry.allowed === true
         ).length,
-        extensionThirdPartyRequests:
-          extensionThirdPartyRequests.length,
-        forwardedThirdPartyNetworkEgress: thirdPartyRequests.length,
-        blockedChromiumBackgroundAttempts:
-          blockedChromiumBackgroundAttempts.length,
-        blockedChromiumBackgroundDestinations: [
-          ...new Set(blockedChromiumBackgroundAttempts.map(
+        monitoredWindowThirdPartyRequests:
+          monitoredWindowThirdPartyRequests.length,
+        forwardedCompletedThirdPartyEgress: thirdPartyRequests.length,
+        unknownOriginBlockedThirdPartyAttempts:
+          unknownOriginBlockedThirdPartyAttempts.length,
+        unknownOriginBlockedThirdPartyDestinations: [
+          ...new Set(unknownOriginBlockedThirdPartyAttempts.map(
             (entry) => new URL(entry.url).hostname
           ))
         ],
-        postLaunchPlaywrightObservations: extensionRequestedUrls.length
+        postBootstrapObserverRequests: extensionRequestedUrls.length,
+        monitoredReloadThroughCloseRequests:
+          monitoredExtensionRequestedUrls.length
       },
       thirdPartySubmissions: 0
     };
@@ -1234,6 +1485,24 @@ async function main() {
         openedUrlIndexCounts: result.openedUrlIndexCounts,
         workerTabsAfterStop: result.workerTabsAfterStop,
         networkAuditScope: result.requestAudit?.extensionChromium,
+        thirdPartyRequestsScope:
+          result.requestAudit?.thirdPartyRequestsScope,
+        bootstrapFunctionalAttribution:
+          result.functionalErrorAudit?.bootstrap,
+        monitoredReloadReady:
+          result.functionalErrorAudit?.monitoredReloadReady,
+        monitoredWorkerClosed:
+          result.functionalErrorAudit?.monitoredWorkerClosed,
+        monitoredWorkerConsoleErrors:
+          result.functionalErrorAudit?.monitoredWorkerConsoleErrors,
+        monitoredPageErrors:
+          result.functionalErrorAudit?.monitoredPageErrors,
+        serviceWorkerRunningStatuses:
+          result.functionalErrorAudit?.serviceWorkerRunningStatuses,
+        lifecycleMutationOpenedIndexZero:
+          result.workerLifecycle?.mutationProbe?.openedUrlIndexCounts?.['0'],
+        lifecycleMutationClosedIndexZero:
+          result.workerLifecycle?.mutationProbe?.closedUrlIndexCounts?.['0'],
         legacyPhaseCommentsSubmitted: result.commentLedger?.legacyPhase,
         recoveryCommentsSubmitted: result.commentLedger?.realExtensionRecovery,
         wholeCommandCommentsSubmitted: result.commentLedger?.wholeCommand,
@@ -1256,6 +1525,18 @@ async function main() {
         },
         workerTabsAfterStop: 0,
         networkAuditScope: 'pre-launch-to-context-close-local-only-proxy',
+        thirdPartyRequestsScope:
+          'forwarded-completed-third-party-egress',
+        bootstrapFunctionalAttribution:
+          'network-enforced-functional-signals-unobserved',
+        monitoredReloadReady: true,
+        monitoredWorkerClosed: true,
+        monitoredWorkerConsoleErrors: [],
+        monitoredPageErrors: [],
+        serviceWorkerRunningStatuses:
+          ['running', 'stopping', 'stopped', 'starting', 'running'],
+        lifecycleMutationOpenedIndexZero: 3,
+        lifecycleMutationClosedIndexZero: 3,
         legacyPhaseCommentsSubmitted: 6,
         recoveryCommentsSubmitted: 0,
         wholeCommandCommentsSubmitted: 6,

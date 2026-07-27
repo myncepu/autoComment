@@ -7,7 +7,7 @@
   # tests 955
   # pass 955
   # fail 0
-  # duration_ms 6022.293208
+  # duration_ms 6048.775084
   ```
 
 - Syntax checks: PASS
@@ -16,10 +16,12 @@
   configured concurrency 3, local targets 5
 - Closed target: index 0
 - Replacement target: index 3
-- Extension-attributed third-party HTTP(S) requests during recovery: 0
-- Forwarded third-party network egress during real-extension recovery: 0
-- Blocked Chromium background attempts in the recorded verification: 16
-  (`www.google.com`; denied by the local proxy)
+- Forwarded/completed third-party egress during real-extension recovery: 0
+- Unknown-origin blocked third-party attempts in the focused round-2 GREEN:
+  26 (`www.google.com`; denied by the local proxy)
+- Bootstrap functional attribution: unavailable; network enforcement only
+- Monitored service-worker restart through context close: ready, closed,
+  console errors 0, worker errors 0, page errors 0
 - Real-extension recovery comments submitted: 0
 - Legacy local-fixture phase comments submitted: 6
 - Whole-command local-fixture comments submitted: 6
@@ -268,17 +270,184 @@ the context closes. The focused GREEN run reported:
 }
 ```
 
-Those 16 browser probes were attempts delivered to and denied by the local
-proxy; they did not reach Google. They are not hidden inside the zero:
-`thirdPartyRequests: 0` is explicitly scoped to extension-attributed HTTP(S)
-requests. The temporary manifest permits only loopback, the context observer
-records zero extension third-party requests, and the proxy records zero
-forwarded third-party egress. Any denied destination other than the known
-Chromium `www.google.com` probe fails the acceptance.
+Round 1 called those denied `www.google.com` attempts Chromium background
+probes. That attribution was based only on hostname and is superseded by
+round 2 below. The proxy proves that the attempts were blocked before egress,
+but it does not prove which browser or extension component originated them.
 
-The browser probe count is timing-dependent (16 and 17 in consecutive
-verification runs); its separate accounting and sole allowed blocked
-destination are invariant.
+## Review Fix Round 2
+
+### Lifecycle mutation RED/GREEN
+
+The regression probe uses a real local page and the sequence:
+
+```text
+index 0 target
+same-tab reload of index 0
+navigate away to about:blank
+navigate back to index 0
+close page
+```
+
+RED command:
+
+```bash
+npm run test:chrome:multi-assignment
+```
+
+The old mixed request/navigation ledger ignored the reload and leave-return:
+
+```text
+AssertionError: 1 !== 3
+actual index 0 opens: 1
+expected index 0 opens: 3
+```
+
+GREEN evidence:
+
+```json
+{
+  "openedUrlIndexCounts": {"0": 3},
+  "closedUrlIndexCounts": {"0": 3}
+}
+```
+
+The final ledger has one authoritative source: committed main-frame
+`framenavigated` events. Every main-frame navigation first closes any active
+page/index mapping, then opens a new mapping only when the destination is one
+of the five recovery targets. A reload therefore records close/open, a
+navigation away records close, and a return records a new open. Page close
+remains the final close source.
+
+The production recovery scenario still records exactly:
+
+```text
+open 0, open 1, open 2, close 0, open 3, close 1, close 2, close 3
+```
+
+Its observed maximum remains three and each opened index has count one, so a
+same-tab reload, leave-return, transient fourth tab, or retry fails.
+
+### Monitored functional-error boundary
+
+The second round-2 assertion RED showed these fields missing and the old
+request scope overstated:
+
+```text
+bootstrapFunctionalAttribution: undefined
+monitoredReloadReady: undefined
+monitoredWorkerClosed: undefined
+monitoredWorkerConsoleErrors: undefined
+monitoredPageErrors: undefined
+thirdPartyRequestsScope: extension-attributed-http(s)
+```
+
+Playwright observers cannot see events that occur before
+`launchPersistentContext` returns. The final evidence therefore has two
+explicit boundaries:
+
+- Bootstrap: the pre-launch proxy enforces local-only egress, but request
+  origin and functional page/service-worker errors are unobserved.
+- Monitored window: after request, page-error, service-worker console, CDP
+  service-worker error/version, and close listeners attach, the runner stops
+  the current service worker, observes the restarted service-worker version
+  running, reloads the batch page, waits for `BATCH_SESSION_GET`, runs
+  recovery, stops the batch, and keeps observers active through context
+  close.
+
+Chromium reuses the Playwright Worker object for this stop/start. The
+deduplicated CDP version sequence proves the restart:
+
+```text
+running → stopping → stopped → starting → running
+```
+
+Focused GREEN functional evidence:
+
+```json
+{
+  "bootstrap": "network-enforced-functional-signals-unobserved",
+  "monitoredScope":
+    "observer-attached-service-worker-restart-through-context-close",
+  "monitoredReloadReady": true,
+  "monitoredWorkerClosed": true,
+  "monitoredWorkerConsoleErrors": [],
+  "monitoredWorkerErrors": [],
+  "monitoredPageErrors": []
+}
+```
+
+The close signal above is emitted by the monitored Playwright worker when the
+context closes. CDP `workerErrorReported` and error-level worker console
+messages remain empty through that close.
+
+### Network scope
+
+The proxy remains active from before browser launch through context close.
+All 26 non-fixture attempts in the focused GREEN are reported as
+`unknownOriginBlockedThirdPartyAttempts`; the `www.google.com` destination
+does not imply browser or extension attribution. The proxy denied every one.
+
+```json
+{
+  "thirdPartyRequests": 0,
+  "thirdPartyRequestsScope":
+    "forwarded-completed-third-party-egress",
+  "bootstrapRequestAttribution":
+    "unknown-origin-proxy-enforced-only",
+  "monitoredRequestScope":
+    "observer-attached-service-worker-restart-through-context-close",
+  "monitoredWindowThirdPartyRequests": 0,
+  "forwardedCompletedThirdPartyEgress": 0,
+  "unknownOriginBlockedThirdPartyAttempts": 26,
+  "unknownOriginBlockedThirdPartyDestinations": ["www.google.com"]
+}
+```
+
+`thirdPartyRequests: 0` means only that zero third-party requests were
+forwarded/completed beyond the local proxy. It does not claim bootstrap
+origin attribution. The temporary manifest remains loopback-only, and the
+monitored reload-through-close request window independently contains zero
+third-party HTTP(S) requests.
+
+### Final verification
+
+The final natural acceptance run repeated the focused behavior. Its
+whole-process proxy ledger contained 37 requests: 12 allowed loopback fixture
+requests and 25 denied, unknown-origin attempts to `www.google.com`. None of
+the denied attempts were forwarded or completed.
+
+```json
+{
+  "openedUrlIndexCounts": {"0": 1, "1": 1, "2": 1, "3": 1},
+  "closedUrlIndex": 0,
+  "replacementUrlIndex": 3,
+  "maxConcurrency": 3,
+  "workerTabsAfterStop": 0,
+  "mutationProbe": {
+    "openedUrlIndexCounts": {"0": 3},
+    "closedUrlIndexCounts": {"0": 3}
+  },
+  "monitoredReloadReady": true,
+  "monitoredWorkerClosed": true,
+  "monitoredWorkerConsoleErrors": [],
+  "monitoredWorkerErrors": [],
+  "monitoredPageErrors": [],
+  "forwardedCompletedThirdPartyEgress": 0,
+  "monitoredWindowThirdPartyRequests": 0,
+  "unknownOriginBlockedThirdPartyAttempts": 25
+}
+```
+
+The final service-worker transition remained:
+
+```text
+running → stopping → stopped → starting → running
+```
+
+The console acceptance also passed at 1440 and 1024 in table mode and at 640
+in card mode, with no horizontal overflow, page errors, or third-party
+requests.
 
 ## Safety Review
 
@@ -296,8 +465,11 @@ destination are invariant.
   launch through context close by the pre-launch local-only proxy.
 - The temporary manifest has only the loopback host permission, no optional
   host permissions, and loopback-only content-script/resource matches.
-- Context attribution reports zero extension third-party HTTP(S) requests.
-- Chromium background probes are separately reported as blocked attempts;
-  no third-party network egress is forwarded.
+- Bootstrap request origins and functional errors are explicitly unobserved;
+  only proxy enforcement covers that interval.
+- All non-fixture attempts are labeled unknown-origin and blocked; zero
+  third-party egress is forwarded/completed.
+- The post-observer service-worker restart through context close reports zero
+  monitored third-party HTTP(S) requests and zero functional errors.
 - No production extension file, stored user profile, or third-party site is
   mutated.
