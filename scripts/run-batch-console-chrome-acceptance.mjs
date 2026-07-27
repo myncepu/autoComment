@@ -183,10 +183,10 @@ async function main() {
     await fs.mkdir(screenshotDirectory, { recursive: true });
 
     const layouts = {};
-    for (const [width, expectedMode] of [
-      [1440, 'table'],
-      [1024, 'table'],
-      [640, 'cards']
+    for (const [width, expectedMode, expectedSlotColumnCount] of [
+      [1440, 'table', 3],
+      [1024, 'table', 3],
+      [640, 'cards', 2]
     ]) {
       await page.setViewportSize({ width, height: 900 });
       await page.goto(fixtureUrl, { waitUntil: 'networkidle' });
@@ -198,7 +198,10 @@ async function main() {
       assert.ok(state.overviewBottom <= state.queueTop);
       assert.ok(Math.abs(state.queueLeft - state.contentLeft) <= 1);
       assert.ok(Math.abs(state.queueRight - state.contentRight) <= 1);
-      assert.ok(state.slotGridColumns.length >= 1);
+      assert.equal(
+        state.slotGridColumns.length,
+        expectedSlotColumnCount
+      );
       assert.equal(state.slots, 3);
       assert.equal(
         expectedMode === 'table' ? state.tableDisplay : state.cardsDisplay,
