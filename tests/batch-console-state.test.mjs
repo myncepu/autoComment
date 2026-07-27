@@ -301,6 +301,36 @@ test('presents the ownership error as actionable recovery guidance', () => {
   assert.equal(snapshot.command.canCreate, false);
 });
 
+test('durable opening reservations block creating a replacement batch', () => {
+  const checkpoint = createConsoleCheckpointFixture();
+  checkpoint.status = 'paused_recovery';
+  for (const task of Object.values(checkpoint.tasks)) {
+    Object.assign(task, {
+      state: 'queued',
+      phase: null,
+      tabId: null,
+      windowId: null,
+      startedAt: null
+    });
+  }
+  checkpoint.results = [];
+  checkpoint.openingReservations = {
+    'batch-1:0:1': {
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      requestId: 'batch-1:0:1'
+    }
+  };
+
+  const snapshot = createBatchConsoleSnapshot(checkpoint, {
+    now: 70000,
+    online: true
+  });
+
+  assert.equal(snapshot.command.canCreate, false);
+});
+
 test('keeps an unknown runtime error visible for support diagnostics', () => {
   const snapshot = createBatchConsoleSnapshot(null, {
     runtimeError: 'worker_tab_reconcile_failed'

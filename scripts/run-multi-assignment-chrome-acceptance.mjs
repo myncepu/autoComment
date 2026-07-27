@@ -287,17 +287,95 @@ function recoveryTargetIndex(rawUrl, origin) {
   }
 }
 
-function currentRecoveryWorkerTabs(context, origin) {
-  return context.pages().flatMap((page) => {
-    const urlIndex = recoveryTargetIndex(page.url(), origin);
-    return urlIndex === null ? [] : [{ page, urlIndex }];
+async function observeRecoveryWorkerOwnership(smokePage, context, origin) {
+  const observed = await smokePage.evaluate(async () => {
+    const [response, tabs, consoleTab] = await Promise.all([
+      chrome.runtime.sendMessage({ type: 'BATCH_SESSION_GET' }),
+      chrome.tabs.query({}),
+      chrome.tabs.getCurrent()
+    ]);
+    return {
+      checkpoint: response?.checkpoint || null,
+      tabs,
+      consoleTab
+    };
   });
+  const errors = [];
+  const targetPages = context.pages().flatMap((page) => {
+    const urlIndex = recoveryTargetIndex(page.url(), origin);
+    return urlIndex === null ? [] : [{ page, urlIndex, url: page.url() }];
+  });
+  const targetTabs = observed.tabs.flatMap((tab) => {
+    const rawUrl = tab.url || tab.pendingUrl || '';
+    const urlIndex = recoveryTargetIndex(rawUrl, origin);
+    return urlIndex === null ? [] : [{ ...tab, urlIndex, rawUrl }];
+  });
+  const activeTasks = Object.values(observed.checkpoint?.tasks || {})
+    .filter((task) => ['active', 'submitting'].includes(task?.state));
+  const workers = [];
+  if (!Number.isInteger(observed.consoleTab?.windowId)) {
+    errors.push('console_window_unobserved');
+  }
+  for (const target of targetPages) {
+    const matchingTabs = targetTabs.filter((tab) => (
+      tab.urlIndex === target.urlIndex && tab.rawUrl === target.url
+    ));
+    if (matchingTabs.length !== 1) {
+      errors.push(`ambiguous_page_tab:${target.urlIndex}:${matchingTabs.length}`);
+      continue;
+    }
+    const tab = matchingTabs[0];
+    const task = observed.checkpoint?.tasks?.[String(target.urlIndex)];
+    if (!['active', 'submitting'].includes(task?.state)) {
+      errors.push(`unowned_target_page:${target.urlIndex}`);
+      continue;
+    }
+    if (task.tabId !== tab.id || task.windowId !== tab.windowId) {
+      errors.push(`durable_tab_mismatch:${target.urlIndex}`);
+      continue;
+    }
+    if (tab.windowId !== observed.consoleTab?.windowId) {
+      errors.push(`worker_wrong_window:${target.urlIndex}`);
+      continue;
+    }
+    workers.push({
+      page: target.page,
+      urlIndex: target.urlIndex,
+      tabId: tab.id,
+      windowId: tab.windowId,
+      batchId: observed.checkpoint.batchId,
+      attempt: task.attempt,
+      taskId: task.taskId || null
+    });
+  }
+  for (const task of activeTasks) {
+    if (!workers.some((worker) => (
+      worker.urlIndex === task.urlIndex &&
+      worker.tabId === task.tabId &&
+      worker.windowId === task.windowId &&
+      worker.attempt === task.attempt
+    ))) {
+      errors.push(`durable_worker_unobserved:${task.urlIndex}`);
+    }
+  }
+  for (const tab of targetTabs) {
+    if (!workers.some((worker) => worker.tabId === tab.id)) {
+      errors.push(`unrelated_matching_tab:${tab.id}`);
+    }
+  }
+  return {
+    checkpoint: observed.checkpoint,
+    consoleTab: observed.consoleTab,
+    errors,
+    workers
+  };
 }
 
 function createRecoveryLifecycleLedger(context, origin) {
   const events = [];
   const openCounts = new Map();
   const activeWorkerByPage = new Map();
+  const ownershipByPage = new Map();
   const trackedPages = new Map();
   const pageIds = new WeakMap();
   let nextPageId = 0;
@@ -313,13 +391,15 @@ function createRecoveryLifecycleLedger(context, origin) {
     if (!activeWorkerByPage.has(page)) return;
     const urlIndex = activeWorkerByPage.get(page);
     activeWorkerByPage.delete(page);
+    const ownership = ownershipByPage.get(page);
     events.push({
       sequence: ++sequence,
       type: 'close',
       urlIndex,
       pageId: pageId(page),
       source,
-      activeWorkerTabs: activeWorkerByPage.size
+      activeWorkerTabs: activeWorkerByPage.size,
+      ...(ownership || {})
     });
   };
   const openWorker = (page, rawUrl) => {
@@ -337,7 +417,8 @@ function createRecoveryLifecycleLedger(context, origin) {
       urlIndex,
       pageId: pageId(page),
       source: 'main-frame-navigation',
-      activeWorkerTabs: activeWorkerByPage.size
+      activeWorkerTabs: activeWorkerByPage.size,
+      ...(ownershipByPage.get(page) || {})
     });
   };
   const trackPage = (page) => {
@@ -369,6 +450,26 @@ function createRecoveryLifecycleLedger(context, origin) {
       }
       trackedPages.clear();
       activeWorkerByPage.clear();
+      ownershipByPage.clear();
+    },
+    bindOwnedWorkers(workers) {
+      for (const worker of workers) {
+        const ownership = {
+          batchId: worker.batchId,
+          attempt: worker.attempt,
+          taskId: worker.taskId,
+          tabId: worker.tabId,
+          windowId: worker.windowId
+        };
+        ownershipByPage.set(worker.page, ownership);
+        const expectedPageId = pageId(worker.page);
+        const event = events.findLast((candidate) => (
+          candidate.type === 'open' &&
+          candidate.pageId === expectedPageId &&
+          candidate.urlIndex === worker.urlIndex
+        ));
+        if (event) Object.assign(event, ownership);
+      }
     },
     snapshot() {
       return {
@@ -555,6 +656,8 @@ async function main() {
   const monitoredExtensionRequestedUrls = [];
   const extensionProxyLedger = [];
   const pageErrors = [];
+  const legacyPageErrors = [];
+  const legacyObservedPages = [];
   const extensionPageErrors = [];
   const monitoredExtensionPageErrors = [];
   const monitoredServiceWorkerSignals = [];
@@ -569,6 +672,7 @@ async function main() {
   let configuredConcurrency = 0;
   let extensionLifecycle = null;
   let finalLifecycle = null;
+  let workerOwnershipAudit = null;
   let workerTabsAfterStop = null;
   let legacyPhaseCommentsSubmitted = null;
   let wholeCommandCommentsSubmitted = null;
@@ -581,6 +685,10 @@ async function main() {
   let monitorExtensionSignals = false;
   let monitoredReloadReady = false;
   let monitoredWorkerClosed = false;
+  let monitoredWorkerIdentityVerified = false;
+  let monitoredWorkerObjectMode = '';
+  let monitoredWorkerVersionId = null;
+  let monitoredServiceWorkerObjectCount = 0;
   let active = 0;
   let maxActive = 0;
 
@@ -598,11 +706,24 @@ async function main() {
     await context.addInitScript({ content: adapterSource });
     context.on('request', (request) => requestedUrls.push(request.url()));
 
+    async function createLegacyPage(phase) {
+      const page = await context.newPage();
+      legacyObservedPages.push({
+        phase,
+        sequence: legacyObservedPages.length + 1
+      });
+      page.on('pageerror', (error) => {
+        const diagnostic = `${phase}:${error.message}`;
+        legacyPageErrors.push(diagnostic);
+        pageErrors.push(diagnostic);
+      });
+      return page;
+    }
+
     async function runTarget(index) {
       active += 1;
       maxActive = Math.max(maxActive, active);
-      const page = await context.newPage();
-      page.on('pageerror', (error) => pageErrors.push(error.message));
+      const page = await createLegacyPage(`assignment-${index}`);
       try {
         await page.goto(`${origin}/multi/${index + 1}`, {
           waitUntil: 'domcontentloaded'
@@ -678,7 +799,7 @@ async function main() {
       );
     });
 
-    const failurePage = await context.newPage();
+    const failurePage = await createLegacyPage('failure');
     await failurePage.goto(`${origin}/multi/1`, { waitUntil: 'domcontentloaded' });
     await injectProduction(failurePage);
     const invalid = handleFor(origin, 0, ...assignments()[0]);
@@ -691,7 +812,7 @@ async function main() {
     assert.equal(rejected?.error, 'invalid_task_config');
     await failurePage.close();
 
-    const timeoutPage = await context.newPage();
+    const timeoutPage = await createLegacyPage('timeout');
     await timeoutPage.goto(`${origin}/multi/1`, { waitUntil: 'domcontentloaded' });
     await timeoutPage.evaluate(() => {
       globalThis.LocalFixtureChrome.configurePasswords({
@@ -720,7 +841,7 @@ async function main() {
     ));
     await timeoutPage.close();
 
-    const retryPage = await context.newPage();
+    const retryPage = await createLegacyPage('retry');
     await retryPage.goto(`${origin}/multi/1?retry=1`, {
       waitUntil: 'domcontentloaded'
     });
@@ -752,7 +873,7 @@ async function main() {
     assert.equal(retryRecord.promotionSiteId, timeoutHandle.promotionSiteId);
     interruptionRetry = 'same-assignment-success';
 
-    const interruptionPage = await context.newPage();
+    const interruptionPage = await createLegacyPage('interruption');
     await interruptionPage.goto(`${origin}/multi/2?interrupt=1`, {
       waitUntil: 'domcontentloaded'
     });
@@ -786,7 +907,7 @@ async function main() {
     await interruptedDispatch;
     submittingInterruption = 'context-preserved-before-close';
 
-    const recoveryPage = await context.newPage();
+    const recoveryPage = await createLegacyPage('recovery');
     await recoveryPage.goto(`${origin}/multi/5`, { waitUntil: 'domcontentloaded' });
     const recoveryHandle = handleFor(origin, 4, ...assignments()[4]);
     await recoveryPage.evaluate(async ({ handle }) => {
@@ -953,52 +1074,47 @@ async function main() {
     assert.match(bootstrapServiceWorker.url(), /\/background\.js$/);
     extensionAutomationVersion = await context.browser()?.version();
     const extensionId = new URL(bootstrapServiceWorker.url()).hostname;
+    const extensionOrigin = `chrome-extension://${extensionId}`;
     let monitoredServiceWorker = null;
-    let monitoredServiceWorkerCount = 0;
-    bootstrapServiceWorker.on('close', () => {
-      if (monitorExtensionSignals) {
-        monitoredWorkerClosed = true;
-        monitoredServiceWorkerSignals.push({
-          kind: 'close',
-          source: 'playwright-worker'
-        });
-      }
-    });
-    bootstrapServiceWorker.on('console', (message) => {
-      if (!monitorExtensionSignals) return;
-      monitoredServiceWorkerSignals.push({
-        kind: 'console',
-        level: message.type(),
-        text: message.text().slice(0, 500)
-      });
-    });
-    context.on('serviceworker', (worker) => {
+    let bootstrapWorkerClosed = false;
+    const observedServiceWorkers = new Set();
+    const workerListeners = new WeakSet();
+    const observeServiceWorker = (worker, source) => {
       if (
-        worker === bootstrapServiceWorker
-        || !worker.url().startsWith(`chrome-extension://${extensionId}/`)
+        workerListeners.has(worker) ||
+        !worker.url().startsWith(`${extensionOrigin}/`)
       ) {
         return;
       }
-      monitoredServiceWorkerCount += 1;
-      if (!monitoredServiceWorker) monitoredServiceWorker = worker;
+      workerListeners.add(worker);
+      observedServiceWorkers.add(worker);
       monitoredServiceWorkerSignals.push({
-        kind: 'created',
-        workerNumber: monitoredServiceWorkerCount
+        kind: 'observed',
+        source,
+        objectNumber: observedServiceWorkers.size
       });
       worker.on('console', (message) => {
+        if (!monitorExtensionSignals) return;
         monitoredServiceWorkerSignals.push({
           kind: 'console',
           level: message.type(),
-          text: message.text().slice(0, 500)
+          text: message.text().slice(0, 500),
+          objectNumber: [...observedServiceWorkers].indexOf(worker) + 1
         });
       });
       worker.on('close', () => {
+        if (worker === bootstrapServiceWorker) bootstrapWorkerClosed = true;
+        if (!monitorExtensionSignals) return;
         monitoredServiceWorkerSignals.push({
           kind: 'close',
-          workerNumber: monitoredServiceWorkerCount
+          objectNumber: [...observedServiceWorkers].indexOf(worker) + 1
         });
         if (worker === monitoredServiceWorker) monitoredWorkerClosed = true;
       });
+    };
+    observeServiceWorker(bootstrapServiceWorker, 'bootstrap');
+    context.on('serviceworker', (worker) => {
+      observeServiceWorker(worker, 'context-event');
     });
     const smokePage = await context.newPage();
     await smokePage.goto(`chrome-extension://${extensionId}/batch.html`, {
@@ -1013,6 +1129,8 @@ async function main() {
     assert.ok(bootstrapTarget);
     const serviceWorkerVersionSignals = [];
     const monitoredServiceWorkerErrors = [];
+    const observedServiceWorkerVersionIds = new Set();
+    const observedServiceWorkerRegistrationIds = new Set();
     cdpSession.on('ServiceWorker.workerVersionUpdated', ({ versions }) => {
       for (const version of versions) {
         if (
@@ -1021,13 +1139,20 @@ async function main() {
         ) {
           continue;
         }
+        observedServiceWorkerVersionIds.add(version.versionId);
+        observedServiceWorkerRegistrationIds.add(version.registrationId);
         const signal = {
+          versionId: version.versionId,
+          registrationId: version.registrationId,
+          targetId: version.targetId || null,
+          scriptURL: version.scriptURL,
           status: version.status,
           runningStatus: version.runningStatus
         };
         const previous = serviceWorkerVersionSignals.at(-1);
         if (
-          previous?.status !== signal.status
+          previous?.versionId !== signal.versionId
+          || previous?.status !== signal.status
           || previous?.runningStatus !== signal.runningStatus
         ) {
           serviceWorkerVersionSignals.push(signal);
@@ -1035,16 +1160,39 @@ async function main() {
       }
     });
     cdpSession.on('ServiceWorker.workerErrorReported', ({ errorMessage }) => {
+      let sourceOrigin = null;
+      try {
+        sourceOrigin = errorMessage?.sourceURL
+          ? new URL(errorMessage.sourceURL).origin
+          : null;
+      } catch (_) {
+        return;
+      }
       if (
-        errorMessage?.sourceURL
-        && errorMessage.sourceURL
-          !== `chrome-extension://${extensionId}/background.js`
+        sourceOrigin !== null &&
+        sourceOrigin !== extensionOrigin
+      ) {
+        return;
+      }
+      if (
+        errorMessage?.versionId &&
+        !observedServiceWorkerVersionIds.has(errorMessage.versionId)
+      ) {
+        return;
+      }
+      if (
+        errorMessage?.registrationId &&
+        !observedServiceWorkerRegistrationIds.has(
+          errorMessage.registrationId
+        )
       ) {
         return;
       }
       monitoredServiceWorkerErrors.push({
         message: String(errorMessage?.errorMessage || '').slice(0, 500),
         sourceURL: String(errorMessage?.sourceURL || '').slice(0, 500),
+        versionId: errorMessage?.versionId || null,
+        registrationId: errorMessage?.registrationId || null,
         lineNumber: errorMessage?.lineNumber ?? null,
         columnNumber: errorMessage?.columnNumber ?? null
       });
@@ -1086,10 +1234,51 @@ async function main() {
         && signal.runningStatus === 'running'
       ))
     );
-    monitoredServiceWorker = bootstrapServiceWorker;
+    const restartedRunningSignal = serviceWorkerVersionSignals.findLast(
+      (signal, index) => (
+        index > stoppedSignalIndex &&
+        signal.runningStatus === 'running'
+      )
+    );
+    assert.ok(restartedRunningSignal);
+    monitoredWorkerVersionId = restartedRunningSignal.versionId;
+    const liveExtensionWorkers = context.serviceWorkers().filter(
+      (worker) => worker.url() === `${extensionOrigin}/background.js`
+    );
+    liveExtensionWorkers.forEach(
+      (worker) => observeServiceWorker(worker, 'post-restart-live-set')
+    );
+    assert.equal(liveExtensionWorkers.length, 1);
+    monitoredServiceWorker = liveExtensionWorkers[0];
+    if (monitoredServiceWorker === bootstrapServiceWorker) {
+      assert.equal(bootstrapWorkerClosed, false);
+      monitoredWorkerObjectMode = 'reused-bootstrap-object';
+    } else {
+      assert.equal(bootstrapWorkerClosed, true);
+      assert.equal(observedServiceWorkers.has(monitoredServiceWorker), true);
+      monitoredWorkerObjectMode = 'selected-new-worker-object';
+    }
+    monitoredServiceWorkerObjectCount = observedServiceWorkers.size;
+    assert.ok(monitoredServiceWorkerObjectCount >= 1);
+    const restartedTargets = await cdpSession.send('Target.getTargets');
+    if (restartedRunningSignal.targetId) {
+      assert.equal(
+        restartedTargets.targetInfos.some((target) => (
+          target.targetId === restartedRunningSignal.targetId &&
+          target.type === 'service_worker' &&
+          target.url === monitoredServiceWorker.url()
+        )),
+        true
+      );
+    }
+    monitoredWorkerIdentityVerified = true;
     monitoredServiceWorkerSignals.push({
       kind: 'running',
-      source: 'cdp-service-worker-version'
+      source: 'cdp-service-worker-version',
+      objectMode: monitoredWorkerObjectMode,
+      objectCount: monitoredServiceWorkerObjectCount,
+      versionId: monitoredWorkerVersionId,
+      targetId: restartedRunningSignal.targetId
     });
     assert.match(monitoredServiceWorker.url(), /\/background\.js$/);
     await smokePage.reload({ waitUntil: 'domcontentloaded' });
@@ -1204,16 +1393,19 @@ async function main() {
           response.checkpoint?.tasks?.[String(urlIndex)]?.state === 'active'
         ));
     });
-    const initialWorkerTabs = await waitForValue(
-      () => currentRecoveryWorkerTabs(context, origin),
-      (tabs) => (
-        tabs.length === 3
-        && tabs.map(({ urlIndex }) => urlIndex).sort().join(',') === '0,1,2'
+    const initialOwnership = await waitForValue(
+      () => observeRecoveryWorkerOwnership(smokePage, context, origin),
+      (observation) => (
+        observation.errors.length === 0 &&
+        observation.workers.length === 3 &&
+        observation.workers.map(
+          ({ urlIndex }) => urlIndex
+        ).sort().join(',') === '0,1,2'
       )
     );
-    const initialCheckpoint = await smokePage.evaluate(() => (
-      chrome.runtime.sendMessage({ type: 'BATCH_SESSION_GET' })
-    )).then((response) => response.checkpoint);
+    const initialWorkerTabs = initialOwnership.workers;
+    extensionLifecycle.bindOwnedWorkers(initialWorkerTabs);
+    const initialCheckpoint = initialOwnership.checkpoint;
     configuredConcurrency = initialCheckpoint.settings.concurrency;
     assert.equal(configuredConcurrency, 3);
     assert.equal(initialWorkerTabs.length, 3);
@@ -1244,13 +1436,18 @@ async function main() {
     const checkpoint = await smokePage.evaluate(() => (
       chrome.runtime.sendMessage({ type: 'BATCH_SESSION_GET' })
     )).then((response) => response.checkpoint);
-    const activeWorkerTabs = await waitForValue(
-      () => currentRecoveryWorkerTabs(context, origin),
-      (tabs) => (
-        tabs.length === 3
-        && tabs.map(({ urlIndex }) => urlIndex).sort().join(',') === '1,2,3'
+    const recoveryOwnership = await waitForValue(
+      () => observeRecoveryWorkerOwnership(smokePage, context, origin),
+      (observation) => (
+        observation.errors.length === 0 &&
+        observation.workers.length === 3 &&
+        observation.workers.map(
+          ({ urlIndex }) => urlIndex
+        ).sort().join(',') === '1,2,3'
       )
     );
+    const activeWorkerTabs = recoveryOwnership.workers;
+    extensionLifecycle.bindOwnedWorkers(activeWorkerTabs);
     runtimeErrorText = await smokePage.locator(
       '[data-banner-kind="error"]'
     ).allTextContents().then((items) => items.join('\n'));
@@ -1297,11 +1494,14 @@ async function main() {
       )).then((response) => response.checkpoint),
       (candidate) => candidate?.status === 'terminated'
     );
-    const stoppedWorkerTabs = await waitForValue(
-      () => currentRecoveryWorkerTabs(context, origin),
-      (tabs) => tabs.length === 0
+    const stoppedOwnership = await waitForValue(
+      () => observeRecoveryWorkerOwnership(smokePage, context, origin),
+      (observation) => (
+        observation.errors.length === 0 &&
+        observation.workers.length === 0
+      )
     );
-    workerTabsAfterStop = stoppedWorkerTabs.length;
+    workerTabsAfterStop = stoppedOwnership.workers.length;
     assert.equal(workerTabsAfterStop, 0);
 
     await context.close();
@@ -1310,6 +1510,45 @@ async function main() {
     finalLifecycle = extensionLifecycle.snapshot();
     assert.equal(finalLifecycle.activeWorkerTabs, 0);
     assert.equal(finalLifecycle.maxConcurrentWorkerTabs, 3);
+    const boundLifecycleEvents = finalLifecycle.events.filter((event) => (
+      event.type === 'open' || event.type === 'close'
+    ));
+    assert.equal(boundLifecycleEvents.length, 8);
+    assert.equal(boundLifecycleEvents.every((event) => (
+      event.batchId === checkpoint.batchId &&
+      Number.isInteger(event.attempt) &&
+      Number.isInteger(event.tabId) &&
+      Number.isInteger(event.windowId) &&
+      event.windowId === initialOwnership.consoleTab.windowId
+    )), true);
+    assert.equal(
+      recoveryOwnership.consoleTab.windowId,
+      initialOwnership.consoleTab.windowId
+    );
+    assert.equal(
+      stoppedOwnership.consoleTab.windowId,
+      initialOwnership.consoleTab.windowId
+    );
+    workerOwnershipAudit = {
+      verified: true,
+      consoleWindowId: initialOwnership.consoleTab.windowId,
+      workerWindowMatchesConsole: true,
+      boundLifecycleEvents: boundLifecycleEvents.length,
+      initial: initialWorkerTabs.map((worker) => ({
+        urlIndex: worker.urlIndex,
+        tabId: worker.tabId,
+        windowId: worker.windowId,
+        attempt: worker.attempt,
+        taskId: worker.taskId
+      })),
+      afterRemoval: activeWorkerTabs.map((worker) => ({
+        urlIndex: worker.urlIndex,
+        tabId: worker.tabId,
+        windowId: worker.windowId,
+        attempt: worker.attempt,
+        taskId: worker.taskId
+      }))
+    };
     await closeServer(extensionProxy);
     extensionProxy = null;
 
@@ -1362,6 +1601,27 @@ async function main() {
     assert.deepEqual(monitoredServiceWorkerErrors, []);
     assert.equal(monitoredReloadReady, true);
     assert.equal(monitoredWorkerClosed, true);
+    assert.equal(monitoredWorkerIdentityVerified, true);
+    assert.equal(
+      observedServiceWorkerVersionIds.has(monitoredWorkerVersionId),
+      true
+    );
+    assert.equal(monitoredServiceWorkerObjectCount >= 1, true);
+    assert.equal(
+      monitoredServiceWorkerErrors.every((error) => (
+        (
+          !error.sourceURL ||
+          new URL(error.sourceURL).origin === extensionOrigin
+        ) &&
+        (
+          !error.versionId ||
+          observedServiceWorkerVersionIds.has(error.versionId)
+        )
+      )),
+      true
+    );
+    assert.equal(legacyObservedPages.length, 10);
+    assert.deepEqual(legacyPageErrors, []);
     const serviceWorkerRunningStatuses = serviceWorkerVersionSignals.reduce(
       (statuses, { runningStatus }) => {
         if (statuses.at(-1) !== runningStatus) statuses.push(runningStatus);
@@ -1399,6 +1659,10 @@ async function main() {
       },
       pageErrorLedger: {
         bootstrap: 'functional-signals-unobserved',
+        legacyScope: 'all-legacy-pages-creation-through-close',
+        legacyObservedPageCount: legacyObservedPages.length,
+        legacyObservedPages,
+        legacyErrors: legacyPageErrors,
         monitoredReloadThroughContextClose: monitoredExtensionPageErrors,
         postBootstrapExtensionObserved: extensionPageErrors,
         wholeCommandObserved: pageErrors
@@ -1421,6 +1685,12 @@ async function main() {
           'observer-attached-service-worker-restart-through-context-close',
         monitoredReloadReady,
         monitoredWorkerClosed,
+        monitoredWorkerIdentityVerified,
+        monitoredWorkerObjectMode,
+        monitoredWorkerObjectCount: monitoredServiceWorkerObjectCount,
+        monitoredWorkerVersionId,
+        monitoredWorkerErrorScope:
+          'exact-extension-origin-and-monitored-worker-version',
         monitoredWorkerConsoleErrors:
           monitoredServiceWorkerConsoleErrors,
         monitoredWorkerErrors: monitoredServiceWorkerErrors,
@@ -1428,9 +1698,10 @@ async function main() {
         serviceWorkerVersionSignals,
         serviceWorkerRunningStatuses,
         serviceWorkerSignals: monitoredServiceWorkerSignals,
-        additionalPlaywrightWorkerObjects:
-          monitoredServiceWorkerCount
+        observedPlaywrightWorkerObjects:
+          monitoredServiceWorkerObjectCount
       },
+      workerOwnershipAudit,
       assignments: sorted.map((record) => ({
         targetId: record.targetId,
         profileId: record.profileId,
@@ -1473,7 +1744,14 @@ async function main() {
         monitoredReloadThroughCloseRequests:
           monitoredExtensionRequestedUrls.length
       },
-      thirdPartySubmissions: 0
+      submissionAudit: {
+        thirdPartyScope:
+          'local-fixture-targets-only-no-third-party-destination',
+        configuredThirdPartyDestinations: 0,
+        legacyLocalFixtureSubmissions: legacyPhaseCommentsSubmitted,
+        realExtensionLocalFixtureSubmissions: commentsSubmitted,
+        wholeCommandLocalFixtureSubmissions: wholeCommandCommentsSubmitted
+      }
     };
     assert.deepEqual(
       {
@@ -1499,6 +1777,16 @@ async function main() {
           result.functionalErrorAudit?.monitoredPageErrors,
         serviceWorkerRunningStatuses:
           result.functionalErrorAudit?.serviceWorkerRunningStatuses,
+        monitoredWorkerIdentityVerified:
+          result.functionalErrorAudit?.monitoredWorkerIdentityVerified,
+        monitoredWorkerErrorScope:
+          result.functionalErrorAudit?.monitoredWorkerErrorScope,
+        workerOwnershipVerified:
+          result.workerOwnershipAudit?.verified,
+        workerLedgerBoundEvents:
+          result.workerOwnershipAudit?.boundLifecycleEvents,
+        workerWindowMatchesConsole:
+          result.workerOwnershipAudit?.workerWindowMatchesConsole,
         lifecycleMutationOpenedIndexZero:
           result.workerLifecycle?.mutationProbe?.openedUrlIndexCounts?.['0'],
         lifecycleMutationClosedIndexZero:
@@ -1507,6 +1795,14 @@ async function main() {
         recoveryCommentsSubmitted: result.commentLedger?.realExtensionRecovery,
         wholeCommandCommentsSubmitted: result.commentLedger?.wholeCommand,
         commentsSubmittedScope: result.commentsSubmittedScope,
+        legacyObservedPageCount:
+          result.pageErrorLedger?.legacyObservedPageCount,
+        legacyPageErrorScope:
+          result.pageErrorLedger?.legacyScope,
+        wholeCommandPageErrors:
+          result.pageErrorLedger?.wholeCommandObserved,
+        thirdPartySubmissionScope:
+          result.submissionAudit?.thirdPartyScope,
         thirdPartyRequests: result.thirdPartyRequests,
         commentsSubmitted: result.commentsSubmitted,
         pageErrors: result.pageErrors
@@ -1535,12 +1831,24 @@ async function main() {
         monitoredPageErrors: [],
         serviceWorkerRunningStatuses:
           ['running', 'stopping', 'stopped', 'starting', 'running'],
+        monitoredWorkerIdentityVerified: true,
+        monitoredWorkerErrorScope:
+          'exact-extension-origin-and-monitored-worker-version',
+        workerOwnershipVerified: true,
+        workerLedgerBoundEvents: 8,
+        workerWindowMatchesConsole: true,
         lifecycleMutationOpenedIndexZero: 3,
         lifecycleMutationClosedIndexZero: 3,
         legacyPhaseCommentsSubmitted: 6,
         recoveryCommentsSubmitted: 0,
         wholeCommandCommentsSubmitted: 6,
         commentsSubmittedScope: 'real-extension-recovery',
+        legacyObservedPageCount: 10,
+        legacyPageErrorScope:
+          'all-legacy-pages-creation-through-close',
+        wholeCommandPageErrors: [],
+        thirdPartySubmissionScope:
+          'local-fixture-targets-only-no-third-party-destination',
         thirdPartyRequests: 0,
         commentsSubmitted: 0,
         pageErrors: []

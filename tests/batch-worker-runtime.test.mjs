@@ -254,6 +254,95 @@ test('ignores stale removed-tab checkpoint identities and duplicate delivery', a
   );
 });
 
+test('rejects equal-time removed snapshots that regress unrelated task, result, or reservation state', async () => {
+  async function runProbe(regress) {
+    const harness = createWorkerHarness({ concurrency: 2, taskCount: 3 });
+    const runtime = createBatchWorkerRuntime(harness.dependencies);
+    const events = [];
+    runtime.subscribe((event) => events.push(event));
+    await runtime.start(harness.checkpoint);
+    await runtime.handleConfirmation({
+      type: 'BATCH_CONFIRMED',
+      batchId: 'batch-1',
+      urlIndex: 1,
+      attempt: 1,
+      sourceTabId: 101,
+      result: 'success',
+      aiContent: 'saved',
+      historySaveStatus: 'saved'
+    });
+    harness.checkpoint.updatedAt = 5000;
+    harness.checkpoint.openingReservations = {
+      'batch-1:2:1': {
+        batchId: 'batch-1',
+        urlIndex: 2,
+        attempt: 1,
+        requestId: 'batch-1:2:1',
+        cleanupOnly: true,
+        createCompletionUnknown: true,
+        cleanupObservedAt: 4900,
+        updatedAt: 5000
+      }
+    };
+    const candidate = structuredClone(harness.checkpoint);
+    Object.assign(candidate.tasks['0'], {
+      state: 'terminal',
+      phase: null,
+      tabId: null,
+      windowId: null,
+      startedAt: null,
+      updatedAt: 5000
+    });
+    candidate.results.push({
+      originalIndex: 0,
+      attempt: 1,
+      result: 'fail',
+      errorCode: 'task_failed',
+      errorMessage: 'Worker tab closed',
+      timestamp: 5000
+    });
+    regress(candidate);
+
+    assert.equal(await runtime.acceptRemovedTabCheckpoint({
+      batchId: 'batch-1',
+      urlIndex: 0,
+      attempt: 1,
+      tabId: 100,
+      checkpoint: candidate
+    }), false);
+    assert.deepEqual(
+      harness.sentHandles.map(({ urlIndex }) => urlIndex),
+      [0, 1, 2]
+    );
+    assert.equal((await runtime.focus(0))?.tabId, 100);
+    assert.equal(
+      events.some(({ type }) => type === 'runtime-error'),
+      false
+    );
+  }
+
+  await runProbe((candidate) => {
+    Object.assign(candidate.tasks['1'], {
+      state: 'active',
+      phase: 'generating',
+      tabId: 101,
+      windowId: 42,
+      startedAt: 1000,
+      updatedAt: 4000
+    });
+  });
+  await runProbe((candidate) => {
+    const unrelated = candidate.results.find(
+      ({ originalIndex }) => originalIndex === 1
+    );
+    unrelated.aiContent = 'stale unrelated result';
+  });
+  await runProbe((candidate) => {
+    candidate.openingReservations['batch-1:2:1'].cleanupOnly = false;
+    candidate.openingReservations['batch-1:2:1'].updatedAt = 4000;
+  });
+});
+
 test('ignores removed-tab checkpoint with a different frozen profile identity', async () => {
   const harness = createWorkerHarness({ concurrency: 1, taskCount: 2 });
   harness.checkpoint.version = 3;

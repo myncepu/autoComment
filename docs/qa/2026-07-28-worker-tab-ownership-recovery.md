@@ -4,10 +4,10 @@
 - Automated suite: `npm test` — PASS
 
   ```text
-  # tests 955
-  # pass 955
+  # tests 960
+  # pass 960
   # fail 0
-  # duration_ms 6048.775084
+  # duration_ms 6097.300208
   ```
 
 - Syntax checks: PASS
@@ -448,6 +448,65 @@ running → stopping → stopped → starting → running
 The console acceptance also passed at 1440 and 1024 in table mode and at 640
 in card mode, with no horizontal overflow, page errors, or third-party
 requests.
+
+## Final Review Fix Wave
+
+The final review wave closed all eight remaining findings:
+
+1. `closing` is now an uncertain submission phase and terminalizes as
+   `manual_required/submission_uncertain`.
+2. Durable opening reservations disable replacement-batch creation.
+3. A rejected `batch_ownership_active` command publishes its authoritative
+   checkpoint before surfacing the error.
+4. Ownership rejection closes the stale wizard, adopts the owned batch and
+   file, restores the correct command controls, and focuses an actionable
+   error alert outside hidden/inert content.
+5. Page-first and background-first removal ordering both converge; the
+   page-first recovery clears its transient error and refills exactly once.
+6. Removed-tab checkpoint adoption rejects equal-time regressions in
+   unrelated tasks, results, and opening reservations.
+7. Real-Chrome lifecycle events are bound to durable task identity and actual
+   Chrome `tabId`/`windowId`; all eight open/close events belong to the
+   console window.
+8. Functional-error and submission evidence now covers every legacy page,
+   the monitored service-worker identity/version through context close, and
+   explicitly scoped local-fixture submissions.
+
+Production RED evidence was captured before each implementation. The focused
+GREEN gate passed `265/265` tests. The tightened Chrome acceptance first
+failed because the new ownership, service-worker identity, legacy-page, and
+submission-scope fields were absent, then passed after the observations were
+implemented.
+
+Final verification:
+
+```text
+node --check background.js                                      PASS
+node --check batch.js                                           PASS
+node --check lib/batch-runtime-controller.mjs                   PASS
+node --check lib/batch-worker-runtime.mjs                       PASS
+node --check lib/batch-page-composition.mjs                     PASS
+node --check lib/batch-console-view.mjs                         PASS
+node --check scripts/run-multi-assignment-chrome-acceptance.mjs PASS
+npm test                                                        PASS 960/960
+npm run test:chrome:console                                     PASS
+npm run test:chrome:multi-assignment                            PASS
+git diff --check                                                PASS
+```
+
+The final multi-assignment run observed Chrome `150.0.7871.184` and extension
+Chromium `149.0.7827.55`. It opened indices `[0, 1, 2, 3]` exactly once,
+closed index `0`, refilled index `3`, held configured/observed concurrency at
+`3`, and left `0` worker tabs after stop. Ownership verification passed with
+eight identity-bound lifecycle events in the console window. Ten legacy
+pages and the whole command reported no page errors. The monitored
+service-worker sequence was
+`running → stopping → stopped → starting → running`; its exact extension
+origin/version identity was verified, its reused Playwright Worker object was
+observed through context close, and worker console/errors were empty.
+Real-extension recovery submitted `0` comments; the legacy and whole-command
+local-fixture counts were both `6`; configured third-party submission
+destinations were `0`.
 
 ## Safety Review
 

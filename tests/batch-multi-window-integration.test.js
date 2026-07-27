@@ -316,8 +316,21 @@ async function createProductionHarness(options = {}) {
     logger: { warn() {} }
   });
   if (options.installBackgroundRuntime === true) {
+    const backgroundTabs = options.delayBackgroundRemoval === true
+      ? {
+          ...tabsApi,
+          onRemoved: {
+            addListener(listener) {
+              tabsApi.onRemoved.addListener((...args) => {
+                setImmediate(() => listener(...args));
+              });
+            },
+            removeListener() {}
+          }
+        }
+      : tabsApi;
     installBatchRuntimeController({
-      tabs: tabsApi,
+      tabs: backgroundTabs,
       runtime: backgroundRuntime
     }, runtimeController);
   }
@@ -794,6 +807,8 @@ test('rejected new batch keeps active ownership selected and explains recovery',
     harness.dom.window.close();
   });
   const activeCheckpoint = clone(cleanupCheckpoint);
+  activeCheckpoint.batchId = 'owned-batch';
+  activeCheckpoint.source.fileName = 'owned-targets.csv';
   activeCheckpoint.tasks['0'] = {
     ...activeCheckpoint.tasks['0'],
     state: 'active',
@@ -820,7 +835,7 @@ test('rejected new batch keeps active ownership selected and explains recovery',
 
   assert.equal(
     harness.document.querySelector('[data-batch-name]').textContent,
-    'targets.csv'
+    'owned-targets.csv'
   );
   assert.equal(
     harness.document.querySelector('[data-batch-status]').textContent,
@@ -837,6 +852,34 @@ test('rejected new batch keeps active ownership selected and explains recovery',
       (message) => message.type === 'BATCH_SESSION_CLEAR'
     ),
     false
+  );
+  const wizard = harness.document.querySelector('[data-batch-wizard]');
+  assert.equal(wizard.hasAttribute('open'), false);
+  const recoveryAlert = harness.document.querySelector(
+    '[data-runtime-error]'
+  );
+  assert.ok(recoveryAlert);
+  assert.equal(recoveryAlert.getAttribute('role'), 'alert');
+  assert.equal(harness.document.activeElement, recoveryAlert);
+  for (
+    let ancestor = recoveryAlert;
+    ancestor;
+    ancestor = ancestor.parentElement
+  ) {
+    assert.equal(ancestor.hasAttribute('inert'), false);
+    assert.notEqual(ancestor.getAttribute('aria-hidden'), 'true');
+  }
+  assert.equal(
+    harness.document.querySelector('[data-action="resume"]').disabled,
+    false
+  );
+  assert.equal(
+    harness.document.querySelector('[data-action="stop"]').disabled,
+    false
+  );
+  assert.equal(
+    harness.document.querySelector('[data-action="new-batch"]').disabled,
+    true
   );
 });
 
@@ -970,6 +1013,69 @@ test('duplicate background removal cannot regress the active replacement checkpo
   assert.doesNotMatch(
     harness.document.querySelector('[data-task-row="1"]').textContent,
     /排队/
+  );
+  assert.equal(
+    harness.document.querySelector('[data-runtime-error]'),
+    null
+  );
+});
+
+test('page-first worker removal adopts the delayed background repair and refills once', async (t) => {
+  const checkpoint = pausedCheckpoint({ taskCount: 2, concurrency: 1 });
+  checkpoint.source.parsedUrls[0].url = 'https://target.test/target-0';
+  checkpoint.source.parsedUrls[1].url = 'https://target.test/target-1';
+  checkpoint.source.rows[0][1] = 'https://target.test/target-0';
+  checkpoint.source.rows[1][1] = 'https://target.test/target-1';
+  const harness = await createProductionHarness({
+    checkpoint,
+    installBackgroundRuntime: true,
+    delayBackgroundRemoval: true
+  });
+  t.after(() => harness.page.destroy());
+  click(harness.document, '[data-action="resume"]');
+  await waitFor(
+    () => harness.storageLocal.data.batchRuntimeCheckpoint.tasks['0']
+      .state === 'active',
+    'first worker activity'
+  );
+  const firstTask = clone(
+    harness.storageLocal.data.batchRuntimeCheckpoint.tasks['0']
+  );
+
+  await harness.tabsApi.remove(firstTask.tabId);
+
+  await waitFor(
+    () => harness.storageLocal.data.batchRuntimeCheckpoint.tasks['0']
+      .state === 'terminal',
+    'background terminal repair'
+  );
+  await waitFor(
+    () => harness.storageLocal.data.batchRuntimeCheckpoint.tasks['1']
+      .state === 'active',
+    'one replacement worker'
+  );
+
+  assert.equal(
+    harness.storageLocal.data.batchRuntimeCheckpoint.status,
+    'running'
+  );
+  assert.equal(
+    harness.tabsApi.updateCalls.filter(
+      ([, { url }]) => url.endsWith('/target-0')
+    ).length,
+    1
+  );
+  assert.equal(
+    harness.tabsApi.updateCalls.filter(
+      ([, { url }]) => url.endsWith('/target-1')
+    ).length,
+    1
+  );
+  assert.equal(
+    harness.storageLocal.data.batchRuntimeCheckpoint.results.filter(
+      ({ originalIndex, attempt }) => originalIndex === 0 && attempt === 1
+    ).length,
+    1
   );
   assert.equal(
     harness.document.querySelector('[data-runtime-error]'),

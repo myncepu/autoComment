@@ -28,3 +28,15 @@ test('classifies a submitting worker close as manual-required', () => {
     errorMessage: 'worker 标签页在提交确认期间被关闭'
   });
 });
+
+test('classifies a closing worker close as manual-required', () => {
+  assert.deepEqual(createWorkerTabRemovalResult({
+    state: 'active',
+    phase: 'closing'
+  }), {
+    result: 'manual_required',
+    aiContent: null,
+    errorCode: 'submission_uncertain',
+    errorMessage: 'worker 标签页在提交确认期间被关闭'
+  });
+});
