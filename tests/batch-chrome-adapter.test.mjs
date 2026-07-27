@@ -270,6 +270,9 @@ test('accepts removed worker checkpoint only from trusted background and scrubs 
     url: 'https://target.test/post'
   });
   harness.runtimeOnMessage.emit(message, {
+    id: 'extension-id'
+  });
+  harness.runtimeOnMessage.emit(message, {
     id: 'extension-id',
     url: 'chrome-extension://extension-id/background.js'
   });
