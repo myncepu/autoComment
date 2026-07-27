@@ -350,6 +350,18 @@ function startMessage(count = 2) {
   };
 }
 
+async function startActiveWorker(harness, count = 2) {
+  await harness.controller.handleMessage(startMessage(count));
+  await harness.controller.handleMessage({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 11,
+    windowId: 21
+  });
+}
+
 async function assignmentStartMessage() {
   const plan = await finalizeBatchPlan({
     version: 2,
@@ -703,6 +715,142 @@ test('returns the checkpoint updated by a task phase command', async () => {
 
   assert.equal(response.ok, true);
   assert.equal(response.checkpoint.tasks['0'].phase, 'generating');
+});
+
+test('removed worker tab terminalizes exact durable ownership before clearing its journal', async () => {
+  const harness = createHarness();
+  await startActiveWorker(harness);
+  harness.operationLog.length = 0;
+
+  const response = await harness.controller.handleWorkerTabRemoved(11);
+
+  assert.equal(response.ok, true);
+  assert.equal(response.changed, true);
+  assert.deepEqual(response.removal, {
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 11
+  });
+  assert.equal(response.checkpoint.tasks['0'].state, 'terminal');
+  assert.equal(response.checkpoint.results[0].result, 'fail');
+  assert.equal(response.checkpoint.tasks['1'].state, 'queued');
+  assert.equal(response.checkpoint.tasks['0'].tabId, null);
+  assert.equal(
+    Object.hasOwn(
+      harness.sessionData,
+      'batchWorkerOwnershipV1:batch-1:0:1'
+    ),
+    false
+  );
+  assert.deepEqual(
+    harness.operationLog.map(([operation]) => operation),
+    ['persist', 'session-remove']
+  );
+});
+
+test('removed worker tab during submission becomes manual-required', async () => {
+  const harness = createHarness();
+  await startActiveWorker(harness);
+  await harness.controller.handleMessage({
+    type: 'BATCH_TASK_SUBMITTING',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1
+  }, {
+    id: 'extension-id',
+    tab: { id: 11, windowId: 21 }
+  });
+
+  const response = await harness.controller.handleWorkerTabRemoved(11);
+
+  assert.equal(response.ok, true);
+  assert.equal(response.changed, true);
+  assert.equal(response.checkpoint.results[0].result, 'manual_required');
+  assert.equal(
+    response.checkpoint.results[0].errorCode,
+    'submission_uncertain'
+  );
+});
+
+test('duplicate worker removal is idempotent', async () => {
+  const harness = createHarness();
+  await startActiveWorker(harness);
+
+  await harness.controller.handleWorkerTabRemoved(11);
+  const response = await harness.controller.handleWorkerTabRemoved(11);
+
+  assert.equal(response.ok, true);
+  assert.equal(response.changed, false);
+  assert.equal(response.checkpoint.results.length, 1);
+});
+
+test('unrelated removed tab leaves durable ownership unchanged', async () => {
+  const harness = createHarness();
+  await startActiveWorker(harness);
+
+  const response = await harness.controller.handleWorkerTabRemoved(999);
+
+  assert.equal(response.ok, true);
+  assert.equal(response.changed, false);
+  assert.equal(response.checkpoint.tasks['0'].state, 'active');
+  assert.equal(response.checkpoint.tasks['0'].tabId, 11);
+  assert.equal(response.checkpoint.results.length, 0);
+});
+
+test('removed worker tab converges an ownership-unverified tab-missing race', async () => {
+  const harness = createHarness();
+  await startActiveWorker(harness);
+  harness.tabStore.delete(11);
+  const pageResponse = await harness.controller.markTerminal({
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    result: 'fail',
+    errorCode: 'task_failed',
+    errorMessage: '用户关闭了自动 worker 标签页'
+  });
+  assert.equal(pageResponse.error, 'batch_ownership_unverified');
+  assert.equal(pageResponse.checkpoint.status, 'paused_recovery');
+  assert.equal(
+    pageResponse.checkpoint.recoveryCleanup.reason,
+    'ownership_unverified'
+  );
+  assert.equal(
+    pageResponse.checkpoint.recoveryCleanup.diagnostic,
+    'tab_missing'
+  );
+
+  const racedResponse = await harness.controller.handleWorkerTabRemoved(11);
+
+  assert.equal(racedResponse.ok, true);
+  assert.equal(racedResponse.changed, true);
+  assert.equal(racedResponse.checkpoint.tasks['0'].state, 'terminal');
+  assert.equal(racedResponse.checkpoint.status, 'running');
+  assert.equal(
+    Object.hasOwn(racedResponse.checkpoint, 'recoveryCleanup'),
+    false
+  );
+});
+
+test('removed worker tab does not converge a different paused recovery marker', async () => {
+  const harness = createHarness();
+  await startActiveWorker(harness);
+  harness.data.batchRuntimeCheckpoint.status = 'paused_recovery';
+  harness.data.batchRuntimeCheckpoint.recoveryCleanup = {
+    reason: 'ownership_unverified',
+    diagnostic: 'tab_lookup_failed',
+    updatedAt: 2000
+  };
+
+  const response = await harness.controller.handleWorkerTabRemoved(11);
+
+  assert.equal(response.ok, true);
+  assert.equal(response.changed, false);
+  assert.equal(response.checkpoint.status, 'paused_recovery');
+  assert.equal(response.checkpoint.tasks['0'].state, 'active');
+  assert.equal(response.checkpoint.tasks['0'].tabId, 11);
+  assert.equal(response.checkpoint.results.length, 0);
 });
 
 test('content task phase persists before a background-owned page broadcast', async () => {
