@@ -776,6 +776,71 @@ test('paused production boot creates no tabs and explicit resume creates three s
   assert.match(harness.document.querySelector('[data-task-row="4"]').textContent, /排队/);
 });
 
+test('boot renders ownership recovery instead of rejecting when worker proof is missing', async (t) => {
+  const checkpoint = pausedCheckpoint({
+    taskCount: 2,
+    concurrency: 1
+  });
+  checkpoint.status = 'running';
+  Object.assign(checkpoint.tasks['0'], {
+    state: 'active',
+    phase: 'generating',
+    requestId: 'batch-1:0:1',
+    tabId: 777,
+    windowId: 42,
+    ownerPageTabId: 50,
+    ownershipEpoch: 'lost-session-epoch',
+    startedAt: 1500,
+    updatedAt: 2000
+  });
+
+  const harness = await createProductionHarness({ checkpoint });
+  t.after(async () => {
+    harness.storageLocal.data.batchRuntimeCheckpoint = pausedCheckpoint({
+      taskCount: 2,
+      concurrency: 1
+    });
+    await harness.page.destroy();
+    harness.dom.window.close();
+  });
+
+  const persisted = harness.storageLocal.data.batchRuntimeCheckpoint;
+  assert.equal(persisted.status, 'paused_recovery');
+  assert.equal(persisted.recoveryCleanup.reason, 'ownership_unverified');
+  assert.equal(persisted.tasks['0'].state, 'active');
+  assert.equal(persisted.tasks['0'].tabId, 777);
+  assert.deepEqual(harness.tabsApi.removeCalls, []);
+  assert.match(
+    harness.document.querySelector('[data-batch-status]').textContent,
+    /已暂停/
+  );
+
+  const recoveryAlert = harness.document.querySelector(
+    '[data-runtime-error]'
+  );
+  assert.ok(recoveryAlert);
+  assert.match(
+    recoveryAlert.textContent,
+    /无法安全验证旧 worker 标签页/
+  );
+  assert.doesNotMatch(
+    recoveryAlert.textContent,
+    /batch_ownership_unverified/
+  );
+  assert.equal(
+    harness.document.querySelector('[data-action="resume"]').disabled,
+    false
+  );
+  assert.equal(
+    harness.document.querySelector('[data-action="stop"]').disabled,
+    false
+  );
+  assert.equal(
+    harness.document.querySelector('[data-action="new-batch"]').disabled,
+    true
+  );
+});
+
 test('running console disables the new-batch preview entry and cannot open its wizard', async (t) => {
   const harness = await createProductionHarness();
   t.after(() => harness.page.destroy());
