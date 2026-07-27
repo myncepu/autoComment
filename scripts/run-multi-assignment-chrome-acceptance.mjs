@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -17,6 +18,27 @@ const productionScripts = [
   'lib/comment-history-capture.js',
   'lib/batch-phase-reporter.js',
   'content.js'
+];
+const recoveryDisabledChromiumFeatures = [
+  'AvoidUnnecessaryBeforeUnloadCheckSync',
+  'AutofillServerCommunication',
+  'AutoDeElevate',
+  'BoundaryEventDispatchTracksNodeRemoval',
+  'CaptivePortalDetection',
+  'DestroyProfileOnBrowserClose',
+  'DialMediaRouteProvider',
+  'GlobalMediaControls',
+  'HttpsUpgrades',
+  'LensOverlay',
+  'MediaRouter',
+  'NetworkTimeServiceQuerying',
+  'OptimizationHints',
+  'PaintHolding',
+  'RenderDocument',
+  'ThirdPartyStoragePartitioning',
+  'Translate',
+  'msEdgeUpdateLaunchServicesPreferredVersion',
+  'msForceBrowserSignIn'
 ];
 
 function loadPlaywright() {
@@ -69,6 +91,96 @@ function listen(server) {
 
 function closeServer(server) {
   return new Promise((resolve) => server.close(resolve));
+}
+
+function createLocalOnlyAuditProxy(allowedOrigin, ledger) {
+  let sequence = 0;
+  const record = ({ method, url, allowed, transport }) => {
+    ledger.push({
+      sequence: ++sequence,
+      method,
+      url,
+      allowed,
+      transport
+    });
+  };
+  const deny = (response, statusLine = null) => {
+    if (typeof response.writeHead === 'function') {
+      response.writeHead(502, {
+        'Cache-Control': 'no-store',
+        'Content-Type': 'text/plain; charset=utf-8'
+      });
+      response.end('network_target_not_allowlisted');
+      return;
+    }
+    response.end(
+      statusLine || 'HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n'
+    );
+  };
+  const proxy = http.createServer((request, response) => {
+    let target;
+    try {
+      target = new URL(request.url);
+    } catch (_) {
+      record({
+        method: request.method,
+        url: request.url,
+        allowed: false,
+        transport: 'http'
+      });
+      request.resume();
+      deny(response);
+      return;
+    }
+    const allowed = target.origin === allowedOrigin;
+    record({
+      method: request.method,
+      url: target.href,
+      allowed,
+      transport: 'http'
+    });
+    if (!allowed) {
+      request.resume();
+      deny(response);
+      return;
+    }
+    const headers = { ...request.headers, host: target.host };
+    delete headers['proxy-authorization'];
+    delete headers['proxy-connection'];
+    const upstream = http.request(target, {
+      method: request.method,
+      headers
+    }, (upstreamResponse) => {
+      response.writeHead(
+        upstreamResponse.statusCode || 502,
+        upstreamResponse.headers
+      );
+      upstreamResponse.pipe(response);
+    });
+    upstream.on('error', () => deny(response));
+    request.pipe(upstream);
+  });
+  proxy.on('connect', (request, socket) => {
+    socket.on('error', () => {});
+    record({
+      method: request.method,
+      url: `https://${request.url}`,
+      allowed: false,
+      transport: 'connect'
+    });
+    deny(socket);
+  });
+  proxy.on('upgrade', (request, socket) => {
+    socket.on('error', () => {});
+    record({
+      method: request.method,
+      url: request.url,
+      allowed: false,
+      transport: 'upgrade'
+    });
+    deny(socket);
+  });
+  return proxy;
 }
 
 function profiles() {
@@ -182,6 +294,99 @@ function currentRecoveryWorkerTabs(context, origin) {
   });
 }
 
+function createRecoveryLifecycleLedger(context, origin) {
+  const events = [];
+  const openCounts = new Map();
+  const activeWorkerByPage = new Map();
+  const trackedPages = new WeakSet();
+  const pageIds = new WeakMap();
+  let nextPageId = 0;
+  let sequence = 0;
+  let maxConcurrentWorkerTabs = 0;
+
+  const pageId = (page) => {
+    if (!pageIds.has(page)) pageIds.set(page, ++nextPageId);
+    return pageIds.get(page);
+  };
+  const closeWorker = (page, source) => {
+    if (!activeWorkerByPage.has(page)) return;
+    const urlIndex = activeWorkerByPage.get(page);
+    activeWorkerByPage.delete(page);
+    events.push({
+      sequence: ++sequence,
+      type: 'close',
+      urlIndex,
+      pageId: pageId(page),
+      source,
+      activeWorkerTabs: activeWorkerByPage.size
+    });
+  };
+  const openWorker = (page, rawUrl, source) => {
+    const urlIndex = recoveryTargetIndex(rawUrl, origin);
+    if (urlIndex === null) return;
+    if (activeWorkerByPage.get(page) === urlIndex) return;
+    closeWorker(page, 'navigation-replaced');
+    activeWorkerByPage.set(page, urlIndex);
+    openCounts.set(urlIndex, (openCounts.get(urlIndex) || 0) + 1);
+    maxConcurrentWorkerTabs = Math.max(
+      maxConcurrentWorkerTabs,
+      activeWorkerByPage.size
+    );
+    events.push({
+      sequence: ++sequence,
+      type: 'open',
+      urlIndex,
+      pageId: pageId(page),
+      source,
+      activeWorkerTabs: activeWorkerByPage.size
+    });
+  };
+  const trackPage = (page) => {
+    if (trackedPages.has(page)) return;
+    trackedPages.add(page);
+    pageId(page);
+    openWorker(page, page.url(), 'existing-page');
+    page.on('framenavigated', (frame) => {
+      if (frame === page.mainFrame()) {
+        openWorker(page, frame.url(), 'main-frame-navigation');
+      }
+    });
+    page.on('close', () => closeWorker(page, 'page-close'));
+  };
+
+  context.pages().forEach(trackPage);
+  context.on('page', trackPage);
+  context.on('request', (request) => {
+    if (!request.isNavigationRequest()) return;
+    let frame;
+    try {
+      frame = request.frame();
+    } catch (_) {
+      return;
+    }
+    if (frame !== frame.page().mainFrame()) return;
+    const page = frame.page();
+    trackPage(page);
+    openWorker(page, request.url(), 'navigation-request');
+  });
+
+  return {
+    snapshot() {
+      return {
+        events: events.map((event) => ({ ...event })),
+        openedUrlIndices: events.flatMap((event) => (
+          event.type === 'open' ? [event.urlIndex] : []
+        )),
+        openedUrlIndexCounts: Object.fromEntries(
+          [...openCounts.entries()].sort(([left], [right]) => left - right)
+        ),
+        maxConcurrentWorkerTabs,
+        activeWorkerTabs: activeWorkerByPage.size
+      };
+    }
+  };
+}
+
 async function waitForValue(load, accepts, timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -223,18 +428,58 @@ async function prepareLocalExtension(sourceRoot, temporaryProfile) {
   });
   const manifestPath = path.join(extensionRoot, 'manifest.json');
   const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
-  manifest.host_permissions = [
-    ...new Set([
-      ...(manifest.host_permissions || []),
-      'http://127.0.0.1/*'
-    ])
-  ];
+  manifest.host_permissions = ['http://127.0.0.1/*'];
+  manifest.optional_host_permissions = [];
+  manifest.content_scripts = (manifest.content_scripts || []).map(
+    (contentScript) => ({
+      ...contentScript,
+      matches: ['http://127.0.0.1/*']
+    })
+  );
+  manifest.web_accessible_resources = (
+    manifest.web_accessible_resources || []
+  ).map((resource) => ({
+    ...resource,
+    matches: ['http://127.0.0.1/*']
+  }));
   await fs.writeFile(
     manifestPath,
     `${JSON.stringify(manifest, null, 2)}\n`,
     'utf8'
   );
   return extensionRoot;
+}
+
+async function prepareNetworkQuietChromiumProfile(profileRoot) {
+  const defaultProfile = path.join(profileRoot, 'Default');
+  await fs.mkdir(defaultProfile, { recursive: true });
+  await fs.writeFile(
+    path.join(defaultProfile, 'Preferences'),
+    `${JSON.stringify({
+      autofill: {
+        credit_card_enabled: false,
+        profile_enabled: false
+      },
+      browser: {
+        check_default_browser: false,
+        has_seen_welcome_page: true
+      },
+      credentials_enable_service: false,
+      distribution: {
+        skip_first_run_ui: true
+      },
+      profile: {
+        password_manager_enabled: false
+      },
+      safebrowsing: {
+        enabled: false
+      },
+      signin: {
+        allowed: false
+      }
+    }, null, 2)}\n`,
+    'utf8'
+  );
 }
 
 function handleFor(origin, index, profileId, promotionSiteId, source) {
@@ -294,9 +539,12 @@ async function main() {
     path.join(os.tmpdir(), 'autocomment-multi-')
   );
   let context;
+  let extensionProxy;
   const requestedUrls = [];
   const extensionRequestedUrls = [];
+  const extensionProxyLedger = [];
   const pageErrors = [];
+  const extensionPageErrors = [];
   const outcomes = [];
   let chromeVersion = '';
   let extensionAutomationVersion = '';
@@ -305,10 +553,18 @@ async function main() {
   let submittingInterruption = '';
   let closedUrlIndex = null;
   let replacementUrlIndex = null;
-  let extensionMaxConcurrency = 0;
+  let configuredConcurrency = 0;
+  let extensionLifecycle = null;
+  let finalLifecycle = null;
+  let workerTabsAfterStop = null;
+  let legacyPhaseCommentsSubmitted = null;
+  let wholeCommandCommentsSubmitted = null;
   let commentsSubmitted = null;
   let runtimeErrorText = '';
+  let batchVisibleText = '';
   let thirdPartyRequests = [];
+  let extensionThirdPartyRequests = [];
+  let blockedChromiumBackgroundAttempts = [];
   let active = 0;
   let maxActive = 0;
 
@@ -565,6 +821,10 @@ async function main() {
     }
     assert.deepEqual(pageErrors, []);
     assert.doesNotMatch(JSON.stringify({ records, outcomes }), /fixture-password/);
+    legacyPhaseCommentsSubmitted = await fetch(
+      `${origin}/__fixture/submissions`
+    ).then((response) => response.json()).then((items) => items.length);
+    assert.equal(legacyPhaseCommentsSubmitted, 6);
 
     await context.close();
     context = null;
@@ -572,18 +832,51 @@ async function main() {
       projectRoot,
       temporaryProfile
     );
+    const localExtensionManifest = JSON.parse(await fs.readFile(
+      path.join(localExtensionRoot, 'manifest.json'),
+      'utf8'
+    ));
+    assert.deepEqual(
+      localExtensionManifest.host_permissions,
+      ['http://127.0.0.1/*']
+    );
+    assert.deepEqual(localExtensionManifest.optional_host_permissions, []);
+    assert.equal(
+      localExtensionManifest.content_scripts.every((contentScript) => (
+        contentScript.matches.length === 1
+        && contentScript.matches[0] === 'http://127.0.0.1/*'
+      )),
+      true
+    );
+    extensionProxy = createLocalOnlyAuditProxy(origin, extensionProxyLedger);
+    const extensionProxyPort = await listen(extensionProxy);
+    const extensionProfileRoot = path.join(
+      temporaryProfile,
+      'extension-smoke'
+    );
+    await prepareNetworkQuietChromiumProfile(extensionProfileRoot);
     context = await chromium.launchPersistentContext(
-      path.join(temporaryProfile, 'extension-smoke'),
+      extensionProfileRoot,
       {
       executablePath: chromium.executablePath(),
       headless: true,
       args: [
         `--disable-extensions-except=${localExtensionRoot}`,
         `--load-extension=${localExtensionRoot}`,
-        '--disable-background-networking'
+        '--disable-background-networking',
+        '--disable-domain-reliability',
+        '--disable-quic',
+        `--disable-features=${recoveryDisabledChromiumFeatures.join(',')}`,
+        `--gaia-url=${origin}`,
+        `--google-apis-url=${origin}`,
+        `--google-base-url=${origin}`,
+        `--proxy-server=http://127.0.0.1:${extensionProxyPort}`,
+        '--proxy-bypass-list=<-loopback>',
+        '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1'
       ]
       }
     );
+    extensionLifecycle = createRecoveryLifecycleLedger(context, origin);
     context.on(
       'request',
       (request) => extensionRequestedUrls.push(request.url())
@@ -592,7 +885,10 @@ async function main() {
     const trackPageErrors = (page) => {
       if (pageErrorListeners.has(page)) return;
       pageErrorListeners.add(page);
-      page.on('pageerror', (error) => pageErrors.push(error.message));
+      page.on('pageerror', (error) => {
+        pageErrors.push(error.message);
+        extensionPageErrors.push(error.message);
+      });
     };
     context.pages().forEach(trackPageErrors);
     context.on('page', trackPageErrors);
@@ -720,8 +1016,8 @@ async function main() {
     const initialCheckpoint = await smokePage.evaluate(() => (
       chrome.runtime.sendMessage({ type: 'BATCH_SESSION_GET' })
     )).then((response) => response.checkpoint);
-    extensionMaxConcurrency = initialCheckpoint.settings.concurrency;
-    assert.equal(extensionMaxConcurrency, 3);
+    configuredConcurrency = initialCheckpoint.settings.concurrency;
+    assert.equal(configuredConcurrency, 3);
     assert.equal(initialWorkerTabs.length, 3);
 
     closedUrlIndex = 0;
@@ -760,16 +1056,14 @@ async function main() {
     runtimeErrorText = await smokePage.locator(
       '[data-banner-kind="error"]'
     ).allTextContents().then((items) => items.join('\n'));
-    thirdPartyRequests = extensionRequestedUrls.filter((requestedUrl) => {
-      const parsed = new URL(requestedUrl);
-      return !(
-        ['127.0.0.1', 'localhost'].includes(parsed.hostname)
-        || ['chrome-extension:', 'data:'].includes(parsed.protocol)
-      );
-    });
-    commentsSubmitted = await fetch(`${origin}/__fixture/submissions`)
-      .then((response) => response.json())
-      .then((records) => records.length);
+    batchVisibleText = await smokePage.locator('body').innerText();
+    const recoveryLifecycle = extensionLifecycle.snapshot();
+    const closedZeroEvent = recoveryLifecycle.events.find((event) => (
+      event.type === 'close' && event.urlIndex === 0
+    ));
+    const openedThreeEvent = recoveryLifecycle.events.find((event) => (
+      event.type === 'open' && event.urlIndex === 3
+    ));
 
     assert.equal(checkpoint.tasks['0'].state, 'terminal');
     assert.equal(checkpoint.results.find(
@@ -781,9 +1075,86 @@ async function main() {
       runtimeErrorText.includes('batch_ownership_active'),
       false
     );
-    assert.equal(thirdPartyRequests.length, 0);
+    assert.equal(
+      batchVisibleText.includes('batch_ownership_active'),
+      false
+    );
+    assert.equal(recoveryLifecycle.maxConcurrentWorkerTabs, 3);
+    assert.deepEqual(recoveryLifecycle.openedUrlIndices, [0, 1, 2, 3]);
+    assert.deepEqual(recoveryLifecycle.openedUrlIndexCounts, {
+      0: 1,
+      1: 1,
+      2: 1,
+      3: 1
+    });
+    assert.ok(closedZeroEvent);
+    assert.ok(openedThreeEvent);
+    assert.ok(openedThreeEvent.sequence > closedZeroEvent.sequence);
+
+    await smokePage.locator('[data-action="stop"]').click();
+    await smokePage.locator('[data-action="confirm-layer"]').click();
+    await waitForValue(
+      () => smokePage.evaluate(() => (
+        chrome.runtime.sendMessage({ type: 'BATCH_SESSION_GET' })
+      )).then((response) => response.checkpoint),
+      (candidate) => candidate?.status === 'terminated'
+    );
+    const stoppedWorkerTabs = await waitForValue(
+      () => currentRecoveryWorkerTabs(context, origin),
+      (tabs) => tabs.length === 0
+    );
+    workerTabsAfterStop = stoppedWorkerTabs.length;
+    assert.equal(workerTabsAfterStop, 0);
+
+    await smokePage.close();
+    await context.close();
+    context = null;
+    finalLifecycle = extensionLifecycle.snapshot();
+    assert.equal(finalLifecycle.activeWorkerTabs, 0);
+    assert.equal(finalLifecycle.maxConcurrentWorkerTabs, 3);
+    await closeServer(extensionProxy);
+    extensionProxy = null;
+
+    blockedChromiumBackgroundAttempts = extensionProxyLedger.filter(
+      (entry) => entry.allowed === false
+    );
+    thirdPartyRequests = extensionProxyLedger.filter((entry) => {
+      if (entry.allowed === false) return false;
+      return new URL(entry.url).origin !== origin;
+    });
+    extensionThirdPartyRequests = extensionRequestedUrls.filter(
+      (requestedUrl) => {
+        const parsed = new URL(requestedUrl);
+        return ['http:', 'https:'].includes(parsed.protocol)
+          && parsed.origin !== origin;
+      }
+    );
+    assert.ok(
+      extensionProxyLedger.some((entry) => entry.allowed === true),
+      'local recovery traffic did not traverse the pre-launch audit proxy'
+    );
+    assert.deepEqual(
+      [...new Set(blockedChromiumBackgroundAttempts.map((entry) => (
+        new URL(entry.url).hostname
+      )))],
+      ['www.google.com']
+    );
+    commentsSubmitted = await fetch(`${origin}/__fixture/submissions`)
+      .then((response) => response.json())
+      .then((records) => records.length);
+    wholeCommandCommentsSubmitted =
+      legacyPhaseCommentsSubmitted + commentsSubmitted;
+
+    assert.equal(
+      thirdPartyRequests.length,
+      0,
+      JSON.stringify(thirdPartyRequests, null, 2)
+    );
+    assert.deepEqual(extensionThirdPartyRequests, []);
     assert.equal(commentsSubmitted, 0);
+    assert.equal(wholeCommandCommentsSubmitted, 6);
     assert.deepEqual(pageErrors, []);
+    assert.deepEqual(extensionPageErrors, []);
     extensionSmoke =
       'automation-chromium-service-worker-batch-page-and-worker-refill';
 
@@ -794,10 +1165,28 @@ async function main() {
       fixtureOrigin: origin,
       closedUrlIndex,
       replacementUrlIndex,
-      maxConcurrency: extensionMaxConcurrency,
-      thirdPartyRequests: thirdPartyRequests.length,
+      maxConcurrency: finalLifecycle.maxConcurrentWorkerTabs,
+      configuredConcurrency,
+      openedUrlIndices: finalLifecycle.openedUrlIndices,
+      openedUrlIndexCounts: finalLifecycle.openedUrlIndexCounts,
+      workerTabsAfterStop,
+      thirdPartyRequests: extensionThirdPartyRequests.length,
       commentsSubmitted,
+      commentsSubmittedScope: 'real-extension-recovery',
       pageErrors,
+      commentLedger: {
+        legacyPhase: legacyPhaseCommentsSubmitted,
+        realExtensionRecovery: commentsSubmitted,
+        wholeCommand: wholeCommandCommentsSubmitted
+      },
+      pageErrorLedger: {
+        realExtensionRecovery: extensionPageErrors,
+        wholeCommand: pageErrors
+      },
+      workerLifecycle: {
+        events: finalLifecycle.events,
+        activeWorkerTabsAtFinalization: finalLifecycle.activeWorkerTabs
+      },
       assignments: sorted.map((record) => ({
         targetId: record.targetId,
         profileId: record.profileId,
@@ -809,9 +1198,29 @@ async function main() {
       refreshRecovery: 'confirmed',
       extensionSmoke,
       requestAudit: {
-        installedChrome: 'context-lifetime',
-        extensionChromium: 'post-launch-page-lifetime',
-        observedThirdPartyRequests: thirdPartyRequests.length
+        installedChrome: 'post-launch-page-lifetime',
+        extensionChromium:
+          'pre-launch-to-context-close-local-only-proxy',
+        thirdPartyRequestsScope: 'extension-attributed-http(s)',
+        temporaryManifestHostPermissions:
+          localExtensionManifest.host_permissions,
+        temporaryManifestOptionalHostPermissions:
+          localExtensionManifest.optional_host_permissions,
+        proxyRequests: extensionProxyLedger.length,
+        allowedFixtureRequests: extensionProxyLedger.filter(
+          (entry) => entry.allowed === true
+        ).length,
+        extensionThirdPartyRequests:
+          extensionThirdPartyRequests.length,
+        forwardedThirdPartyNetworkEgress: thirdPartyRequests.length,
+        blockedChromiumBackgroundAttempts:
+          blockedChromiumBackgroundAttempts.length,
+        blockedChromiumBackgroundDestinations: [
+          ...new Set(blockedChromiumBackgroundAttempts.map(
+            (entry) => new URL(entry.url).hostname
+          ))
+        ],
+        postLaunchPlaywrightObservations: extensionRequestedUrls.length
       },
       thirdPartySubmissions: 0
     };
@@ -820,6 +1229,15 @@ async function main() {
         closedUrlIndex: result.closedUrlIndex,
         replacementUrlIndex: result.replacementUrlIndex,
         maxConcurrency: result.maxConcurrency,
+        configuredConcurrency: result.configuredConcurrency,
+        openedUrlIndices: result.openedUrlIndices,
+        openedUrlIndexCounts: result.openedUrlIndexCounts,
+        workerTabsAfterStop: result.workerTabsAfterStop,
+        networkAuditScope: result.requestAudit?.extensionChromium,
+        legacyPhaseCommentsSubmitted: result.commentLedger?.legacyPhase,
+        recoveryCommentsSubmitted: result.commentLedger?.realExtensionRecovery,
+        wholeCommandCommentsSubmitted: result.commentLedger?.wholeCommand,
+        commentsSubmittedScope: result.commentsSubmittedScope,
         thirdPartyRequests: result.thirdPartyRequests,
         commentsSubmitted: result.commentsSubmitted,
         pageErrors: result.pageErrors
@@ -828,6 +1246,20 @@ async function main() {
         closedUrlIndex: 0,
         replacementUrlIndex: 3,
         maxConcurrency: 3,
+        configuredConcurrency: 3,
+        openedUrlIndices: [0, 1, 2, 3],
+        openedUrlIndexCounts: {
+          0: 1,
+          1: 1,
+          2: 1,
+          3: 1
+        },
+        workerTabsAfterStop: 0,
+        networkAuditScope: 'pre-launch-to-context-close-local-only-proxy',
+        legacyPhaseCommentsSubmitted: 6,
+        recoveryCommentsSubmitted: 0,
+        wholeCommandCommentsSubmitted: 6,
+        commentsSubmittedScope: 'real-extension-recovery',
         thirdPartyRequests: 0,
         commentsSubmitted: 0,
         pageErrors: []
@@ -836,6 +1268,9 @@ async function main() {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   } finally {
     await context?.close().catch(() => {});
+    if (extensionProxy) {
+      await closeServer(extensionProxy).catch(() => {});
+    }
     await closeServer(server);
     await fs.rm(temporaryProfile, { recursive: true, force: true });
   }
