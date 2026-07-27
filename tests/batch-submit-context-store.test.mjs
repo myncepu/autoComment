@@ -5,6 +5,8 @@ import {
   createBatchSubmitContextStore,
   installBatchSubmitContextListener
 } from '../lib/batch-submit-context-store.mjs';
+import * as submitContextModule
+  from '../lib/batch-submit-context-store.mjs';
 
 function createStorageArea() {
   const data = {};
@@ -61,6 +63,45 @@ test('persists complete assignment identity and matches every identity field', a
     promotionSiteId: 'site-b'
   }), false);
   assert.equal(await store.clearIfMatches(11, identity), true);
+});
+
+test('confirmation cleanup retains the complete multi-assignment identity', async () => {
+  assert.equal(
+    typeof submitContextModule.createSubmitContextMatch,
+    'function'
+  );
+  const storage = createStorageArea();
+  const store = createBatchSubmitContextStore(storage, { now: () => 1000 });
+  const identity = {
+    batchId: 'batch-plan',
+    taskId: 'batch-plan:1',
+    urlIndex: 0,
+    profileId: 'profile-a',
+    promotionSiteId: 'site-a',
+    attempt: 1
+  };
+  const revision = {
+    capturedAt: 1000,
+    recordedAt: 1001,
+    sequence: 1,
+    id: 'revision-plan'
+  };
+  await store.save(11, {
+    ...identity,
+    history: { historyRevision: revision }
+  });
+
+  const match = submitContextModule.createSubmitContextMatch({
+    ...identity,
+    history: { historyRevision: revision }
+  });
+
+  assert.deepEqual(match, {
+    ...identity,
+    historyRevision: revision
+  });
+  assert.equal(await store.clearIfMatches(11, match), true);
+  assert.equal(await store.get(11), null);
 });
 
 test('normalizes an all-legacy identity but rejects partial assignment identity', async () => {

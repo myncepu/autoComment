@@ -627,12 +627,17 @@ test('dynamic observers start only after ownership establishes manual mode', () 
 
 test('a failed submitting phase write clears pre-click context and prevents a click', async () => {
   const cleared = [];
+  const warningLogs = [];
   let clicked = false;
   let markedSubmitting = false;
   const form = { id: 'commentform' };
   const editor = { value: 'Generated promotion' };
   const context = vm.createContext({
-    console: { log() {}, warn() {}, error() {} },
+    console: {
+      log() {},
+      warn(...args) { warningLogs.push(args); },
+      error() {}
+    },
     location: { href: 'https://target.test/post' },
     lastGeneratedPromotionCopy: '',
     getBatchTaskKey: (batchId, urlIndex, attempt) => (
@@ -708,6 +713,11 @@ globalThis.handleBatchTask = handleBatchTask;`,
   }]);
   assert.equal(markedSubmitting, false);
   assert.equal(clicked, false);
+  assert.deepEqual(
+    warningLogs,
+    [],
+    'a queue-visible task failure must not create a Chrome extension warning'
+  );
 });
 
 test('captures the fixture editor value and promoted URL at the submission boundary', async () => {

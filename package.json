@@ -4,6 +4,7 @@
   "description": "Auto Comment Filler Backend API",
   "main": "server.js",
   "scripts": {
+    "build:extension": "node scripts/build-extension-package.mjs",
     "test": "node --test tests/*.test.js tests/*.test.mjs",
     "test:sync-worker": "npm --prefix cloudflare-sync test",
     "typecheck:sync-worker": "npm --prefix cloudflare-sync run typecheck",
