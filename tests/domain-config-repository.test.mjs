@@ -94,6 +94,28 @@ test('replaces config after validation and increments from stored revision', asy
   assert.equal((await repository.load()).profiles[0].name, 'Name profile-a');
 });
 
+test('conditionally replaces only the expected current revision', async () => {
+  const initial = populatedConfig();
+  const area = storageArea({ [DOMAIN_CONFIG_KEY]: initial });
+  const repository = createDomainConfigRepository(area);
+  const replacement = populatedConfig();
+  replacement.profiles.push(profile('profile-b', 'Profile B'));
+
+  const saved = await repository.replaceIfRevision(0, replacement);
+  assert.equal(saved.revision, 1);
+  await repository.saveProfile(profile('profile-c', 'Profile C'));
+
+  await assert.rejects(
+    repository.replaceIfRevision(1, initial),
+    (error) => error.code === 'stale_domain_config_revision'
+  );
+  assert.deepEqual(
+    (await repository.load()).profiles.map(({ id }) => id).sort(),
+    ['profile-a', 'profile-b', 'profile-c']
+  );
+  assert.equal(area.writes.length, 2);
+});
+
 test('rejects invalid or sensitive replacement without writing', async () => {
   const area = storageArea();
   const repository = createDomainConfigRepository(area);
