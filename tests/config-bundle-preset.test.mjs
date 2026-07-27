@@ -72,7 +72,29 @@ test('local dry-run preset parses as a safe deterministic 3×3 assignment bundle
       }
     ]
   );
+  assert.equal(domainConfig.assignmentPolicy.defaultPairId, 'test-pair-a');
+  assert.equal(
+    domainConfig.profiles.every((profile) => (
+      profile.createdAt === 1785110400000
+      && profile.updatedAt === 1785110400000
+    )),
+    true
+  );
+  assert.equal(
+    domainConfig.promotionSites.every((site) => (
+      site.createdAt === 1785110400000
+      && site.updatedAt === 1785110400000
+      && site.enabled
+    )),
+    true
+  );
+  assert.equal(
+    domainConfig.assignmentPolicy.pairs.every(({ enabled }) => enabled),
+    true
+  );
   assert.equal(domainConfig.assignmentPolicy.quotas.batch, 80);
+  assert.equal(domainConfig.assignmentPolicy.quotas.perProfile, 30);
+  assert.equal(domainConfig.assignmentPolicy.quotas.perPromotionSite, 30);
   assert.equal(domainConfig.assignmentPolicy.quotas.perTargetDomain, 1);
   assert.deepEqual(parsed.llm, {
     apiBaseUrl: 'http://127.0.0.1:4173/v1',
@@ -92,4 +114,8 @@ test('local dry-run preset parses as a safe deterministic 3×3 assignment bundle
       /api[_-]?key|password|secret|token|authorization|credential/i
     );
   }
+  assert.doesNotMatch(
+    JSON.stringify(bundle),
+    /api[_-]?key|password|secret|token|authorization|credential|history|draft|checkpoint|handle|results?|submitContext/i
+  );
 });

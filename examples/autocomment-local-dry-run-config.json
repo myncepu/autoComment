@@ -88,8 +88,8 @@
         ],
         "quotas": {
           "batch": 80,
-          "perProfile": 80,
-          "perPromotionSite": 80,
+          "perProfile": 30,
+          "perPromotionSite": 30,
           "perTargetDomain": 1
         }
       }
