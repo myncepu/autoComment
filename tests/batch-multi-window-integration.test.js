@@ -435,6 +435,11 @@ async function createProductionHarness(options = {}) {
         timeoutSeconds: 60
       };
     },
+    ...(options.requestTargetPermissions
+      ? {
+          requestTargetPermissions: options.requestTargetPermissions
+        }
+      : {}),
     ...(options.domainConfig
       ? {
           async loadDomainConfig() {
@@ -1452,6 +1457,78 @@ test('empty production boot composes profile-ready preflight wizard into a v3 st
   assert.equal(current.source.parsedUrls.length, 3);
   assert.equal(JSON.stringify(current).includes('test-only-key'), false);
   assert.ok(harness.draftWrites.length > 0);
+});
+
+test('wizard requests target permissions before starting worker tabs', async (t) => {
+  const permissionGate = deferred();
+  const requestedUrls = [];
+  const harness = await createProductionHarness({
+    checkpoint: null,
+    requestTargetPermissions(urls) {
+      requestedUrls.push(clone(urls));
+      return permissionGate.promise;
+    }
+  });
+  t.after(() => harness.page.destroy());
+
+  await prepareWizardForStart(harness);
+  click(harness.document, '[data-action="wizard-start"]');
+
+  assert.equal(
+    harness.runtimeMessages.some(
+      ({ type }) => type === 'BATCH_SESSION_START'
+    ),
+    false
+  );
+
+  permissionGate.resolve(true);
+  assert.deepEqual(requestedUrls, [[
+    'https://first.test/post',
+    'https://second.test/post',
+    'https://third.test/post'
+  ]]);
+  await waitFor(
+    () => harness.runtimeMessages.some(
+      ({ type }) => type === 'BATCH_SESSION_START'
+    ),
+    'batch start after target permissions'
+  );
+  await waitFor(
+    () => harness.tabsApi.createCalls.length === 3,
+    'worker tabs after target permissions'
+  );
+});
+
+test('denied target permissions keep the wizard open and do not claim a batch', async (t) => {
+  const permissionError = new Error('batch_target_permission_denied');
+  permissionError.code = 'batch_target_permission_denied';
+  const harness = await createProductionHarness({
+    checkpoint: null,
+    async requestTargetPermissions() {
+      throw permissionError;
+    }
+  });
+  t.after(() => harness.page.destroy());
+
+  await prepareWizardForStart(harness);
+  click(harness.document, '[data-action="wizard-start"]');
+  await waitFor(
+    () => harness.document.body.textContent.includes(
+      '未授予目标网站访问权限'
+    ),
+    'target permission denial'
+  );
+
+  assert.equal(
+    harness.runtimeMessages.some(
+      ({ type }) => type === 'BATCH_SESSION_START'
+    ),
+    false
+  );
+  assert.equal(
+    harness.document.querySelector('[data-batch-wizard]').hasAttribute('open'),
+    true
+  );
 });
 
 test('dispatches five rows with frozen two-Profile two-Site combinations across three slots', async (t) => {
