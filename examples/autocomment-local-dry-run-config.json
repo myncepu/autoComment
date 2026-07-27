@@ -1,0 +1,112 @@
+{
+  "format": "autocomment-config-bundle",
+  "version": 3,
+  "exportedAt": 1785110400000,
+  "data": {
+    "domainConfig": {
+      "version": 2,
+      "revision": 0,
+      "profiles": [
+        {
+          "id": "test-profile-a",
+          "displayName": "本地测试作者 A",
+          "name": "Local Test Author A",
+          "email": "local-a@example.test",
+          "createdAt": 1785110400000,
+          "updatedAt": 1785110400000
+        },
+        {
+          "id": "test-profile-b",
+          "displayName": "本地测试作者 B",
+          "name": "Local Test Author B",
+          "email": "local-b@example.test",
+          "createdAt": 1785110400000,
+          "updatedAt": 1785110400000
+        },
+        {
+          "id": "test-profile-c",
+          "displayName": "本地测试作者 C",
+          "name": "Local Test Author C",
+          "email": "local-c@example.test",
+          "createdAt": 1785110400000,
+          "updatedAt": 1785110400000
+        }
+      ],
+      "promotionSites": [
+        {
+          "id": "test-site-a",
+          "name": "本地推广网站 A",
+          "url": "http://127.0.0.1:4173/promotion/a",
+          "content": "用于本地夹具测试的推广内容 A",
+          "enabled": true,
+          "createdAt": 1785110400000,
+          "updatedAt": 1785110400000
+        },
+        {
+          "id": "test-site-b",
+          "name": "本地推广网站 B",
+          "url": "http://127.0.0.1:4173/promotion/b",
+          "content": "用于本地夹具测试的推广内容 B",
+          "enabled": true,
+          "createdAt": 1785110400000,
+          "updatedAt": 1785110400000
+        },
+        {
+          "id": "test-site-c",
+          "name": "本地推广网站 C",
+          "url": "http://127.0.0.1:4173/promotion/c",
+          "content": "用于本地夹具测试的推广内容 C",
+          "enabled": true,
+          "createdAt": 1785110400000,
+          "updatedAt": 1785110400000
+        }
+      ],
+      "assignmentPolicy": {
+        "defaultPairId": "test-pair-a",
+        "pairs": [
+          {
+            "id": "test-pair-a",
+            "profileId": "test-profile-a",
+            "promotionSiteId": "test-site-a",
+            "weight": 1,
+            "enabled": true
+          },
+          {
+            "id": "test-pair-b",
+            "profileId": "test-profile-b",
+            "promotionSiteId": "test-site-b",
+            "weight": 1,
+            "enabled": true
+          },
+          {
+            "id": "test-pair-c",
+            "profileId": "test-profile-c",
+            "promotionSiteId": "test-site-c",
+            "weight": 1,
+            "enabled": true
+          }
+        ],
+        "quotas": {
+          "batch": 80,
+          "perProfile": 80,
+          "perPromotionSite": 80,
+          "perTargetDomain": 1
+        }
+      }
+    },
+    "llm": {
+      "apiBaseUrl": "http://127.0.0.1:4173/v1",
+      "model": "local-dry-run-model"
+    },
+    "batchDefaults": {
+      "autoOpenPanel": true,
+      "autoGenerate": true,
+      "autoSubmit": false,
+      "concurrency": 3,
+      "timeoutSeconds": 120
+    },
+    "preferences": {
+      "showExportOutlinksFloatingButton": true
+    }
+  }
+}
