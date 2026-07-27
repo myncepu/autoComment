@@ -3968,6 +3968,101 @@ test('start and clear cannot discard live durable worker ownership', async () =>
   assert.deepEqual(harness.removedTabs, []);
 });
 
+test('resume requeues a missing stale worker before starting the batch', async () => {
+  const harness = createHarness();
+  await startActiveWorker(harness, 1);
+  harness.tabStore.delete(11);
+  delete harness.sessionData[
+    'batchWorkerOwnershipV1:batch-1:0:1'
+  ];
+  harness.data.batchRuntimeCheckpoint.status = 'paused_recovery';
+  harness.data.batchRuntimeCheckpoint.recoveryCleanup = {
+    reason: 'ownership_unverified',
+    diagnostic: 'ownership_proof_mismatch',
+    updatedAt: 2000
+  };
+
+  const response = await harness.controller.handleMessage({
+    type: 'BATCH_SESSION_RESUME',
+    batchId: 'batch-1'
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.checkpoint.status, 'running');
+  assert.equal(response.checkpoint.tasks['0'].state, 'queued');
+  assert.equal(response.checkpoint.tasks['0'].tabId, null);
+  assert.equal(response.checkpoint.tasks['0'].requestId, null);
+  assert.equal(
+    response.checkpoint.recoveryCleanup.reason,
+    'ownership_unverified'
+  );
+  assert.deepEqual(harness.removedTabs, []);
+});
+
+test('resume keeps a live unverified worker paused for manual recovery', async () => {
+  const harness = createHarness();
+  await startActiveWorker(harness, 1);
+  delete harness.sessionData[
+    'batchWorkerOwnershipV1:batch-1:0:1'
+  ];
+  harness.data.batchRuntimeCheckpoint.status = 'paused_recovery';
+  harness.data.batchRuntimeCheckpoint.recoveryCleanup = {
+    reason: 'ownership_unverified',
+    diagnostic: 'ownership_proof_mismatch',
+    updatedAt: 2000
+  };
+
+  const response = await harness.controller.handleMessage({
+    type: 'BATCH_SESSION_RESUME',
+    batchId: 'batch-1'
+  });
+
+  assert.equal(response.ok, false);
+  assert.equal(response.error, 'batch_ownership_unverified');
+  assert.equal(response.checkpoint.status, 'paused_recovery');
+  assert.equal(response.checkpoint.tasks['0'].state, 'active');
+  assert.equal(response.checkpoint.tasks['0'].tabId, 11);
+  assert.deepEqual(harness.removedTabs, []);
+});
+
+test('resume never requeues a missing worker after submission started', async () => {
+  const harness = createHarness();
+  await startActiveWorker(harness, 1);
+  Object.assign(harness.data.batchRuntimeCheckpoint.tasks['0'], {
+    state: 'submitting',
+    phase: 'submitting'
+  });
+  harness.tabStore.delete(11);
+  delete harness.sessionData[
+    'batchWorkerOwnershipV1:batch-1:0:1'
+  ];
+  harness.data.batchRuntimeCheckpoint.status = 'paused_recovery';
+  harness.data.batchRuntimeCheckpoint.recoveryCleanup = {
+    reason: 'ownership_unverified',
+    diagnostic: 'ownership_proof_mismatch',
+    updatedAt: 2000
+  };
+
+  const response = await harness.controller.handleMessage({
+    type: 'BATCH_SESSION_RESUME',
+    batchId: 'batch-1'
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.checkpoint.tasks['0'].state, 'terminal');
+  assert.equal(response.checkpoint.tasks['0'].tabId, null);
+  assert.equal(response.checkpoint.results.length, 1);
+  assert.equal(
+    response.checkpoint.results[0].result,
+    'manual_required'
+  );
+  assert.equal(
+    response.checkpoint.results[0].errorCode,
+    'submission_uncertain'
+  );
+  assert.deepEqual(harness.removedTabs, []);
+});
+
 test('requests system wakefulness only while a batch is running', async () => {
   const { controller, powerCalls } = createHarness();
 
