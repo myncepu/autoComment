@@ -785,8 +785,15 @@ test('running console disables the new-batch preview entry and cannot open its w
 
 test('rejected new batch keeps active ownership selected and explains recovery', async (t) => {
   const harness = await createProductionHarness();
-  t.after(() => harness.page.destroy());
-  const activeCheckpoint = clone(harness.storageLocal.data.batchRuntimeCheckpoint);
+  const cleanupCheckpoint = clone(
+    harness.storageLocal.data.batchRuntimeCheckpoint
+  );
+  t.after(async () => {
+    harness.storageLocal.data.batchRuntimeCheckpoint = cleanupCheckpoint;
+    await harness.page.destroy();
+    harness.dom.window.close();
+  });
+  const activeCheckpoint = clone(cleanupCheckpoint);
   activeCheckpoint.tasks['0'] = {
     ...activeCheckpoint.tasks['0'],
     state: 'active',
