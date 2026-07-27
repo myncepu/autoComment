@@ -55,6 +55,7 @@ test('serves the ordinary config bundle fixture and its production modules', asy
       const response = await fetch(`${origin}${fixturePath}`);
       assert.equal(response.status, 200, fixturePath);
     }
+    assert.equal((await fetch(`${origin}/favicon.ico`)).status, 204);
   });
 });
 

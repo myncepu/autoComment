@@ -180,6 +180,11 @@ function createFixtureServer(options = {}) {
       response.end(fs.readFileSync(staticFixture.filePath));
       return;
     }
+    if (request.method === 'GET' && requestUrl.pathname === '/favicon.ico') {
+      response.writeHead(204, { 'Cache-Control': 'public, max-age=86400' });
+      response.end();
+      return;
+    }
 
     if (
       request.method === 'GET'

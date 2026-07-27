@@ -52,13 +52,18 @@ const elements = {
   autoGenerate: document.getElementById('fixtureAutoGenerate'),
   autoSubmit: document.getElementById('fixtureAutoSubmit'),
   concurrency: document.getElementById('fixtureConcurrency'),
+  domainContent: document.getElementById('fixtureDomainContent'),
   domainWrites: document.getElementById('fixtureDomainWrites'),
   exportStatus: document.getElementById('fixtureExportStatus'),
   failSettingsSave: document.getElementById('fixtureFailSettingsSave'),
   pairCount: document.getElementById('fixturePairCount'),
+  pairWeight: document.getElementById('fixturePairWeight'),
+  perTargetDomain: document.getElementById('fixturePerTargetDomain'),
   previewDetails: document.getElementById('fixturePreviewDetails'),
   profileCount: document.getElementById('fixtureProfileCount'),
+  profileDisplayName: document.getElementById('fixtureProfileDisplayName'),
   promotionSiteCount: document.getElementById('fixturePromotionSiteCount'),
+  promotionSiteContent: document.getElementById('fixturePromotionSiteContent'),
   rollbackStatus: document.getElementById('fixtureRollbackStatus'),
   settingsWrites: document.getElementById('fixtureSettingsWrites'),
   timeoutSeconds: document.getElementById('fixtureTimeoutSeconds')
@@ -88,6 +93,19 @@ function renderState() {
   elements.pairCount.textContent = String(
     currentDomainConfig.assignmentPolicy.pairs.length
   );
+  elements.profileDisplayName.textContent = (
+    currentDomainConfig.profiles[0]?.displayName || '—'
+  );
+  elements.promotionSiteContent.textContent = (
+    currentDomainConfig.promotionSites[0]?.content || '—'
+  );
+  elements.pairWeight.textContent = String(
+    currentDomainConfig.assignmentPolicy.pairs[0]?.weight || '—'
+  );
+  elements.perTargetDomain.textContent = String(
+    currentDomainConfig.assignmentPolicy.quotas.perTargetDomain
+  );
+  elements.domainContent.textContent = comparableDomain(currentDomainConfig);
   elements.autoGenerate.checked = currentSettings.batchDefaults.autoGenerate;
   elements.autoSubmit.checked = currentSettings.batchDefaults.autoSubmit;
   elements.concurrency.value = String(currentSettings.batchDefaults.concurrency);

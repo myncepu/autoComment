@@ -42,6 +42,12 @@ pass 13
 fail 0
 ```
 
+The strengthened acceptance was also observed failing against the original
+fixture because it could not expose the changed stable-ID Profile value. After
+adding complete fixture state, capturing console errors exposed a local
+`/favicon.ico` 404. A server test then reproduced that 404 before the fixture
+added an exact 204 local favicon route.
+
 ## Chrome command and result
 
 Command:
@@ -70,9 +76,19 @@ The runner reported Chrome `150.0.7871.184` and emitted:
 ```
 
 This covers preview counts and the no-write-before-apply boundary, explicit
-apply, safe batch defaults, a second import that updates the same stable IDs
-without duplicates, deterministic export, and a simulated settings-save
-failure whose domain write is rolled back.
+apply, safe batch defaults, and deterministic export. The second import retains
+all stable IDs while changing a Profile display name, Promotion Site content,
+Pair weight, and target-domain quota. The runner asserts those new values and
+that counts stay exactly 3/3/3.
+
+The failure import changes those four values again. Before applying it, the
+runner computes SHA-256 over every domain-content field except the intentional
+monotonic repository revision. The injected settings-save failure must report
+rollback, reproduce the exact pre-failure fingerprint, and keep all four prior
+values. The runner also asserts empty `console.error`, `pageerror`,
+`requestfailed`, and non-2xx response collections. `thirdPartyRequests` is
+calculated from every observed request origin rather than assigned as a
+constant.
 
 ## Full verification
 
