@@ -568,7 +568,10 @@ test('seals submit context through the runtime without exposing Chrome to the wo
   assert.deepEqual(await dependencies.sealSubmitContext({
     tabId: 101,
     batchId: 'batch-1',
+    taskId: 'batch-1:3',
     urlIndex: 2,
+    profileId: 'profile-a',
+    promotionSiteId: 'site-a',
     attempt: 3
   }, 'pause'), {
     sealed: true,
@@ -578,7 +581,10 @@ test('seals submit context through the runtime without exposing Chrome to the wo
     type: 'BATCH_RECOVER_SUBMIT_CONTEXT',
     tabId: 101,
     batchId: 'batch-1',
+    taskId: 'batch-1:3',
     urlIndex: 2,
+    profileId: 'profile-a',
+    promotionSiteId: 'site-a',
     attempt: 3,
     reason: 'pause'
   });
