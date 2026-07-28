@@ -547,6 +547,102 @@ test('waits for a slow content script beyond the former fixed retry window', asy
   assert.equal(harness.terminalPayloads.length, 0);
 });
 
+test('delivers a handle while the committed target page is still loading', async () => {
+  const harness = createWorkerHarness({
+    concurrency: 1,
+    taskCount: 1,
+    tabsOptions: {
+      createdTab: {
+        url: 'https://target.test/0',
+        pendingUrl: null,
+        status: 'loading'
+      }
+    }
+  });
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+
+  await runtime.start(harness.checkpoint);
+
+  assert.deepEqual(
+    harness.tabsApi.sendMessageCalls.map(([, message]) => message.type),
+    ['PING']
+  );
+  assert.equal(harness.sentHandles.length, 1);
+  assert.equal(harness.terminalPayloads.length, 0);
+});
+
+test('does not PING the previous document before pending navigation commits', async () => {
+  const harness = createWorkerHarness({
+    concurrency: 1,
+    taskCount: 1,
+    tabsOptions: {
+      createdTab: {
+        url: 'chrome-extension://fixture/worker-pending.html',
+        pendingUrl: 'https://target.test/0',
+        status: 'loading'
+      }
+    }
+  });
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+
+  const starting = runtime.start(harness.checkpoint);
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(harness.tabsApi.sendMessageCalls.length, 0);
+
+  harness.tabsApi.emitUpdated(100, {
+    url: 'https://target.test/0',
+    pendingUrl: null,
+    status: 'loading'
+  });
+  await starting;
+
+  assert.deepEqual(
+    harness.tabsApi.sendMessageCalls.map(([, message]) => message.type),
+    ['PING']
+  );
+  assert.equal(harness.sentHandles.length, 1);
+});
+
+test('retries when PING answers from a document that no longer matches the tab', async () => {
+  let pingCount = 0;
+  const harness = createWorkerHarness({
+    concurrency: 1,
+    taskCount: 1,
+    tabsOptions: {
+      createdTab: {
+        url: 'https://target.test/redirecting',
+        pendingUrl: null,
+        status: 'loading'
+      },
+      async sendMessage(_tabId, message) {
+        if (message.type !== 'PING') return { ok: true };
+        pingCount += 1;
+        return {
+          ok: true,
+          documentUrl: 'https://target.test/final',
+          readyState: 'loading'
+        };
+      }
+    }
+  });
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+
+  const starting = runtime.start(harness.checkpoint);
+  await waitFor(() => pingCount === 1, 'first mismatched PING');
+  assert.equal(harness.sentHandles.length, 0);
+
+  harness.tabsApi.emitUpdated(100, {
+    url: 'https://target.test/final',
+    status: 'loading'
+  });
+  await starting;
+
+  assert.equal(pingCount, 2);
+  assert.equal(harness.sentHandles.length, 1);
+  assert.equal(harness.terminalPayloads.length, 0);
+});
+
 test('content-script timeout keeps the final raw error and fresh tab diagnostics', async () => {
   let now = 0;
   let pingCount = 0;
@@ -1134,6 +1230,116 @@ test('an unexpected worker-tab close terminalizes only that activity and refills
     /用户关闭/
   );
   assert.deepEqual(harness.tabsApi.removeCalls, []);
+});
+
+test('ignores a late readiness failure from a worker that was already replaced', async () => {
+  let rejectFirstPing;
+  const harness = createWorkerHarness({
+    concurrency: 1,
+    taskCount: 2,
+    tabsOptions: {
+      sendMessage(tabId, message) {
+        if (message.type === 'PING' && tabId === 100) {
+          return new Promise((_resolve, reject) => {
+            rejectFirstPing = reject;
+          });
+        }
+        return { ok: true };
+      }
+    }
+  });
+  const events = [];
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  runtime.subscribe((event) => events.push(event));
+
+  const starting = runtime.start(harness.checkpoint);
+  await waitFor(
+    () => typeof rejectFirstPing === 'function',
+    'first worker readiness probe'
+  );
+
+  harness.tabsApi.emitRemoved(100);
+  await waitFor(
+    () => harness.tabsApi.createCalls.length === 2,
+    'replacement worker'
+  );
+  rejectFirstPing(new Error('No tab with id: 100.'));
+  await starting;
+  await waitFor(
+    () => harness.sentHandles.some(({ urlIndex }) => urlIndex === 1),
+    'replacement handle'
+  );
+
+  assert.equal(
+    events.some((event) => (
+      event.type === 'runtime-error' &&
+      event.error?.code === 'content_script_unavailable'
+    )),
+    false
+  );
+  assert.deepEqual(
+    harness.terminalPayloads.map(({ urlIndex }) => urlIndex),
+    [0]
+  );
+});
+
+test('ignores a late readiness failure after the task deadline claimed finalization', async () => {
+  let rejectFirstPing;
+  let expire;
+  const harness = createWorkerHarness({
+    concurrency: 1,
+    taskCount: 2,
+    tabsOptions: {
+      sendMessage(tabId, message) {
+        if (message.type === 'PING' && tabId === 100) {
+          return new Promise((_resolve, reject) => {
+            rejectFirstPing = reject;
+          });
+        }
+        return { ok: true };
+      }
+    },
+    taskDeadlineFactory({ onExpire }) {
+      expire = onExpire;
+      return {
+        arm() {},
+        clear() { return true; },
+        clearAll() {}
+      };
+    }
+  });
+  const events = [];
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  runtime.subscribe((event) => events.push(event));
+
+  const starting = runtime.start(harness.checkpoint);
+  await waitFor(
+    () => typeof rejectFirstPing === 'function',
+    'deadline worker readiness probe'
+  );
+  await expire({
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1
+  });
+  rejectFirstPing(new Error('No tab with id: 100.'));
+  await starting;
+  await waitFor(
+    () => harness.sentHandles.some(({ urlIndex }) => urlIndex === 1),
+    'deadline replacement handle'
+  );
+
+  assert.equal(
+    events.some((event) => (
+      event.type === 'runtime-error' &&
+      event.error?.code === 'content_script_unavailable'
+    )),
+    false
+  );
+  assert.equal(
+    harness.terminalPayloads[0].result.errorCode,
+    'task_timeout'
+  );
 });
 
 test('last confirmation closes its tab before completion and emits final state', async () => {

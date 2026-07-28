@@ -786,6 +786,42 @@ test('paused production boot creates no tabs and explicit resume creates three s
   assert.match(harness.document.querySelector('[data-task-row="4"]').textContent, /排队/);
 });
 
+test('resume requests checkpoint target permissions before reopening worker tabs', async (t) => {
+  const permissionGate = deferred();
+  const requestedUrls = [];
+  const harness = await createProductionHarness({
+    requestTargetPermissions(urls) {
+      requestedUrls.push(clone(urls));
+      return permissionGate.promise;
+    }
+  });
+  t.after(() => harness.page.destroy());
+
+  click(harness.document, '[data-action="resume"]');
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(requestedUrls, [[
+    'https://target.test/0',
+    'https://target.test/1',
+    'https://target.test/2',
+    'https://target.test/3',
+    'https://target.test/4'
+  ]]);
+  assert.equal(
+    harness.runtimeMessages.some(
+      ({ type }) => type === 'BATCH_SESSION_RESUME'
+    ),
+    false
+  );
+  assert.equal(harness.tabsApi.createCalls.length, 0);
+
+  permissionGate.resolve(true);
+  await waitFor(
+    () => harness.tabsApi.createCalls.length === 3,
+    'worker tabs after resume target permissions'
+  );
+});
+
 test('boot renders ownership recovery instead of rejecting when worker proof is missing', async (t) => {
   const checkpoint = pausedCheckpoint({
     taskCount: 2,

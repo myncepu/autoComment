@@ -320,6 +320,23 @@ test('presents a stale worker tab as actionable recovery guidance', () => {
   );
 });
 
+test('presents content-script availability as a per-target recovery hint', () => {
+  const snapshot = createBatchConsoleSnapshot(
+    createConsoleCheckpointFixture(),
+    { runtimeError: 'content_script_unavailable' }
+  );
+
+  assert.equal(snapshot.banners.at(-1).title, '目标页面脚本未能就绪');
+  assert.match(
+    snapshot.banners.at(-1).message,
+    /已结束该目标并继续处理队列/
+  );
+  assert.doesNotMatch(
+    snapshot.banners.at(-1).message,
+    /content_script_unavailable/
+  );
+});
+
 test('durable opening reservations block creating a replacement batch', () => {
   const checkpoint = createConsoleCheckpointFixture();
   checkpoint.status = 'paused_recovery';

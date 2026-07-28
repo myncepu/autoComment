@@ -27,6 +27,15 @@ test('manifest grants tab metadata access required by worker ownership proof', (
   assert.equal(manifest.permissions.includes('tabs'), true);
 });
 
+test('content scripts establish the worker handshake at document start', () => {
+  const manifest = JSON.parse(
+    fs.readFileSync(path.join(projectRoot, 'manifest.json'), 'utf8')
+  );
+
+  assert.equal(manifest.content_scripts.length, 1);
+  assert.equal(manifest.content_scripts[0].run_at, 'document_start');
+});
+
 test('options page uses packaged styles so Chrome can enforce the extension CSP', () => {
   const html = fs.readFileSync(path.join(projectRoot, 'options.html'), 'utf8');
   const document = new JSDOM(html).window.document;
