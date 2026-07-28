@@ -1778,6 +1778,36 @@ test('readiness deadline terminates even when PING delivery never settles', asyn
   assert.match(outcome.message, /view=full/);
 });
 
+test('readiness reports content runtime initialization failure after bootstrap responds', async () => {
+  const tabsApi = createFakeTabsApi({
+    sendMessage() {
+      return {
+        ok: false,
+        bootstrapReady: true,
+        runtimeReady: false,
+        error: 'content_runtime_initializing'
+      };
+    }
+  });
+  const tab = await tabsApi.create({
+    windowId: 42,
+    url: 'https://target.test/runtime-failed',
+    active: false
+  });
+
+  const outcome = await waitForContentScriptReady(
+    { tabId: tab.id, startTime: Date.now() },
+    { tabsApi, timeoutMs: 15, pollIntervalMs: 5 }
+  ).then(
+    () => 'resolved',
+    (error) => error
+  );
+
+  assert.equal(outcome.code, 'content_script_unavailable');
+  assert.equal(outcome.reason, 'runtime_initialization_failed');
+  assert.match(outcome.message, /content_runtime_initializing/);
+});
+
 test('deadline claim cannot be flipped by a late successful PING', async () => {
   let resolvePing;
   let resolveDeadlineSnapshot;
