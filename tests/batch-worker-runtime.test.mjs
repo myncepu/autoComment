@@ -2364,6 +2364,36 @@ test('stop waits for an in-progress pause cleanup before disposing ownership', a
   assert.equal(harness.tabsApi.removedListenerCount(), 0);
 });
 
+test('pause waits for an already-claimed removed-tab finalizer', async () => {
+  const harness = createWorkerHarness({ concurrency: 1, taskCount: 1 });
+  let releaseSeal;
+  harness.dependencies.sealSubmitContext = () => new Promise((resolve) => {
+    releaseSeal = () => resolve({ sealed: true, recovered: false });
+  });
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  await runtime.start(harness.checkpoint);
+
+  harness.tabsApi.emitRemoved(100);
+  await waitFor(
+    () => typeof releaseSeal === 'function',
+    'removed-tab submit-context seal'
+  );
+  let pauseResolved = false;
+  const pausing = runtime.pause('user').then((checkpoint) => {
+    pauseResolved = true;
+    return checkpoint;
+  });
+  await Promise.resolve();
+
+  assert.equal(pauseResolved, false);
+  releaseSeal();
+  const checkpoint = await pausing;
+
+  assert.notEqual(checkpoint, false);
+  assert.equal(checkpoint.tasks['0'].state, 'terminal');
+  assert.equal(harness.terminalPayloads.length, 1);
+});
+
 function createWorkerHarness({
   concurrency,
   taskCount,
