@@ -1000,6 +1000,10 @@ test('restart requeues a missing worker and opens a replacement without a stale-
   assert.notEqual(replacement.tabId, 777);
   assert.match(
     harness.document.querySelector('[data-command-result]').textContent,
+    /批次已继续/
+  );
+  assert.doesNotMatch(
+    harness.document.querySelector('[data-command-result]').textContent,
     /resume_complete/
   );
   assert.equal(

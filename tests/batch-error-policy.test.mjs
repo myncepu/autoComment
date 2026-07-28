@@ -48,3 +48,11 @@ test('describes automatic creation failures as worker tab failures', () => {
     diagnostic: {}
   });
 });
+
+test('presents an already-commented skip without exposing its code', () => {
+  const error = getBatchError('already_commented');
+
+  assert.equal(error.retryPolicy, 'blocked');
+  assert.match(error.message, /已有成功评论|跳过/);
+  assert.doesNotMatch(error.message, /already_commented/);
+});

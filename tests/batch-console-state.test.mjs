@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  batchCommandMessage,
   createBatchConsoleSnapshot,
   filterBatchTaskRows,
   runtimeErrorMessage
@@ -416,6 +417,24 @@ test('presents common persistence and configuration failures in Chinese', () => 
     assert.match(message, expected);
     assert.doesNotMatch(message, new RegExp(code));
   }
+});
+
+test('localizes wizard failures and successful command results', () => {
+  for (const code of [
+    'csv_parse_failed',
+    'invalid_column_mapping',
+    'saved_batch_plan_invalid',
+    'target_url_column_required',
+    'assignment_pair_not_approved'
+  ]) {
+    const message = runtimeErrorMessage(code);
+    assert.doesNotMatch(message, new RegExp(code));
+    assert.match(message, /CSV|列|计划|目标|分配/);
+  }
+  assert.equal(batchCommandMessage('start'), '批次已开始');
+  assert.equal(batchCommandMessage('pause'), '批次已暂停');
+  assert.equal(batchCommandMessage('resume'), '批次已继续');
+  assert.equal(batchCommandMessage('stop'), '批次已停止');
 });
 
 test('allows legacy-only result export without treating it as an active batch', () => {

@@ -4808,8 +4808,8 @@
       url: url || '',
       aiContent: aiContent || '',
       result: 'skipped',
-      errorCode: null,
-      errorMessage: 'already_commented'
+      errorCode: 'already_commented',
+      errorMessage: null
     });
   }
 
