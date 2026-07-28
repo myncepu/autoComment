@@ -23,6 +23,7 @@ const projectRoot = path.resolve(
 );
 const { createFixtureServer } = require('./serve-extension-fixture.js');
 const productionScripts = [
+  'lib/content-runtime-bootstrap.js',
   'illegal-site-filter.js',
   'lib/llm-content-bridge.js',
   'lib/batch-task-config.js',

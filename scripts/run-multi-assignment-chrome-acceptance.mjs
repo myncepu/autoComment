@@ -10,6 +10,7 @@ const require = createRequire(import.meta.url);
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const { createFixtureServer } = require('./serve-extension-fixture.js');
 const productionScripts = [
+  'lib/content-runtime-bootstrap.js',
   'illegal-site-filter.js',
   'lib/llm-content-bridge.js',
   'lib/batch-task-config.js',
@@ -295,6 +296,7 @@ async function observeRecoveryWorkerOwnership(smokePage, context, origin) {
       chrome.tabs.getCurrent()
     ]);
     return {
+      response: response || null,
       checkpoint: response?.checkpoint || null,
       tabs,
       consoleTab
@@ -364,6 +366,7 @@ async function observeRecoveryWorkerOwnership(smokePage, context, origin) {
     }
   }
   return {
+    response: observed.response,
     checkpoint: observed.checkpoint,
     consoleTab: observed.consoleTab,
     errors,
@@ -500,12 +503,19 @@ function createRecoveryLifecycleLedger(context, origin) {
 
 async function waitForValue(load, accepts, timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs;
+  let latest = null;
   while (Date.now() < deadline) {
-    const value = await load();
-    if (accepts(value)) return value;
+    latest = await load();
+    if (accepts(latest)) return latest;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  throw new Error('acceptance_wait_timeout');
+  let diagnostic = 'unavailable';
+  try {
+    diagnostic = JSON.stringify(latest, (key, value) => (
+      key === 'page' ? '[Playwright Page]' : value
+    ));
+  } catch (_) {}
+  throw new Error(`acceptance_wait_timeout:${diagnostic}`);
 }
 
 async function prepareLocalExtension(sourceRoot, temporaryProfile) {
@@ -539,7 +549,10 @@ async function prepareLocalExtension(sourceRoot, temporaryProfile) {
   });
   const manifestPath = path.join(extensionRoot, 'manifest.json');
   const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
-  manifest.host_permissions = ['http://127.0.0.1/*'];
+  manifest.host_permissions = [
+    'http://127.0.0.1/*',
+    'https://127.0.0.1/*'
+  ];
   manifest.optional_host_permissions = [];
   manifest.content_scripts = (manifest.content_scripts || []).map(
     (contentScript) => ({
@@ -982,7 +995,7 @@ async function main() {
     ));
     assert.deepEqual(
       localExtensionManifest.host_permissions,
-      ['http://127.0.0.1/*']
+      ['http://127.0.0.1/*', 'https://127.0.0.1/*']
     );
     assert.deepEqual(localExtensionManifest.optional_host_permissions, []);
     assert.equal(
@@ -1387,15 +1400,17 @@ async function main() {
     await smokePage.locator('[data-readiness-ready]').waitFor();
     await smokePage.locator('[data-action="wizard-start"]').click();
 
-    await smokePage.waitForFunction(async () => {
-      const response = await chrome.runtime.sendMessage({
+    await waitForValue(
+      () => smokePage.evaluate(() => chrome.runtime.sendMessage({
         type: 'BATCH_SESSION_GET'
-      });
-      return response?.ok
+      })),
+      (response) => (
+        response?.ok === true
         && [0, 1, 2].every((urlIndex) => (
           response.checkpoint?.tasks?.[String(urlIndex)]?.state === 'active'
-        ));
-    });
+        ))
+      )
+    );
     const initialOwnership = await waitForValue(
       () => observeRecoveryWorkerOwnership(smokePage, context, origin),
       (observation) => (
@@ -1418,24 +1433,22 @@ async function main() {
       ({ urlIndex }) => urlIndex === closedUrlIndex
     ).page.close();
     replacementUrlIndex = 3;
-    await smokePage.waitForFunction(async ({
-      closedIndex,
-      replacementIndex
-    }) => {
-      const response = await chrome.runtime.sendMessage({
+    await waitForValue(
+      () => smokePage.evaluate(() => chrome.runtime.sendMessage({
         type: 'BATCH_SESSION_GET'
-      });
-      const checkpoint = response?.checkpoint;
-      return response?.ok
-        && checkpoint?.tasks?.[String(closedIndex)]?.state === 'terminal'
-        && checkpoint.results?.find(
-          ({ originalIndex }) => originalIndex === closedIndex
-        )?.errorCode === 'task_failed'
-        && checkpoint.tasks?.[String(replacementIndex)]?.state === 'active';
-    }, {
-      closedIndex: closedUrlIndex,
-      replacementIndex: replacementUrlIndex
-    });
+      })),
+      (response) => {
+        const nextCheckpoint = response?.checkpoint;
+        return response?.ok === true
+          && nextCheckpoint?.tasks?.[String(closedUrlIndex)]?.state ===
+            'terminal'
+          && nextCheckpoint.results?.find(
+            ({ originalIndex }) => originalIndex === closedUrlIndex
+          )?.errorCode === 'task_failed'
+          && nextCheckpoint.tasks?.[String(replacementUrlIndex)]?.state ===
+            'active';
+      }
+    );
     const checkpoint = await smokePage.evaluate(() => (
       chrome.runtime.sendMessage({ type: 'BATCH_SESSION_GET' })
     )).then((response) => response.checkpoint);
