@@ -39,6 +39,7 @@ const {
   localDayEnd,
   localDayStart,
   retreatPagination,
+  sendHistoryMessage,
   setStoredText
 } = await import(`data:text/javascript;base64,${Buffer.from(historyModuleSource).toString('base64')}`);
 
@@ -163,6 +164,16 @@ test('cloud controller renders status and source badges while keeping stored HTM
     cloudRow.querySelector('[data-action="delete-everywhere"]').textContent,
     '从所有设备永久删除'
   );
+  assert.match(
+    cloudRow.querySelector('[data-action="expand"]').getAttribute('aria-label'),
+    /评论详情/
+  );
+  assert.match(
+    cloudRow
+      .querySelector('[data-action="delete-everywhere"]')
+      .getAttribute('aria-label'),
+    /永久删除/
+  );
   assert.equal(
     localRow.querySelector('[data-action="delete-everywhere"]'),
     null
@@ -176,6 +187,74 @@ test('cloud controller renders status and source badges while keeping stored HTM
   );
   assert.equal(detail.textContent, '<img src=x onerror="globalThis.pwned=true">');
   assert.equal(detail.querySelector('img'), null);
+});
+
+test('history table headers, data rows, and spanning rows use one seven-column contract', () => {
+  const document = historyDocument();
+  const controller = createCloudHistoryController({
+    document,
+    dataSource: {
+      async deleteEverywhere() {
+        return { status: 'applied' };
+      }
+    }
+  });
+  controller.renderStatus({ enabled: true, state: 'idle' }, true);
+  controller.renderRecords([{
+    comment: record('cloud:columns', 'Column contract'),
+    anchors: [],
+    storageSource: 'cloud'
+  }]);
+
+  const headers = document.querySelectorAll(
+    '#historyTableBody'
+  )[0].closest('table').querySelectorAll('thead th');
+  const row = document.querySelector('[data-record-id="cloud:columns"]');
+  const detailCell = document.querySelector(
+    '[data-detail-for="cloud:columns"] td'
+  );
+  assert.equal(headers.length, 7);
+  assert.equal(row.children.length, 7);
+  assert.equal(detailCell.colSpan, 7);
+  assert.match(headers[6].textContent, /操作/);
+
+  controller.renderRecords([]);
+  assert.equal(
+    document.querySelector('#historyTableBody .empty-cell').colSpan,
+    7
+  );
+});
+
+test('Chrome runtime failures expose a stable safe history error and log no raw lastError text', async () => {
+  const diagnostics = [];
+  const chromeApi = {
+    runtime: {
+      lastError: null,
+      sendMessage(_message, callback) {
+        this.lastError = {
+          message: 'Could not connect: api_key=sk-history-last-error'
+        };
+        callback(undefined);
+      }
+    }
+  };
+
+  await assert.rejects(
+    sendHistoryMessage(
+      { type: 'HISTORY_SUMMARY' },
+      {
+        chromeApi,
+        reportDiagnostic: (code) => diagnostics.push(code)
+      }
+    ),
+    (error) => {
+      assert.equal(error.code, 'HISTORY_RUNTIME_UNAVAILABLE');
+      assert.match(error.message, /评论历史服务.*不可用/);
+      assert.doesNotMatch(error.message, /api_key|sk-history|Could not connect/);
+      return true;
+    }
+  );
+  assert.deepEqual(diagnostics, ['HISTORY_RUNTIME_UNAVAILABLE']);
 });
 
 test('permanent delete cancellation makes no call and confirmed delete keeps the row busy until cloud success', async () => {
@@ -1271,6 +1350,54 @@ test('unavailable cloud status is not presented as intentionally disabled', asyn
   );
 });
 
+test('summary and archive request failures render actionable unavailable states instead of empty data', async () => {
+  const document = historyDocument();
+  const requestMessage = async (message) => {
+    if (message.type === 'HISTORY_RETRY_PENDING') return { pending: 0 };
+    if (message.type === 'HISTORY_LIST') {
+      return { records: [], nextCursor: null };
+    }
+    if (message.type === 'HISTORY_SUMMARY') {
+      throw new Error('summary secret diagnostic');
+    }
+    if (message.type === 'HISTORY_ARCHIVE_EVENTS') {
+      throw new Error('archive secret diagnostic');
+    }
+    throw new Error(`Unexpected request: ${message.type}`);
+  };
+
+  bootHistoryPage(document, {
+    requestMessage,
+    search: '',
+    estimateStorage: async () => 0
+  });
+  await nextTurn();
+  await nextTurn();
+
+  for (const id of [
+    'summaryTotal',
+    'summaryLast24Hours',
+    'summaryDueSoon',
+    'summaryExpired'
+  ]) {
+    assert.match(document.getElementById(id).textContent, /暂不可用/);
+  }
+  assert.match(
+    document.getElementById('retentionBanner').textContent,
+    /摘要.*无法加载.*重试/
+  );
+  assert.match(
+    document.getElementById('archiveTableBody').textContent,
+    /归档摘要.*无法加载.*重试/
+  );
+  assert.doesNotMatch(
+    `${document.getElementById('retentionBanner').textContent}${
+      document.getElementById('archiveTableBody').textContent
+    }`,
+    /secret|diagnostic/
+  );
+});
+
 test('history layout includes summaries, indexed filters, pagination, archive and lifecycle controls', () => {
   const html = fs.readFileSync(path.join(projectRoot, 'history.html'), 'utf8');
   for (const id of [
@@ -1303,6 +1430,25 @@ test('history layout includes summaries, indexed filters, pagination, archive an
   }
   assert.match(html, /<option value="50"/);
   assert.match(html, /<option value="100"/);
+
+  const document = new JSDOM(html).window.document;
+  for (const id of [
+    'cloudHistoryStatus',
+    'retentionBanner',
+    'historyPendingBanner',
+    'exportStatus',
+    'pageStatus'
+  ]) {
+    const status = document.getElementById(id);
+    assert.equal(status.getAttribute('role'), 'status', `#${id} role`);
+    assert.equal(status.getAttribute('aria-live'), 'polite', `#${id} aria-live`);
+  }
+  for (const table of document.querySelectorAll('table')) {
+    assert.ok(table.getAttribute('aria-label'));
+    for (const header of table.querySelectorAll('th')) {
+      assert.equal(header.getAttribute('scope'), 'col');
+    }
+  }
 });
 
 test('entry pages expose comment history through the shared application shell', async () => {

@@ -83,3 +83,33 @@ test('production composition routes options domain writes to the background repo
     /installDomainConfigRepositoryMessageListener\([\s\S]*domainConfigRepository[\s\S]*ready:\s*ensureDomainConfigReady/
   );
 });
+
+test('options controls have accessible names and changing statuses are announced', () => {
+  const html = fs.readFileSync(new URL('options.html', root), 'utf8');
+  const document = new JSDOM(html).window.document;
+
+  for (const id of ['userName', 'userEmail', 'userPassword']) {
+    assert.ok(
+      document.querySelector(`label[for="${id}"]`),
+      `missing accessible label for #${id}`
+    );
+  }
+  const fileInput = document.getElementById('importConfigFileInput');
+  assert.ok(
+    document.querySelector('label[for="importConfigFileInput"]')
+      || fileInput.getAttribute('aria-label'),
+    'config file input needs an accessible name'
+  );
+  for (const id of [
+    'passwordConfiguredStatus',
+    'llmStatus',
+    'settingsStatus',
+    'importExportStatus',
+    'importPreviewSummary'
+  ]) {
+    const status = document.getElementById(id);
+    assert.equal(status.getAttribute('role'), 'status', `#${id} role`);
+    assert.equal(status.getAttribute('aria-live'), 'polite', `#${id} aria-live`);
+  }
+  assert.ok(document.getElementById('retryOptionsLoadBtn'));
+});

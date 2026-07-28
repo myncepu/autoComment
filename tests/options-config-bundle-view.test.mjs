@@ -43,7 +43,8 @@ function createViewHarness(overrides = {}) {
     preview: [],
     apply: [],
     downloads: [],
-    applied: []
+    applied: [],
+    diagnostics: []
   };
   const defaultPreview = previewFixture();
   const controller = {
@@ -70,6 +71,9 @@ function createViewHarness(overrides = {}) {
     async onApplied(value) {
       calls.applied.push(value);
       return overrides.onApplied?.(value);
+    },
+    reportDiagnostic(code, phase) {
+      calls.diagnostics.push({ code, phase });
     }
   });
   const fileInput = document.getElementById('importConfigFileInput');
@@ -147,7 +151,7 @@ test('invalid JSON is rejected without previewing or applying', async () => {
   assert.equal(harness.summary.hidden, true);
 });
 
-test('conflict codes are rendered as text and block apply', async () => {
+test('conflicts are translated for users, keep raw codes diagnostic-only, and block apply', async () => {
   const harness = createViewHarness({
     controller: {
       async previewImport(value) {
@@ -165,10 +169,18 @@ test('conflict codes are rendered as text and block apply', async () => {
   harness.selectText('{}');
   await flush();
 
-  assert.match(harness.summary.textContent, /duplicate_profile_id/);
-  assert.match(harness.summary.textContent, /<unsafe-conflict>/);
+  assert.match(harness.summary.textContent, /身份 ID.*重复/);
+  assert.match(harness.summary.textContent, /无法处理的配置冲突/);
+  assert.doesNotMatch(
+    `${harness.summary.textContent}${harness.status.textContent}`,
+    /duplicate_profile_id|unsafe-conflict/
+  );
   assert.equal(harness.summary.querySelector('script'), null);
   assert.equal(harness.applyButton.hidden, true);
+  assert.deepEqual(
+    harness.calls.diagnostics.map(({ code }) => code),
+    ['duplicate_profile_id', 'config_bundle_conflict']
+  );
 });
 
 test('resets the native input and repeated selections replace the pending preview', async () => {
@@ -276,7 +288,7 @@ test('never renders a secret-bearing raw exception message', async () => {
   assert.doesNotMatch(harness.status.textContent, /sk-view-secret|api_key/);
 });
 
-test('renders only allowlisted stable config bundle error codes', async () => {
+test('renders Chinese text for allowlisted stable config errors and logs only the code', async () => {
   const harness = createViewHarness({
     controller: {
       async exportConfig() {
@@ -290,8 +302,25 @@ test('renders only allowlisted stable config bundle error codes', async () => {
   harness.exportButton.click();
   await flush();
 
-  assert.match(harness.status.textContent, /config_bundle_apply_failed/);
-  assert.doesNotMatch(harness.status.textContent, /internal details/);
+  assert.match(harness.status.textContent, /配置.*应用失败/);
+  assert.doesNotMatch(
+    harness.status.textContent,
+    /config_bundle_apply_failed|internal details/
+  );
+  assert.deepEqual(harness.calls.diagnostics, [{
+    code: 'config_bundle_apply_failed',
+    phase: 'export'
+  }]);
+});
+
+test('status and preview regions expose polite atomic announcements', () => {
+  const harness = createViewHarness();
+
+  for (const element of [harness.status, harness.summary]) {
+    assert.equal(element.getAttribute('role'), 'status');
+    assert.equal(element.getAttribute('aria-live'), 'polite');
+    assert.equal(element.getAttribute('aria-atomic'), 'true');
+  }
 });
 
 test('reports refresh failure distinctly after the import is already committed', async () => {

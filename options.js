@@ -30,8 +30,11 @@ import {
   createOptionsConfigBundleView
 } from './lib/options-config-bundle-view.mjs';
 import {
+  bindSafeTabNavigation,
   bindStoredBooleanToggle,
-  installOptionsPageBoot
+  installOptionsPageBoot,
+  optionsErrorMessage,
+  stableOptionsErrorCode
 } from './lib/options-page-reliability.mjs';
 
 const SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY =
@@ -45,12 +48,25 @@ function generatedId(prefix) {
   return `${prefix}-${crypto.randomUUID()}`;
 }
 
-function positiveInteger(input, label) {
+function codedOptionsError(code) {
+  const error = new Error(code);
+  error.code = code;
+  return error;
+}
+
+function positiveInteger(input, code) {
   const value = Number(input.value);
   if (!Number.isInteger(value) || value < 1) {
-    throw new Error(`${label}必须是正整数`);
+    throw codedOptionsError(code);
   }
   return value;
+}
+
+function reportOptionsDiagnostic(area, error, fallbackCode) {
+  console.error(
+    `[options] ${area}:`,
+    stableOptionsErrorCode(error, fallbackCode)
+  );
 }
 
 function downloadJson(value, fileName) {
@@ -68,13 +84,6 @@ function downloadJson(value, fileName) {
 }
 
 export async function bootOptionsPage() {
-  bootAppShell(document, { currentUrl: window.location.href });
-  const focusCurrentSection = () => (
-    focusOptionsSection(document, window.location.hash)
-  );
-  focusCurrentSection();
-  window.addEventListener('hashchange', focusCurrentSection);
-
   const ui = Object.fromEntries([
     'profileSelect',
     'newProfileBtn',
@@ -153,6 +162,12 @@ export async function bootOptionsPage() {
     settingsAdapter: safeSettingsAdapter
   });
   let snapshot = await domainController.snapshot();
+  bootAppShell(document, { currentUrl: window.location.href });
+  const focusCurrentSection = () => (
+    focusOptionsSection(document, window.location.hash)
+  );
+  focusCurrentSection();
+  window.addEventListener('hashchange', focusCurrentSection);
   let editingProfileId = snapshot.profiles[0]?.id ?? null;
   let editingSiteId = snapshot.promotionSites[0]?.id ?? null;
   let editingPairId = snapshot.pairs[0]?.id ?? null;
@@ -294,9 +309,14 @@ export async function bootOptionsPage() {
       renderAll();
       showStatus(ui.settingsStatus, successText);
     } catch (error) {
+      reportOptionsDiagnostic(
+        'domain config command failed',
+        error,
+        'domain_config_command_failed'
+      );
       showStatus(
         ui.settingsStatus,
-        error?.message || '保存失败',
+        optionsErrorMessage(error, '保存失败，请稍后重试。'),
         true,
         4200
       );
@@ -318,7 +338,7 @@ export async function bootOptionsPage() {
       const name = ui.userName.value.trim();
       const email = ui.userEmail.value.trim();
       if (!displayName || !name || !email) {
-        throw new Error('请填写显示名、姓名和邮箱');
+        throw codedOptionsError('missing_profile_fields');
       }
       const profileId = editingProfileId || generatedId('profile');
       editingProfileId = profileId;
@@ -402,7 +422,10 @@ export async function bootOptionsPage() {
         id: pairId,
         profileId: ui.pairProfileSelect.value,
         promotionSiteId: ui.pairPromotionSiteSelect.value,
-        weight: positiveInteger(ui.pairWeight, '权重'),
+        weight: positiveInteger(
+          ui.pairWeight,
+          'invalid_assignment_pair_weight'
+        ),
         enabled: ui.pairEnabled.checked
       });
     },
@@ -419,15 +442,18 @@ export async function bootOptionsPage() {
     () => domainController.savePolicy({
       defaultPairId: ui.defaultPairSelect.value || null,
       quotas: {
-        batch: positiveInteger(ui.quotaBatch, '批次上限'),
-        perProfile: positiveInteger(ui.quotaProfile, '每 Profile 上限'),
+        batch: positiveInteger(ui.quotaBatch, 'invalid_quota_batch'),
+        perProfile: positiveInteger(
+          ui.quotaProfile,
+          'invalid_quota_profile'
+        ),
         perPromotionSite: positiveInteger(
           ui.quotaPromotionSite,
-          '每 Promotion Site 上限'
+          'invalid_quota_promotion_site'
         ),
         perTargetDomain: positiveInteger(
           ui.quotaTargetDomain,
-          '每目标域名上限'
+          'invalid_quota_target_domain'
         )
       }
     }),
@@ -464,7 +490,16 @@ export async function bootOptionsPage() {
       });
       showStatus(ui.llmStatus, '模型配置已保存');
     } catch (error) {
-      showStatus(ui.llmStatus, error.message, true);
+      reportOptionsDiagnostic(
+        'model config save failed',
+        error,
+        'model_config_save_failed'
+      );
+      showStatus(
+        ui.llmStatus,
+        optionsErrorMessage(error, '模型配置保存失败，请稍后重试。'),
+        true
+      );
     }
   });
   ui.testLlmConnectionBtn.addEventListener('click', async () => {
@@ -477,7 +512,17 @@ export async function bootOptionsPage() {
       });
       showStatus(ui.llmStatus, `连接成功：${text}`, false, 5000);
     } catch (error) {
-      showStatus(ui.llmStatus, error.message, true, 5000);
+      reportOptionsDiagnostic(
+        'model connection test failed',
+        error,
+        'model_connection_test_failed'
+      );
+      showStatus(
+        ui.llmStatus,
+        optionsErrorMessage(error, '连接测试失败，请稍后重试。'),
+        true,
+        5000
+      );
     } finally {
       ui.testLlmConnectionBtn.disabled = false;
     }
@@ -544,14 +589,30 @@ export async function bootOptionsPage() {
     }
   });
 
-  ui.openBatchBtn.addEventListener(
-    'click',
-    () => chrome.tabs.create({ url: 'batch.html' })
-  );
-  ui.openHistoryBtn.addEventListener(
-    'click',
-    () => chrome.tabs.create({ url: 'history.html' })
-  );
+  bindSafeTabNavigation({
+    button: ui.openBatchBtn,
+    open: () => chrome.tabs.create({ url: 'batch.html' }),
+    onError: () => {
+      showStatus(
+        ui.settingsStatus,
+        '批量处理页面打开失败，请稍后重试。',
+        true,
+        4200
+      );
+    }
+  });
+  bindSafeTabNavigation({
+    button: ui.openHistoryBtn,
+    open: () => chrome.tabs.create({ url: 'history.html' }),
+    onError: () => {
+      showStatus(
+        ui.settingsStatus,
+        '评论历史页面打开失败，请稍后重试。',
+        true,
+        4200
+      );
+    }
+  });
 
   const cloudSyncElements = Object.fromEntries([
     'cloudSyncCreateBtn',

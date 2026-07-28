@@ -17,7 +17,7 @@
         正在检查云同步状态…
       </div>
 
-      <section class="summary-grid" aria-label="评论历史摘要">
+      <section class="summary-grid" aria-label="评论历史摘要" role="status" aria-live="polite" aria-atomic="true">
         <div class="summary-card">
           <div class="summary-label">总记录数</div>
           <div class="summary-value" id="summaryTotal">0</div>
@@ -40,8 +40,8 @@
         </div>
       </section>
 
-      <div class="retention-banner" id="retentionBanner" role="status" hidden></div>
-      <div class="retention-banner" id="historyPendingBanner" role="status" hidden></div>
+      <div class="retention-banner" id="retentionBanner" role="status" aria-live="polite" aria-atomic="true" hidden></div>
+      <div class="retention-banner" id="historyPendingBanner" role="status" aria-live="polite" aria-atomic="true" hidden></div>
 
       <section class="card">
         <h2>筛选评论</h2>
@@ -116,26 +116,25 @@
           </div>
         </div>
         <p class="lifecycle-note">未启用云同步时，导出和删除是两个独立步骤，未经明确确认不会自动删除；启用后，仅已确认同步且无待处理更改的 90 天前本机缓存会自动清理。</p>
-        <div id="exportStatus" role="status" aria-live="polite"></div>
+        <div id="exportStatus" role="status" aria-live="polite" aria-atomic="true"></div>
         <div class="table-wrap">
-          <table>
+          <table aria-label="评论记录">
             <thead>
               <tr>
-                <th>详情</th>
-                <th>提交时间</th>
-                <th>目标页面</th>
-                <th>推广网站</th>
-                <th>身份</th>
-                <th>推广配置</th>
-                <th>评论内容</th>
-                <th>来源</th>
+                <th scope="col">详情</th>
+                <th scope="col">提交时间</th>
+                <th scope="col">目标页面</th>
+                <th scope="col">推广网站</th>
+                <th scope="col">评论内容</th>
+                <th scope="col">来源</th>
+                <th scope="col">操作</th>
               </tr>
             </thead>
             <tbody id="historyTableBody"></tbody>
           </table>
         </div>
         <div class="pagination">
-          <span id="pageStatus"></span>
+          <span id="pageStatus" role="status" aria-live="polite" aria-atomic="true"></span>
           <button class="btn-secondary" id="previousPageBtn" type="button" disabled>上一页</button>
           <span id="pageLabel">第 1 页</span>
           <button class="btn-secondary" id="nextPageBtn" type="button" disabled>下一页</button>
@@ -145,17 +144,17 @@
       <section class="card">
         <h2>历史归档摘要</h2>
         <div class="table-wrap">
-          <table>
+          <table aria-label="历史归档摘要">
             <thead>
               <tr>
-                <th>删除完成时间</th>
-                <th>范围开始</th>
-                <th>范围结束</th>
-                <th>记录数</th>
-                <th>归档文件</th>
+                <th scope="col">删除完成时间</th>
+                <th scope="col">范围开始</th>
+                <th scope="col">范围结束</th>
+                <th scope="col">记录数</th>
+                <th scope="col">归档文件</th>
               </tr>
             </thead>
-            <tbody id="archiveTableBody"></tbody>
+            <tbody id="archiveTableBody" aria-live="polite" aria-atomic="true"></tbody>
           </table>
         </div>
       </section>
