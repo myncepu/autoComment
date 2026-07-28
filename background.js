@@ -58,6 +58,12 @@ const batchResultStore = createBatchResultStore(chrome.storage.local);
 const domainConfigRepository = createDomainConfigRepository(chrome.storage.local);
 const profileSecretRepository = createProfileSecretRepository(chrome.storage.local);
 const batchSecretVaultStore = createBatchSecretVaultStore(chrome.storage.local);
+const batchSubmitContextStore = createBatchSubmitContextStore(
+  chrome.storage.local
+);
+void batchSubmitContextStore.pruneExpired().catch(() => {
+  console.warn('[background] Submit-context retention cleanup deferred');
+});
 const ensureDomainConfigReady = createRetryableReadiness(async () => {
   await migratePasswordToLocal(chrome.storage);
   return migrateLegacyDomainConfig({
@@ -99,6 +105,9 @@ const batchRuntimeController = createBatchRuntimeController({
   },
   cleanupPreparedStart: ({ batchId }) => (
     batchSecretVaultStore.clear(batchId)
+  ),
+  recoverRemovedSubmitContext: ({ tabId, expected, reason }) => (
+    batchSubmitContextStore.sealAndRecover(tabId, expected, reason)
   )
 });
 const initializationAwareBatchRuntimeController =
@@ -106,10 +115,6 @@ const initializationAwareBatchRuntimeController =
     batchRuntimeController,
     ensureDomainConfigReady
   );
-const batchSubmitContextStore = createBatchSubmitContextStore(
-  chrome.storage.local,
-  { maxAgeMs: Number.POSITIVE_INFINITY }
-);
 installBatchSubmitContextListener(chrome, batchSubmitContextStore, {
   runProofBoundTaskHook: (...args) => (
     initializationAwareBatchRuntimeController.runProofBoundTaskHook(...args)

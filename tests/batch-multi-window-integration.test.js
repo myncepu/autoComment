@@ -392,6 +392,7 @@ async function createProductionHarness(options = {}) {
   });
   const pageSender = {
     id: 'extension-id',
+    documentId: 'production-harness-document',
     tab: { id: 50, windowId: 42 },
     url: 'chrome-extension://extension-id/batch.html'
   };
@@ -700,6 +701,49 @@ test('pagehide background handoff is idempotent', async () => {
   await waitFor(() => calls.length === 1, 'pagehide background handoff');
   assert.deepEqual(calls, [{ reason: 'pagehide' }]);
   assert.equal(calls.length, 1);
+});
+
+test('pagehide does not tear down a batch until this document owns one', async () => {
+  const imported = await import('../lib/batch-entry-lifecycle.mjs');
+  const dom = new JSDOM('<!doctype html><p>batch</p>');
+  const calls = [];
+  const lifecycle = imported.installBatchPageLifecycle({
+    pageTarget: dom.window,
+    boot: async () => ({ async destroy() {} }),
+    getPageTeardownContext: () => null,
+    async requestPageTeardown(options) {
+      calls.push(clone(options));
+    }
+  });
+  await lifecycle.ready;
+
+  dom.window.dispatchEvent(new dom.window.Event('pagehide'));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(calls, []);
+});
+
+test('pagehide sends the exact batch ownership captured by this document', async () => {
+  const imported = await import('../lib/batch-entry-lifecycle.mjs');
+  const dom = new JSDOM('<!doctype html><p>batch</p>');
+  const calls = [];
+  const lifecycle = imported.installBatchPageLifecycle({
+    pageTarget: dom.window,
+    boot: async () => ({ async destroy() {} }),
+    getPageTeardownContext: () => ({ batchId: 'batch-owned' }),
+    async requestPageTeardown(options) {
+      calls.push(clone(options));
+    }
+  });
+  await lifecycle.ready;
+
+  dom.window.dispatchEvent(new dom.window.Event('pagehide'));
+  await waitFor(() => calls.length === 1, 'owned pagehide handoff');
+
+  assert.deepEqual(calls, [{
+    batchId: 'batch-owned',
+    reason: 'pagehide'
+  }]);
 });
 
 test('production page lifecycle keeps the page mounted across hidden and visible changes', async () => {
