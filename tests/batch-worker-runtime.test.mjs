@@ -3,8 +3,47 @@ import test from 'node:test';
 
 import {
   createBatchWorkerRuntime,
+  isForwardRuntimeCheckpoint,
   waitForContentScriptReady
 } from '../lib/batch-worker-runtime.mjs';
+
+test('accepts only forward runtime checkpoints across concurrent worker creates', () => {
+  const harness = createWorkerHarness({ concurrency: 2, taskCount: 2 });
+  const initial = structuredClone(harness.checkpoint);
+  const firstActive = structuredClone(initial);
+  Object.assign(firstActive.tasks['0'], {
+    state: 'active',
+    tabId: 100,
+    windowId: 42,
+    startedAt: 1100,
+    updatedAt: 1100
+  });
+  firstActive.updatedAt = 1100;
+  firstActive.cursor.nextIndex = 1;
+  const bothActive = structuredClone(firstActive);
+  Object.assign(bothActive.tasks['1'], {
+    state: 'active',
+    tabId: 101,
+    windowId: 42,
+    startedAt: 1200,
+    updatedAt: 1200
+  });
+  bothActive.updatedAt = 1200;
+  bothActive.cursor.nextIndex = 2;
+
+  assert.equal(
+    isForwardRuntimeCheckpoint(initial, firstActive),
+    true
+  );
+  assert.equal(
+    isForwardRuntimeCheckpoint(firstActive, bothActive),
+    true
+  );
+  assert.equal(
+    isForwardRuntimeCheckpoint(bothActive, firstActive),
+    false
+  );
+});
 
 test('opens no more than three attempt-aware background worker tabs in the console window', async () => {
   const harness = createWorkerHarness({ concurrency: 3, taskCount: 5 });
