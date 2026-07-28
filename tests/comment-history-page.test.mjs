@@ -223,6 +223,52 @@ test('permanent delete cancellation makes no call and confirmed delete keeps the
   );
 });
 
+test('a failed permanent-delete confirmation is contained and can be retried', async () => {
+  const document = historyDocument();
+  let confirmations = 0;
+  let deleteCalls = 0;
+  const controller = createCloudHistoryController({
+    document,
+    dataSource: {
+      async deleteEverywhere() {
+        deleteCalls += 1;
+        return { status: 'applied' };
+      }
+    },
+    confirmDelete: async () => {
+      confirmations += 1;
+      if (confirmations === 1) throw new Error('confirmation UI unavailable');
+      return true;
+    }
+  });
+  controller.renderStatus({ enabled: true, state: 'idle' }, true);
+  controller.renderRecords([{
+    comment: record('cloud:confirm-retry', 'Retry confirmation'),
+    anchors: [],
+    storageSource: 'cloud'
+  }]);
+
+  assert.equal(
+    await controller.deleteEverywhere('cloud:confirm-retry'),
+    false
+  );
+  assert.equal(deleteCalls, 0);
+  assert.match(document.getElementById('pageStatus').textContent, /确认失败/);
+  assert.equal(
+    document.querySelector(
+      '[data-record-id="cloud:confirm-retry"] [data-action="delete-everywhere"]'
+    ).disabled,
+    false
+  );
+
+  assert.equal(
+    await controller.deleteEverywhere('cloud:confirm-retry'),
+    true
+  );
+  assert.equal(confirmations, 2);
+  assert.equal(deleteCalls, 1);
+});
+
 test('failed and concurrent permanent deletes keep the newest row and expose only a safe error', async () => {
   const document = historyDocument();
   const deletion = deferred();
@@ -995,6 +1041,84 @@ test('history page preserves an opaque source cursor identity across local-to-cl
   assert.equal(listCalls[1].filter.online, true);
 });
 
+test('failed next-page loading keeps the committed page and cursor retryable', async () => {
+  const document = historyDocument();
+  const cursor = Object.freeze({
+    phase: 'cloud',
+    localCursor: null,
+    cloudCursor: 'cloud-page-2',
+    cutoff: 123
+  });
+  const listCalls = [];
+  const dataSource = {
+    async status() {
+      return { enabled: true, state: 'idle', pendingCount: 0 };
+    },
+    async list(filter, requestedCursor) {
+      listCalls.push(requestedCursor);
+      if (listCalls.length === 1) {
+        return {
+          records: [{
+            comment: record('local:page-1', 'Committed first page'),
+            anchors: null,
+            storageSource: 'local'
+          }],
+          nextCursor: cursor
+        };
+      }
+      if (listCalls.length === 2) {
+        throw new Error('temporary page failure');
+      }
+      return {
+        records: [{
+          comment: record('cloud:page-2', 'Retried second page'),
+          anchors: [],
+          storageSource: 'cloud'
+        }],
+        nextCursor: null
+      };
+    },
+    async deleteEverywhere() {
+      throw new Error('delete not expected');
+    }
+  };
+  const requestMessage = async (message) => {
+    if (message.type === 'HISTORY_RETRY_PENDING') return { pending: 0 };
+    if (message.type === 'HISTORY_SUMMARY') return {};
+    if (message.type === 'HISTORY_ARCHIVE_EVENTS') return [];
+    throw new Error(`Unexpected request: ${message.type}`);
+  };
+
+  bootHistoryPage(document, {
+    requestMessage,
+    dataSource,
+    isOnline: () => true,
+    search: '',
+    estimateStorage: async () => 0
+  });
+  await nextTurn();
+  await nextTurn();
+
+  document.getElementById('nextPageBtn').click();
+  await nextTurn();
+  assert.equal(document.getElementById('pageLabel').textContent, '第 1 页');
+  assert.match(
+    document.getElementById('historyTableBody').textContent,
+    /Committed first page/
+  );
+  assert.equal(document.getElementById('previousPageBtn').disabled, true);
+  assert.equal(document.getElementById('nextPageBtn').disabled, false);
+
+  document.getElementById('nextPageBtn').click();
+  await nextTurn();
+  assert.deepEqual(listCalls, [null, cursor, cursor]);
+  assert.equal(document.getElementById('pageLabel').textContent, '第 2 页');
+  assert.match(
+    document.getElementById('historyTableBody').textContent,
+    /Retried second page/
+  );
+});
+
 test('offline cloud-required failure keeps the currently rendered rows and reports availability safely', async () => {
   const document = historyDocument();
   const listCalls = [];
@@ -1098,6 +1222,52 @@ test('enabled sync explains that only repository-approved old rows are automatic
   assert.doesNotMatch(
     document.getElementById('retentionBanner').textContent,
     /直到.*明确确认删除/
+  );
+});
+
+test('unavailable cloud status is not presented as intentionally disabled', async () => {
+  const document = historyDocument();
+  const dataSource = {
+    async status() {
+      throw new Error('service worker unavailable');
+    },
+    async list() {
+      return {
+        records: [{
+          comment: record('local:available', 'Available local row'),
+          anchors: null,
+          storageSource: 'local'
+        }],
+        nextCursor: null
+      };
+    },
+    async deleteEverywhere() {
+      throw new Error('delete not expected');
+    }
+  };
+  const requestMessage = async (message) => {
+    if (message.type === 'HISTORY_RETRY_PENDING') return { pending: 0 };
+    if (message.type === 'HISTORY_SUMMARY') return {};
+    if (message.type === 'HISTORY_ARCHIVE_EVENTS') return [];
+    throw new Error(`Unexpected request: ${message.type}`);
+  };
+
+  bootHistoryPage(document, {
+    requestMessage,
+    dataSource,
+    isOnline: () => true,
+    search: '',
+    estimateStorage: async () => 0
+  });
+  await nextTurn();
+  await nextTurn();
+
+  const status = document.getElementById('cloudHistoryStatus').textContent;
+  assert.match(status, /暂时无法读取/);
+  assert.doesNotMatch(status, /未启用/);
+  assert.match(
+    document.getElementById('historyTableBody').textContent,
+    /Available local row/
   );
 });
 

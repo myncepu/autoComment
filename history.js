@@ -558,12 +558,12 @@ export function bootHistoryPage(documentRef = document, {
     );
   }
 
-  async function loadPage() {
+  async function loadPage(requestedPagination = pagination) {
     const generation = ++requestGeneration;
     const pageState = {
       filter: { ...activeFilter },
-      cursor: pagination.cursor,
-      pageIndex: pagination.pageIndex
+      cursor: requestedPagination.cursor,
+      pageIndex: requestedPagination.pageIndex
     };
     elements.previousPageBtn.disabled = true;
     elements.nextPageBtn.disabled = true;
@@ -578,6 +578,7 @@ export function bootHistoryPage(documentRef = document, {
       nextCursor = page?.nextCursor && typeof page.nextCursor === 'object'
         ? page.nextCursor
         : null;
+      pagination = requestedPagination;
       historyController.renderRecords(page?.records);
       setStoredText(elements.pageLabel, `第 ${pageState.pageIndex + 1} 页`);
       setPageStatus(elements, `本页 ${page?.records?.length || 0} 条`);
@@ -592,7 +593,7 @@ export function bootHistoryPage(documentRef = document, {
       return false;
     } finally {
       if (generation !== requestGeneration) return;
-      elements.previousPageBtn.disabled = pageState.pageIndex === 0;
+      elements.previousPageBtn.disabled = pagination.pageIndex === 0;
       elements.nextPageBtn.disabled = !nextCursor;
     }
   }
@@ -785,20 +786,18 @@ export function bootHistoryPage(documentRef = document, {
     commitActiveFilter();
   });
   elements.previousPageBtn.addEventListener('click', () => {
-    pagination = retreatPagination(pagination);
-    loadPage();
+    loadPage(retreatPagination(pagination));
   });
   elements.nextPageBtn.addEventListener('click', () => {
     if (!nextCursor) return;
-    pagination = advancePagination(pagination, nextCursor);
-    loadPage();
+    loadPage(advancePagination(pagination, nextCursor));
   });
   elements.exportHistoryBtn.addEventListener('click', exportActiveSnapshot);
   elements.confirmDeleteBtn.addEventListener('click', deleteCompletedExport);
 
   elements.exportHistoryBtn.disabled = false;
   elements.confirmDeleteBtn.hidden = true;
-  (async () => {
+  void (async () => {
     try {
       const retryResult = await requestMessage({ type: 'HISTORY_RETRY_PENDING' });
       renderPendingQueue(retryResult?.pending);
@@ -815,7 +814,13 @@ export function bootHistoryPage(documentRef = document, {
     }
     historyController.renderStatus(cloudSyncStatus, isOnline());
     await Promise.all([loadOverview(), loadPage()]);
-  })();
+  })().catch(() => {
+    setPageStatus(
+      elements,
+      '评论历史页面初始化失败，请重新打开页面后重试。',
+      true
+    );
+  });
 }
 
 if (typeof document !== 'undefined') {

@@ -29,6 +29,10 @@ import {
 import {
   createOptionsConfigBundleView
 } from './lib/options-config-bundle-view.mjs';
+import {
+  bindStoredBooleanToggle,
+  installOptionsPageBoot
+} from './lib/options-page-reliability.mjs';
 
 const SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY =
   'show_export_outlinks_floating_button';
@@ -63,7 +67,7 @@ function downloadJson(value, fileName) {
   URL.revokeObjectURL(url);
 }
 
-document.addEventListener('DOMContentLoaded', async () => {
+export async function bootOptionsPage() {
   bootAppShell(document, { currentUrl: window.location.href });
   const focusCurrentSection = () => (
     focusOptionsSection(document, window.location.hash)
@@ -282,6 +286,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     renderSite();
     renderPair();
   }
+  renderAll();
 
   async function runConfigCommand(command, successText) {
     try {
@@ -434,7 +439,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     permissions: chrome.permissions,
     runtime: chrome.runtime
   };
-  const modelConfig = await loadLlmConfig(chrome.storage);
+  let modelConfig;
+  try {
+    modelConfig = await loadLlmConfig(chrome.storage);
+  } catch {
+    modelConfig = DEFAULT_LLM_CONFIG;
+    showStatus(
+      ui.llmStatus,
+      '模型配置暂时无法加载，请稍后重试。',
+      true,
+      4200
+    );
+  }
   ui.llmApiBaseUrl.value =
     modelConfig.apiBaseUrl || DEFAULT_LLM_CONFIG.apiBaseUrl;
   ui.llmModel.value = modelConfig.model || DEFAULT_LLM_CONFIG.model;
@@ -467,23 +483,47 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  let showOutlinks = (
-    await chrome.storage.sync.get([
-      SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY
-    ])
-  )[SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY] !== false;
+  let showOutlinks = true;
+  try {
+    showOutlinks = (
+      await chrome.storage.sync.get([
+        SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY
+      ])
+    )[SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY] !== false;
+  } catch {
+    showStatus(
+      ui.settingsStatus,
+      '外链按钮设置暂时无法加载，当前使用默认值。',
+      true,
+      4200
+    );
+  }
   function renderOutlinksToggle() {
     ui.toggleExportOutlinksFloatingBtn.textContent = showOutlinks
       ? '隐藏导出外链按钮'
       : '显示导出外链按钮';
   }
-  renderOutlinksToggle();
-  ui.toggleExportOutlinksFloatingBtn.addEventListener('click', async () => {
-    showOutlinks = !showOutlinks;
-    await chrome.storage.sync.set({
-      [SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY]: showOutlinks
-    });
-    renderOutlinksToggle();
+  const outlinksToggle = bindStoredBooleanToggle({
+    button: ui.toggleExportOutlinksFloatingBtn,
+    initialValue: showOutlinks,
+    write: (nextValue) => chrome.storage.sync.set({
+      [SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY]: nextValue
+    }),
+    render: (nextValue) => {
+      showOutlinks = nextValue;
+      renderOutlinksToggle();
+    },
+    onCommit: () => {
+      showStatus(ui.settingsStatus, '外链按钮设置已保存');
+    },
+    onError: () => {
+      showStatus(
+        ui.settingsStatus,
+        '外链按钮设置保存失败，请重试。',
+        true,
+        4200
+      );
+    }
   });
 
   createOptionsConfigBundleView({
@@ -498,9 +538,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         importedSettings.llm.apiBaseUrl || DEFAULT_LLM_CONFIG.apiBaseUrl;
       ui.llmModel.value =
         importedSettings.llm.model || DEFAULT_LLM_CONFIG.model;
-      showOutlinks =
-        importedSettings.preferences.showExportOutlinksFloatingButton;
-      renderOutlinksToggle();
+      outlinksToggle.setValue(
+        importedSettings.preferences.showExportOutlinksFloatingButton
+      );
     }
   });
 
@@ -537,5 +577,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     await cloudSyncController.refresh();
   }
 
-  renderAll();
-});
+}
+
+if (typeof document !== 'undefined') {
+  installOptionsPageBoot({
+    document,
+    boot: () => bootOptionsPage()
+  });
+}

@@ -42,6 +42,10 @@ test('options page exposes Profile, Site, Pair, default, quota, and explicit imp
   }
   assert.equal(document.getElementById('userPassword').value, '');
   assert.equal(document.getElementById('applyImportConfigBtn').hidden, true);
+  assert.doesNotMatch(
+    document.getElementById('settingsStatus').textContent,
+    /已保存/
+  );
 });
 
 test('options composition uses restricted domain, secret, and portable-settings adapters', () => {
@@ -61,6 +65,8 @@ test('options composition uses restricted domain, secret, and portable-settings 
   assert.doesNotMatch(source, /userPassword[\s\S]{0,160}chrome\.storage\.sync\.set/);
   assert.doesNotMatch(source, /JSON\.parse\(await file\.text\(\)\)/);
   assert.doesNotMatch(source, /pendingImportPreview/);
+  assert.match(source, /installOptionsPageBoot/);
+  assert.match(source, /bindStoredBooleanToggle/);
 });
 
 test('production composition routes options domain writes to the background repository', () => {
