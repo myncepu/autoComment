@@ -108,6 +108,46 @@ function pausedCheckpoint({
   };
 }
 
+function planningDomainConfig() {
+  return {
+    version: 2,
+    revision: 12,
+    profiles: [{
+      id: 'profile-a',
+      displayName: '作者 A',
+      name: 'Alice',
+      email: 'alice@example.test',
+      createdAt: 1,
+      updatedAt: 1
+    }],
+    promotionSites: [{
+      id: 'site-a',
+      name: '产品 A',
+      url: 'https://promo-a.test/',
+      content: '介绍 A',
+      enabled: true,
+      createdAt: 1,
+      updatedAt: 1
+    }],
+    assignmentPolicy: {
+      defaultPairId: 'pair-a',
+      pairs: [{
+        id: 'pair-a',
+        profileId: 'profile-a',
+        promotionSiteId: 'site-a',
+        weight: 1,
+        enabled: true
+      }],
+      quotas: {
+        batch: 100,
+        perProfile: 50,
+        perPromotionSite: 50,
+        perTargetDomain: 3
+      }
+    }
+  };
+}
+
 function createStorageArea(initial = {}) {
   const data = clone(initial);
   const requestedKeys = [];
@@ -440,12 +480,18 @@ async function createProductionHarness(options = {}) {
           requestTargetPermissions: options.requestTargetPermissions
         }
       : {}),
-    ...(options.domainConfig
+    ...(options.domainConfig || options.loadDomainConfig
       ? {
           async loadDomainConfig() {
+            if (options.loadDomainConfig) {
+              return options.loadDomainConfig();
+            }
             return clone(options.domainConfig);
           },
           async loadRecentSuccessUrls() {
+            if (options.loadRecentSuccessUrls) {
+              return options.loadRecentSuccessUrls();
+            }
             return clone(options.recentSuccessUrls || []);
           }
         }
@@ -1090,8 +1136,13 @@ test('rejected new batch keeps active ownership selected and explains recovery',
 });
 
 test('retry advances to attempt 2 and ignores an old attempt confirmation', async (t) => {
+  const permissionRequests = [];
   const harness = await createProductionHarness({
-    checkpoint: pausedCheckpoint({ manualFirst: true })
+    checkpoint: pausedCheckpoint({ manualFirst: true }),
+    async requestTargetPermissions(urls) {
+      permissionRequests.push(clone(urls));
+      return true;
+    }
   });
   t.after(() => harness.page.destroy());
 
@@ -1101,6 +1152,7 @@ test('retry advances to attempt 2 and ignores an old attempt confirmation', asyn
     () => harness.storageLocal.data.batchRuntimeCheckpoint.tasks['0'].attempt === 2,
     'attempt 2 checkpoint'
   );
+  assert.deepEqual(permissionRequests, [['https://target.test/0']]);
 
   harness.emitRuntime({
     type: 'BATCH_CONFIRMED',
@@ -1495,6 +1547,71 @@ test('empty production boot composes profile-ready preflight wizard into a v3 st
   assert.ok(harness.draftWrites.length > 0);
 });
 
+test('failed planning configuration stays explicit and blocks the legacy wizard path', async (t) => {
+  const configurationError = new Error('domain_config_unavailable');
+  configurationError.code = 'domain_config_unavailable';
+  const harness = await createProductionHarness({
+    checkpoint: null,
+    async loadDomainConfig() {
+      throw configurationError;
+    },
+    async loadRecentSuccessUrls() {
+      return [];
+    }
+  });
+  t.after(() => harness.page.destroy());
+
+  click(harness.document, '[data-action="new-batch"]');
+
+  const wizard = harness.document.querySelector('[data-batch-wizard]');
+  assert.equal(wizard.hasAttribute('open'), true);
+  assert.match(wizard.textContent, /身份与推广网站配置暂不可用/);
+  assert.equal(
+    wizard.querySelector('[data-action="wizard-next"]').disabled,
+    true
+  );
+  assert.ok(wizard.querySelector('[data-action="retry-planning-load"]'));
+  assert.doesNotMatch(wizard.textContent, /domain_config_unavailable/);
+});
+
+test('failed recent-success history can be retried before the wizard continues', async (t) => {
+  let historyAttempts = 0;
+  const harness = await createProductionHarness({
+    checkpoint: null,
+    async loadDomainConfig() {
+      return planningDomainConfig();
+    },
+    async loadRecentSuccessUrls() {
+      historyAttempts += 1;
+      if (historyAttempts === 1) {
+        const error = new Error('recent_success_history_unavailable');
+        error.code = 'recent_success_history_unavailable';
+        throw error;
+      }
+      return [];
+    }
+  });
+  t.after(() => harness.page.destroy());
+
+  click(harness.document, '[data-action="new-batch"]');
+  const wizard = harness.document.querySelector('[data-batch-wizard]');
+  assert.match(wizard.textContent, /近期成功记录暂不可用/);
+  assert.equal(
+    wizard.querySelector('[data-action="wizard-next"]').disabled,
+    true
+  );
+
+  click(harness.document, '[data-action="retry-planning-load"]');
+  await waitFor(
+    () => wizard.querySelector('[data-action="wizard-next"]')?.disabled === false,
+    'planning prerequisites retry'
+  );
+
+  assert.equal(historyAttempts, 2);
+  assert.doesNotMatch(wizard.textContent, /近期成功记录暂不可用/);
+  assert.match(wizard.textContent, /作者 A × 产品 A/);
+});
+
 test('wizard requests target permissions before starting worker tabs', async (t) => {
   const permissionGate = deferred();
   const requestedUrls = [];
@@ -1817,7 +1934,7 @@ test('an open wizard disables readiness and start when connectivity drops', asyn
   );
   assert.match(
     harness.document.querySelector('[data-batch-wizard]').textContent,
-    /batch_offline/
+    /网络连接不可用/
   );
   click(harness.document, '[data-action="wizard-start"]');
   assert.equal(
@@ -2118,7 +2235,7 @@ test('navigation storage failure keeps durable ownership for an explicit-missing
     cancelable: true
   }));
   await waitFor(
-    () => /checkpoint_write_failed/.test(harness.document.body.textContent),
+    () => /检查点保存失败/.test(harness.document.body.textContent),
     'local persistence failure projection'
   );
 

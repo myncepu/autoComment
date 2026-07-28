@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   createBatchConsoleSnapshot,
-  filterBatchTaskRows
+  filterBatchTaskRows,
+  runtimeErrorMessage
 } from '../lib/batch-console-state.mjs';
 import { producerCheckpointFixture } from './helpers/batch-console-fixtures.mjs';
 
@@ -245,6 +246,7 @@ test('derives a complete paused console view model from the version 2 checkpoint
     canResume: true,
     canStop: true,
     canExport: true,
+    canRetryPersistence: false,
     canCreate: true,
     resultMessage: ''
   });
@@ -276,6 +278,7 @@ test('locks derived commands while offline or while another command is in flight
     canResume: false,
     canStop: false,
     canExport: false,
+    canRetryPersistence: false,
     canCreate: false,
     resultMessage: ''
   });
@@ -367,16 +370,52 @@ test('durable opening reservations block creating a replacement batch', () => {
   assert.equal(snapshot.command.canCreate, false);
 });
 
-test('keeps an unknown runtime error visible for support diagnostics', () => {
+test('persistence-pending recovery blocks replacement batches until the checkpoint is saved', () => {
+  const checkpoint = createConsoleCheckpointFixture();
+  checkpoint.status = 'paused_recovery';
+  checkpoint.persistencePending = true;
+
+  const snapshot = createBatchConsoleSnapshot(checkpoint, {
+    now: 70000,
+    online: true
+  });
+
+  assert.equal(snapshot.command.canCreate, false);
+  assert.equal(snapshot.command.canResume, false);
+  assert.equal(snapshot.command.canRetryPersistence, true);
+  assert.match(snapshot.banners[0].message, /重试保存/);
+});
+
+test('keeps unknown runtime diagnostics out of the primary UI message', () => {
   const snapshot = createBatchConsoleSnapshot(null, {
-    runtimeError: 'worker_tab_reconcile_failed'
+    runtimeError: 'mysterious_runtime_fault'
   });
 
   assert.equal(snapshot.banners.at(-1).title, '运行时发生错误');
+  assert.match(snapshot.banners.at(-1).message, /未完成|重试/);
   assert.equal(
-    snapshot.banners.at(-1).message,
-    'worker_tab_reconcile_failed'
+    snapshot.banners.at(-1).diagnosticCode,
+    'mysterious_runtime_fault'
   );
+  assert.doesNotMatch(
+    snapshot.banners.at(-1).message,
+    /mysterious_runtime_fault/
+  );
+});
+
+test('presents common persistence and configuration failures in Chinese', () => {
+  for (const [code, expected] of [
+    ['checkpoint_write_failed', /检查点保存失败/],
+    ['recovery_persistence_required', /先保存恢复检查点/],
+    ['recent_success_history_unavailable', /近期成功记录暂不可用/],
+    ['domain_config_unavailable', /身份与推广网站配置暂不可用/],
+    ['worker_stop_rejected', /停止 worker 标签页失败/],
+    ['worker_resume_rejected', /恢复 worker 标签页失败/]
+  ]) {
+    const message = runtimeErrorMessage(code);
+    assert.match(message, expected);
+    assert.doesNotMatch(message, new RegExp(code));
+  }
 });
 
 test('allows legacy-only result export without treating it as an active batch', () => {

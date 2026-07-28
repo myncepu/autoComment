@@ -391,6 +391,30 @@ test('renders offline, recovery, persistence, error and empty states from snapsh
   assert.equal(document.querySelector('[data-action="new-batch"]').disabled, false);
 });
 
+test('offers a single checkpoint-save recovery action while persistence is pending', () => {
+  const document = consoleDocument();
+  const calls = [];
+  const view = createBatchConsoleView(document, consoleHandlers({
+    onRetryPersistence() {
+      calls.push('retry-persistence');
+    }
+  }));
+
+  view.render(persistencePendingSnapshotFixture());
+
+  assert.equal(document.querySelector('[data-action="resume"]'), null);
+  assert.equal(
+    document.querySelector('[data-action="retry-persistence"]').disabled,
+    false
+  );
+  assert.equal(
+    document.querySelector('[data-action="new-batch"]').disabled,
+    true
+  );
+  click(document, '[data-action="retry-persistence"]');
+  assert.deepEqual(calls, ['retry-persistence']);
+});
+
 test('projects hostile labels and task data as text without creating attacker nodes', () => {
   const document = consoleDocument();
   let commandPayload = null;
