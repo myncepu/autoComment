@@ -1547,13 +1547,11 @@ test('empty production boot composes profile-ready preflight wizard into a v3 st
   assert.ok(harness.draftWrites.length > 0);
 });
 
-test('failed planning configuration stays explicit and blocks the legacy wizard path', async (t) => {
-  const configurationError = new Error('domain_config_unavailable');
-  configurationError.code = 'domain_config_unavailable';
+test('null planning configuration stays explicit and blocks the legacy wizard path', async (t) => {
   const harness = await createProductionHarness({
     checkpoint: null,
     async loadDomainConfig() {
-      throw configurationError;
+      return null;
     },
     async loadRecentSuccessUrls() {
       return [];
@@ -1572,6 +1570,29 @@ test('failed planning configuration stays explicit and blocks the legacy wizard 
   );
   assert.ok(wizard.querySelector('[data-action="retry-planning-load"]'));
   assert.doesNotMatch(wizard.textContent, /domain_config_unavailable/);
+});
+
+test('invalid planning configuration cannot silently enter the legacy wizard', async (t) => {
+  const harness = await createProductionHarness({
+    checkpoint: null,
+    async loadDomainConfig() {
+      return { version: 2, revision: 12 };
+    },
+    async loadRecentSuccessUrls() {
+      return [];
+    }
+  });
+  t.after(() => harness.page.destroy());
+
+  click(harness.document, '[data-action="new-batch"]');
+
+  const wizard = harness.document.querySelector('[data-batch-wizard]');
+  assert.match(wizard.textContent, /身份与推广网站配置暂不可用/);
+  assert.equal(
+    wizard.querySelector('[data-action="wizard-next"]').disabled,
+    true
+  );
+  assert.ok(wizard.querySelector('[data-action="retry-planning-load"]'));
 });
 
 test('failed recent-success history can be retried before the wizard continues', async (t) => {
