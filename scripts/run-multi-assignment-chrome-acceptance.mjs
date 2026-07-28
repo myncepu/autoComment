@@ -6,20 +6,20 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
+import {
+  buildExtensionPackage
+} from './build-extension-package.mjs';
+
 const require = createRequire(import.meta.url);
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const { createFixtureServer } = require('./serve-extension-fixture.js');
-const productionScripts = [
-  'lib/content-runtime-bootstrap.js',
-  'illegal-site-filter.js',
-  'lib/llm-content-bridge.js',
-  'lib/batch-task-config.js',
-  'lib/batch-handle-dispatch.js',
-  'lib/batch-submit-context-client.js',
-  'lib/comment-history-capture.js',
-  'lib/batch-phase-reporter.js',
-  'content.js'
-];
+const productionManifest = JSON.parse(await fs.readFile(
+  path.join(projectRoot, 'manifest.json'),
+  'utf8'
+));
+const productionScripts = productionManifest.content_scripts.flatMap(
+  ({ js = [] }) => js
+);
 const recoveryDisabledChromiumFeatures = [
   'AvoidUnnecessaryBeforeUnloadCheckSync',
   'AutofillServerCommunication',
@@ -518,35 +518,9 @@ async function waitForValue(load, accepts, timeoutMs = 30_000) {
   throw new Error(`acceptance_wait_timeout:${diagnostic}`);
 }
 
-async function prepareLocalExtension(sourceRoot, temporaryProfile) {
+async function prepareLocalExtension(temporaryProfile) {
   const extensionRoot = path.join(temporaryProfile, 'extension-under-test');
-  const includedTopLevel = new Set([
-    'background.js',
-    'batch.html',
-    'batch.js',
-    'content.js',
-    'history.html',
-    'history.js',
-    'icons',
-    'illegal-site-filter.js',
-    'index.html',
-    'lib',
-    'manifest.json',
-    'options.html',
-    'options.js',
-    'payment.html',
-    'payment.js',
-    'styles',
-    'worker-pending.html'
-  ]);
-  await fs.cp(sourceRoot, extensionRoot, {
-    recursive: true,
-    filter(source) {
-      const relative = path.relative(sourceRoot, source);
-      if (relative === '') return true;
-      return includedTopLevel.has(relative.split(path.sep)[0]);
-    }
-  });
+  await buildExtensionPackage({ outputRoot: extensionRoot });
   const manifestPath = path.join(extensionRoot, 'manifest.json');
   const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
   manifest.host_permissions = [
@@ -985,10 +959,7 @@ async function main() {
 
     await context.close();
     context = null;
-    const localExtensionRoot = await prepareLocalExtension(
-      projectRoot,
-      temporaryProfile
-    );
+    const localExtensionRoot = await prepareLocalExtension(temporaryProfile);
     const localExtensionManifest = JSON.parse(await fs.readFile(
       path.join(localExtensionRoot, 'manifest.json'),
       'utf8'

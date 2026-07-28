@@ -5,7 +5,6 @@
   "version": "1.6.0",
   "description": "自动填充注册表单，并为当前网站生成推广文案。",
   "permissions": [
-    "activeTab",
     "tabs",
     "storage",
     "unlimitedStorage",
