@@ -4273,7 +4273,11 @@
     chrome.runtime.onMessage.addListener((message, _sender, _sendResponse) => {
       // 就绪检测：batch.js 发 PING 确认 content.js 已注入
       if (message && message.type === 'PING') {
-        _sendResponse({ ok: true });
+        _sendResponse({
+          ok: true,
+          documentUrl: location.href,
+          readyState: document.readyState
+        });
         return;
       }
       if (message && message.type === 'TOGGLE_PROMOTE_PANEL') {
