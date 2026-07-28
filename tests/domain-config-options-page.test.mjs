@@ -80,6 +80,6 @@ test('production composition routes options domain writes to the background repo
   assert.doesNotMatch(optionsSource, /createDomainConfigRepository\(/);
   assert.match(
     backgroundSource,
-    /installDomainConfigRepositoryMessageListener\([\s\S]*domainConfigRepository[\s\S]*ready:\s*domainConfigReady/
+    /installDomainConfigRepositoryMessageListener\([\s\S]*domainConfigRepository[\s\S]*ready:\s*ensureDomainConfigReady/
   );
 });

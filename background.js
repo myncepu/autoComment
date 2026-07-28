@@ -44,6 +44,13 @@ import {
   installBatchSubmitContextListener
 } from './lib/batch-submit-context-store.mjs';
 import { isDurableBatchConfirmation } from './lib/batch-scheduler.mjs';
+import {
+  createInitializationAwareBatchRuntimeController,
+  createRetryableReadiness
+} from './lib/retryable-readiness.mjs';
+import {
+  isBenignRuntimeDeliveryError
+} from './lib/chrome-runtime-delivery.mjs';
 
 installLlmMessageListener(chrome);
 installActionClickHandler(chrome);
@@ -51,6 +58,14 @@ const batchResultStore = createBatchResultStore(chrome.storage.local);
 const domainConfigRepository = createDomainConfigRepository(chrome.storage.local);
 const profileSecretRepository = createProfileSecretRepository(chrome.storage.local);
 const batchSecretVaultStore = createBatchSecretVaultStore(chrome.storage.local);
+const ensureDomainConfigReady = createRetryableReadiness(async () => {
+  await migratePasswordToLocal(chrome.storage);
+  return migrateLegacyDomainConfig({
+    storage: chrome.storage,
+    configRepository: domainConfigRepository,
+    secretRepository: profileSecretRepository
+  });
+});
 const batchRuntimeController = createBatchRuntimeController({
   storageArea: chrome.storage.local,
   sessionJournal: createBatchSessionJournal(chrome.storage.session),
@@ -58,7 +73,10 @@ const batchRuntimeController = createBatchRuntimeController({
   tabs: chrome.tabs,
   windows: chrome.windows,
   runtime: chrome.runtime,
-  loadDomainConfig: () => domainConfigRepository.load(),
+  loadDomainConfig: async () => {
+    await ensureDomainConfigReady();
+    return domainConfigRepository.load();
+  },
   loadRecentSuccessUrls: () => (
     commentHistoryService.listRecentSuccessfulTargetUrls({
       since: Date.now() - (24 * 60 * 60 * 1000)
@@ -68,6 +86,7 @@ const batchRuntimeController = createBatchRuntimeController({
     checkpoint,
     eligibleProfileIds
   }) => {
+    await ensureDomainConfigReady();
     const entry = await batchSecretVaultStore.buildPreparedEntry(
       checkpoint.batchId,
       eligibleProfileIds,
@@ -82,16 +101,21 @@ const batchRuntimeController = createBatchRuntimeController({
     batchSecretVaultStore.clear(batchId)
   )
 });
+const initializationAwareBatchRuntimeController =
+  createInitializationAwareBatchRuntimeController(
+    batchRuntimeController,
+    ensureDomainConfigReady
+  );
 const batchSubmitContextStore = createBatchSubmitContextStore(
   chrome.storage.local,
   { maxAgeMs: Number.POSITIVE_INFINITY }
 );
 installBatchSubmitContextListener(chrome, batchSubmitContextStore, {
   runProofBoundTaskHook: (...args) => (
-    batchRuntimeController.runProofBoundTaskHook(...args)
+    initializationAwareBatchRuntimeController.runProofBoundTaskHook(...args)
   ),
   runOwnerPageRecoveryHook: (...args) => (
-    batchRuntimeController.runOwnerPageRecoveryHook(...args)
+    initializationAwareBatchRuntimeController.runOwnerPageRecoveryHook(...args)
   )
 });
 
@@ -106,26 +130,18 @@ const cloudSyncService = createCloudSyncRuntime({
   fetchImpl: fetch
 });
 const secretAwareBatchRuntimeController = createBatchSecretAwareRuntimeController(
-  batchRuntimeController,
+  initializationAwareBatchRuntimeController,
   batchSecretVaultStore
 );
-const domainConfigReady = (async () => {
-  await migratePasswordToLocal(chrome.storage);
-  return migrateLegacyDomainConfig({
-    storage: chrome.storage,
-    configRepository: domainConfigRepository,
-    secretRepository: profileSecretRepository
-  });
-})();
 installDomainConfigRepositoryMessageListener(
   chrome,
   domainConfigRepository,
-  { ready: domainConfigReady }
+  { ready: ensureDomainConfigReady }
 );
 installProfileSecretMessageListener(
   chrome,
   profileSecretRepository,
-  { ready: domainConfigReady }
+  { ready: ensureDomainConfigReady }
 );
 
 const commentHistoryService = createCommentHistoryService({
@@ -135,35 +151,40 @@ const commentHistoryService = createCommentHistoryService({
 });
 
 installCommentHistoryMessageListener(chrome, commentHistoryService);
-void domainConfigReady.then(() => {
-  installBatchRuntimeController(chrome, secretAwareBatchRuntimeController);
-  installBatchDomainConfigListener(chrome, domainConfigRepository);
-  installBatchSecretVaultListener(chrome, {
-    vaultStore: batchSecretVaultStore,
-    checkpointReader: async () => {
-      const response = await batchRuntimeController.handleMessage({
-        type: 'BATCH_SESSION_GET'
-      });
-      return response.ok ? response.checkpoint : null;
-    }
+installBatchRuntimeController(chrome, secretAwareBatchRuntimeController);
+installBatchDomainConfigListener(chrome, domainConfigRepository, {
+  ready: ensureDomainConfigReady
+});
+installBatchSecretVaultListener(chrome, {
+  vaultStore: batchSecretVaultStore,
+  checkpointReader: async () => {
+    const response = await initializationAwareBatchRuntimeController.handleMessage({
+      type: 'BATCH_SESSION_GET'
+    });
+    return response.ok ? response.checkpoint : null;
+  }
+});
+installCloudSyncMessageListener(chrome, cloudSyncService);
+if (typeof chrome.storage?.onChanged?.addListener === 'function') {
+  void installCloudSyncBackground(chrome, cloudSyncService, {
+    migrateDomainConfig: ensureDomainConfigReady
   });
-  void batchRuntimeController.handleMessage({
-    type: 'BATCH_SESSION_GET'
-  }).then((response) => {
+}
+void ensureDomainConfigReady()
+  .then(() => (
+    initializationAwareBatchRuntimeController.handleMessage({
+      type: 'BATCH_SESSION_GET'
+    })
+  ))
+  .then((response) => {
     if (response.ok) {
       return batchSecretVaultStore.cleanupOrphans(response.checkpoint);
     }
     return undefined;
-  }).catch(() => {
+  })
+  .catch(() => {
     console.warn('[background] Batch secret cleanup deferred');
   });
-  installCloudSyncMessageListener(chrome, cloudSyncService);
-  if (typeof chrome.storage?.onChanged?.addListener === 'function') {
-    void installCloudSyncBackground(chrome, cloudSyncService);
-  }
-}).catch(() => {
-  console.warn('[background] Domain configuration migration deferred');
-});
 const commentHistoryRetention = installCommentHistoryRetention(
   chrome,
   createCloudRetentionService({
@@ -287,7 +308,7 @@ async function broadcastBatchConfirmed(
     terminalSideEffect
   } = {}
 ) {
-  const checkpoint = await batchRuntimeController.markTerminal(
+  const checkpoint = await initializationAwareBatchRuntimeController.markTerminal(
     message,
     sender,
     terminalSideEffect
@@ -356,7 +377,7 @@ async function broadcastBatchConfirmed(
   }).then(() => {
     console.log('[background] BATCH_CONFIRMED 发送成功');
   }).catch((e) => {
-    if (e.message && e.message.includes('message channel closed')) {
+    if (isBenignRuntimeDeliveryError(e)) {
       console.log('[background] BATCH_CONFIRMED 发送失败（接收方已关闭），忽略');
     } else {
       console.error('[background] BATCH_CONFIRMED 发送失败:', e);
@@ -470,11 +491,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message && message.type === 'BATCH_PERSIST_PENDING_RESULT') {
     (async () => {
       try {
-        const response = await batchRuntimeController.runProofBoundTaskHook(
-          message,
-          sender,
-          () => batchResultStore.save(message)
-        );
+        const response =
+          await initializationAwareBatchRuntimeController.runProofBoundTaskHook(
+            message,
+            sender,
+            () => batchResultStore.save(message)
+          );
         if (!response.ok) {
           sendResponse({
             ok: false,
