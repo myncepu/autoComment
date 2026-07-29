@@ -90,6 +90,9 @@ export function bootBatchConsoleFixture(
     },
     onExport() {
       void run(() => adapter.controller.export());
+    },
+    onExportDiagnostics() {
+      void run(() => adapter.controller.exportDiagnostics());
     }
   });
 

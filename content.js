@@ -946,6 +946,18 @@
     }
   }
 
+  function reportBatchDiagnostic(context, event, details = {}) {
+    const reporter = globalThis.AutoCommentBatchPhaseReporter;
+    if (!reporter?.reportDiagnostic) return Promise.resolve(null);
+    return reporter.reportDiagnostic(
+      chrome.runtime,
+      context,
+      event,
+      details
+    ).catch(() => null);
+  }
+  globalThis.AutoCommentReportBatchDiagnostic = reportBatchDiagnostic;
+
   function createHistoryUniqueId() {
     if (typeof globalThis.crypto?.randomUUID === 'function') {
       return globalThis.crypto.randomUUID();
@@ -1240,6 +1252,189 @@
     };
   }
 
+  function getNavigationResponseStatus() {
+    try {
+      const entry = performance.getEntriesByType('navigation')[0];
+      const status = Number(entry?.responseStatus);
+      return Number.isFinite(status) ? status : 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  function getSubmissionSignalText(selectors) {
+    for (const selector of selectors) {
+      let nodes = [];
+      try {
+        nodes = Array.from(document.querySelectorAll(selector));
+      } catch (_) {}
+      for (const node of nodes) {
+        const text = String(
+          node?.innerText || node?.textContent || ''
+        ).replace(/\s+/g, ' ').trim();
+        if (text) return text;
+      }
+    }
+    return '';
+  }
+
+  function normalizeSubmissionComparisonText(value) {
+    return String(value || '')
+      .replace(/\u00a0/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLocaleLowerCase();
+  }
+
+  function hasRenderedSubmittedComment(expectedCommentText) {
+    const expected = normalizeSubmissionComparisonText(expectedCommentText);
+    if (expected.length < 8) return false;
+    const selectors = [
+      '#comments [id^="comment-"] .comment-content',
+      '#comments [id^="comment-"] .comment-body',
+      '#comments [id^="comment-"]',
+      '.comment-list .comment-content',
+      '.comment-list .comment-body',
+      '.comment-list li.comment',
+      '.comments-area article.comment',
+      '.comments-area li.comment',
+      '.wpd-comment-text',
+      '[data-comment-id]'
+    ];
+    for (const selector of selectors) {
+      let nodes = [];
+      try {
+        nodes = Array.from(document.querySelectorAll(selector));
+      } catch (_) {}
+      for (const node of nodes) {
+        if (node?.closest?.('form')) continue;
+        const candidate = normalizeSubmissionComparisonText(
+          node?.innerText || node?.textContent
+        );
+        if (candidate && candidate.includes(expected)) return true;
+      }
+    }
+    return false;
+  }
+
+  function expectedSubmittedCommentText(ctx) {
+    const captured = String(ctx?.history?.commentText || '').trim();
+    if (captured) return captured;
+    const fallback = String(ctx?.aiContent || '').trim();
+    if (!fallback) return '';
+    try {
+      const template = document.createElement('template');
+      template.innerHTML = fallback;
+      return template.content.textContent || fallback;
+    } catch (_) {
+      return fallback.replace(/<[^>]*>/g, ' ');
+    }
+  }
+
+  function inspectSubmissionDocument({
+    allowClearedTextarea = false,
+    expectedCommentText = ''
+  } = {}) {
+    const challenge = detectManualRequiredChallenge();
+    if (challenge.found) {
+      return {
+        status: 'uncertain',
+        reason: challenge.message || MANUAL_REQUIRED_MESSAGE
+      };
+    }
+
+    const errorText = getSubmissionSignalText([
+      '#error-page .wp-die-message',
+      '.wp-die-message',
+      '#commentform [role="alert"]',
+      '#respond [role="alert"]',
+      '.comment-form [role="alert"]',
+      '.comment-error',
+      '.comment-form-error',
+      '[data-comment-error]',
+      '.wpcf7-not-valid-tip',
+      '.wpcf7-response-output.wpcf7-validation-errors',
+      '.wpcf7-response-output.wpcf7-mail-sent-ng'
+    ]);
+    if (errorText) {
+      return {
+        status: 'rejected',
+        reason: `目标页面返回提交错误：${errorText.slice(0, 240)}`
+      };
+    }
+
+    const successText = getSubmissionSignalText([
+      '#comment-awaiting-moderation',
+      '.comment-awaiting-moderation',
+      '.comment-success',
+      '.comment-submitted',
+      '[data-comment-status="success"]',
+      '#submit-result'
+    ]);
+    if (successText) {
+      return {
+        status: 'success',
+        reason: successText.slice(0, 240)
+      };
+    }
+
+    if (/^#comment(?:-\d+)?$/i.test(location.hash || '')) {
+      return { status: 'success', reason: '已导航到新评论锚点' };
+    }
+
+    if (hasRenderedSubmittedComment(expectedCommentText)) {
+      return {
+        status: 'success',
+        reason: '刷新后已在评论列表中找到本次评论'
+      };
+    }
+
+    const responseStatus = getNavigationResponseStatus();
+    if (responseStatus >= 400) {
+      return {
+        status: 'rejected',
+        reason: `提交页面返回 HTTP ${responseStatus}`
+      };
+    }
+
+    if (allowClearedTextarea) {
+      const textarea = findLikelyCommentTextarea({
+        allowGenericFallback: true
+      });
+      if (textarea && !String(textarea.value || '').trim()) {
+        return { status: 'success', reason: '请求完成且评论框已清空' };
+      }
+    }
+
+    return {
+      status: 'uncertain',
+      reason: '未检测到服务器确认或明确的提交成功状态'
+    };
+  }
+
+  function inspectRestoredSubmissionDocument(ctx) {
+    const inspected = inspectSubmissionDocument({
+      expectedCommentText: expectedSubmittedCommentText(ctx)
+    });
+    if (inspected.status !== 'uncertain') return inspected;
+
+    const pathname = String(location.pathname || '').toLowerCase();
+    if (
+      /(?:wp-comments-post\.php|comment-submit|comments?\/(?:post|submit|reply))/
+        .test(pathname)
+    ) {
+      return {
+        status: 'uncertain',
+        reason: '提交后停留在评论接收页面，未确认服务器已接受评论'
+      };
+    }
+
+    return {
+      status: 'uncertain',
+      reason: '页面已刷新，但未找到本次评论、审核提示或明确错误'
+    };
+  }
+
   async function confirmRestoredBatchSubmit(ctx) {
     if (!hasCompleteBatchResultIdentity(
       ctx?.batchId,
@@ -1250,6 +1445,20 @@
       '[AutoComment] 恢复提交后上下文，仅补发确认，不重新生成AI:',
       restoredContextDiagnostic(ctx)
     );
+    const outcome = inspectRestoredSubmissionDocument(ctx);
+    const confirmedSuccess = outcome.status === 'success';
+    const confirmedFailure = outcome.status === 'rejected';
+    globalThis.AutoCommentReportBatchDiagnostic?.(
+      ctx,
+      'submission_restored_confirmation',
+      {
+      confirmed: confirmedSuccess,
+      confirmationStatus: outcome.status
+      }
+    );
+    console.log('[AutoComment] 恢复页面提交结果:', {
+      status: outcome.status
+    });
     const message = {
       type: 'BATCH_HANDLE_CONFIRM',
       batchId: ctx.batchId,
@@ -1260,11 +1469,21 @@
       attempt: ctx.attempt,
       url: ctx.url || '',
       aiContent: ctx.aiContent || '',
-      result: ctx.result || 'success',
-      errorCode: ctx.errorCode || null,
-      errorMessage: ctx.errorMessage || null,
-      history: ctx.history,
-      historyUnavailableReason: ctx.history ? undefined : 'legacy_context'
+      result: confirmedSuccess
+        ? 'success'
+        : confirmedFailure
+          ? 'fail'
+          : 'manual_required',
+      errorCode: confirmedSuccess
+        ? null
+        : confirmedFailure
+          ? 'submission_rejected'
+          : 'submission_uncertain',
+      errorMessage: confirmedSuccess ? null : outcome.reason,
+      history: confirmedSuccess ? ctx.history : undefined,
+      historyUnavailableReason: confirmedSuccess && !ctx.history
+        ? 'legacy_context'
+        : undefined
     };
     await confirmBatchHistoryDurably(message);
   }
@@ -1440,7 +1659,15 @@
     console.log('[AutoComment] 开始滚动触发懒加载评论...');
 
     // 先滚动到页面底部触发可能的懒加载
-    window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+    const scrollingElement = document.scrollingElement
+      || document.documentElement
+      || document.body;
+    if (scrollingElement) {
+      window.scrollTo({
+        top: Number(scrollingElement.scrollHeight) || 0,
+        behavior: 'smooth'
+      });
+    }
     await new Promise(resolve => setTimeout(resolve, 2000));
 
     // 再向上滚动到评论区域
@@ -2736,6 +2963,14 @@
     });
 
     if (!button) {
+      globalThis.AutoCommentReportBatchDiagnostic?.(
+        _batchCtx,
+        'submit_control_unusable',
+        {
+        buttonClickable: false,
+        buttonDisabled: false
+        }
+      );
       console.log('[AutoComment] 未找到任何提交按钮');
       return { success: false, error: '未找到评论提交按钮' };
     }
@@ -2769,15 +3004,46 @@
     });
   }
 
+  const SUBMISSION_NAVIGATION_RESULTS = new Set([
+    'navigating',
+    'pagehide',
+    'pagehide-persisted'
+  ]);
+
+  function isSubmissionNavigationResult(result) {
+    return SUBMISSION_NAVIGATION_RESULTS.has(result);
+  }
+
+  function isSuccessfulSubmissionResponse(response) {
+    if (!response) return false;
+    if (typeof response.ok === 'boolean') return response.ok;
+    const status = Number(response.status);
+    return Number.isFinite(status) && status >= 200 && status < 400;
+  }
+
+  function getSubmissionRequestDetails(input, init) {
+    const url = (
+      typeof input === 'string'
+        ? input
+        : (input?.url || input)
+    );
+    const method = String(
+      init?.method || input?.method || 'GET'
+    ).toUpperCase();
+    return { url, method };
+  }
+
   /**
-   * 同时检测 AJAX 提交请求和页面导航，任一发生即 resolve
-   * 用于：点击提交按钮后，等待表单提交（不管页面是否跳转）
-   * @param {number} timeoutMs - 超时毫秒数
-   * @returns {Promise<string>} 'ajax' | 'navigating' | 'pagehide' | 'timeout'
+   * 等待可验证的提交结果。submit 事件和请求开始都不能代表服务器已接受评论：
+   * - 原生表单只报告页面开始导航，交给新文档恢复逻辑确认；
+   * - fetch/XHR 必须等响应完成；
+   * - PerformanceObserver 用于观察页面主世界发起、内容脚本无法直接包装的请求。
    */
-  function waitForSubmitOrNavigate(timeoutMs = 10000) {
+  function waitForSubmitOrNavigate(timeoutMs = 10000, form = null) {
     return new Promise((resolve) => {
       let resolved = false;
+      let performanceObserver = null;
+      const expectedAction = form?.action || '';
       function finish(result) {
         if (resolved) return;
         resolved = true;
@@ -2786,97 +3052,113 @@
       }
       function cleanup() {
         clearTimeout(timer);
-        document.removeEventListener('submit', onSubmit, true);
         if (window.XMLHttpRequest) {
           window.XMLHttpRequest.prototype.open = originalXHROpen;
+          window.XMLHttpRequest.prototype.send = originalXHRSend;
         }
         if (window.fetch) {
           window.fetch = originalFetch;
+        }
+        if (performanceObserver) {
+          performanceObserver.disconnect();
         }
         window.removeEventListener('beforeunload', onBeforeUnload);
         window.removeEventListener('pagehide', onPageHide);
       }
-      function onSubmit(e) { finish('ajax'); }
       function onBeforeUnload() { finish('navigating'); }
-      function onPageHide(e) { finish(e.persisted ? 'pagehide' : 'pagehide'); }
+      function onPageHide(e) {
+        finish(e.persisted ? 'pagehide-persisted' : 'pagehide');
+      }
 
-      // 拦截 fetch
+      // 内容脚本自身发起的 fetch：必须等待响应或异常。
       const originalFetch = window.fetch;
       window.fetch = function(input, init) {
-        if (!resolved && isFormSubmitUrl(input)) finish('ajax');
-        return originalFetch.apply(this, arguments);
+        const details = getSubmissionRequestDetails(input, init);
+        let request;
+        try {
+          request = originalFetch.apply(this, arguments);
+        } catch (error) {
+          if (
+            details.method !== 'GET'
+            && isFormSubmitUrl(details.url, expectedAction)
+          ) {
+            finish('ajax-failure');
+          }
+          throw error;
+        }
+        if (
+          !resolved
+          && details.method !== 'GET'
+          && isFormSubmitUrl(details.url, expectedAction)
+        ) {
+          Promise.resolve(request).then(
+            (response) => finish(
+              isSuccessfulSubmissionResponse(response)
+                ? 'ajax-success'
+                : 'ajax-failure'
+            ),
+            () => finish('ajax-failure')
+          );
+        }
+        return request;
       };
 
-      // 拦截 XHR
+      // 内容脚本自身发起的 XHR：open 只记录请求，loadend 后才判定。
       const originalXHROpen = window.XMLHttpRequest.prototype.open;
+      const originalXHRSend = window.XMLHttpRequest.prototype.send;
       window.XMLHttpRequest.prototype.open = function(method, url, ...rest) {
-        if (!resolved && isFormSubmitUrl(url)) finish('ajax');
+        this.__autoCommentSubmissionRequest = {
+          method: String(method || 'GET').toUpperCase(),
+          url
+        };
         return originalXHROpen.call(this, method, url, ...rest);
       };
+      window.XMLHttpRequest.prototype.send = function(...args) {
+        const details = this.__autoCommentSubmissionRequest;
+        if (
+          !resolved
+          && details?.method !== 'GET'
+          && isFormSubmitUrl(details?.url, expectedAction)
+        ) {
+          const onLoadEnd = () => {
+            this.removeEventListener('loadend', onLoadEnd);
+            finish(
+              Number(this.status) >= 200 && Number(this.status) < 400
+                ? 'ajax-success'
+                : 'ajax-failure'
+            );
+          };
+          this.addEventListener('loadend', onLoadEnd);
+        }
+        return originalXHRSend.apply(this, args);
+      };
 
-      document.addEventListener('submit', onSubmit, true);
       window.addEventListener('beforeunload', onBeforeUnload);
       window.addEventListener('pagehide', onPageHide);
 
+      // 页面脚本运行在主世界，不能被内容脚本的 fetch/XHR 包装直接观察。
+      // Resource Timing 条目只会在请求完成后产生，因此不会把“开始发送”误判为成功。
+      if (typeof PerformanceObserver === 'function') {
+        try {
+          performanceObserver = new PerformanceObserver((list) => {
+            for (const entry of list.getEntries()) {
+              const initiator = String(entry.initiatorType || '').toLowerCase();
+              if (
+                ['fetch', 'xmlhttprequest'].includes(initiator)
+                && isFormSubmitUrl(entry.name, expectedAction)
+              ) {
+                finish('ajax-complete');
+                break;
+              }
+            }
+          });
+          performanceObserver.observe({ type: 'resource', buffered: false });
+        } catch (_) {
+          performanceObserver = null;
+        }
+      }
+
       const timer = setTimeout(() => finish('timeout'), timeoutMs);
-    });
-  }
-
-  /**
-   * 拦截表单提交请求（拦截 fetch/XHR），用于检测 AJAX 类型的评论提交
-   * 返回一个 Promise，resolve(true) 表示检测到提交请求发出，resolve(false) 表示超时
-   * @param {number} timeoutMs - 超时毫秒数
-   */
-  function setupAjaxSubmitDetection(timeoutMs = 10000) {
-    return new Promise((resolve) => {
-      let detected = false;
-      const timer = setTimeout(() => {
-        cleanup();
-        resolve(false);
-      }, timeoutMs);
-
-      function cleanup() {
-        clearTimeout(timer);
-        document.removeEventListener('submit', onSubmit, true);
-        if (window.XMLHttpRequest) {
-          window.XMLHttpRequest.prototype.open = originalXHROpen;
-        }
-        if (window.fetch) {
-          window.fetch = originalFetch;
-        }
-      }
-
-      function onSubmit(e) {
-        if (detected) return;
-        detected = true;
-        cleanup();
-        resolve(true);
-      }
-
-      // 拦截原生 fetch
-      const originalFetch = window.fetch;
-      window.fetch = function(input, init) {
-        if (!detected && isFormSubmitUrl(input)) {
-          detected = true;
-          cleanup();
-          resolve(true);
-        }
-        return originalFetch.apply(this, arguments);
-      };
-
-      // 拦截 XMLHttpRequest
-      const originalXHROpen = window.XMLHttpRequest.prototype.open;
-      window.XMLHttpRequest.prototype.open = function(method, url, ...rest) {
-        if (!detected && isFormSubmitUrl(url)) {
-          detected = true;
-          cleanup();
-          resolve(true);
-        }
-        return originalXHROpen.call(this, method, url, ...rest);
-      };
-
-      // 监听表单 submit 事件（catch 所有未拦截到的表单）
-      document.addEventListener('submit', onSubmit, true);
     });
   }
 
@@ -2884,19 +3166,99 @@
    * 判断 URL 是否可能是评论表单提交地址
    * 排除静态资源和图片，只拦截看起来像 API/表单提交的 URL
    */
-  function isFormSubmitUrl(url) {
+  function isFormSubmitUrl(url, expectedAction = '') {
     if (!url) return false;
     const s = String(url).toLowerCase();
     // 排除静态资源和常见非提交地址
     const excludePatterns = [
       /\.(js|css|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|eot|webp|mp4|webm|ogg|mp3|wav|zip|tar|gz)$/,
       /google-analytics|googletagmanager|doubleclick|facebook\.com\/tr|analytics|tracking|pixel/i,
-      /\/wp-admin\/admin-ajax/,
     ];
     for (const p of excludePatterns) {
       if (p.test(s)) return false;
     }
-    return true;
+    try {
+      const candidate = new URL(String(url), location.href);
+      if (expectedAction) {
+        const expected = new URL(String(expectedAction), location.href);
+        if (
+          candidate.origin === expected.origin
+          && candidate.pathname === expected.pathname
+        ) {
+          return true;
+        }
+      }
+      return /(?:comment|reply|review|discussion|feedback|submission|admin-ajax)/
+        .test(candidate.pathname.toLowerCase());
+    } catch (_) {
+      return /(?:comment|reply|review|discussion|feedback|submission|admin-ajax)/
+        .test(s);
+    }
+  }
+
+  function requestSubmissionVerificationReload() {
+    try {
+      if (typeof window.location?.reload !== 'function') return false;
+      window.location.reload();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async function confirmDispatchedSubmissionResult(submitResult) {
+    if (isSubmissionNavigationResult(submitResult)) {
+      return {
+        confirmed: false,
+        navigationPending: true,
+        reason: '原生表单导航已开始，等待新页面确认',
+        status: 'verification-navigation'
+      };
+    }
+    if (submitResult === 'ajax-failure') {
+      return {
+        confirmed: false,
+        navigationPending: false,
+        reason: '评论提交请求失败或服务器返回错误状态',
+        status: 'rejected'
+      };
+    }
+    if (!['ajax-success', 'ajax-complete'].includes(submitResult)) {
+      return {
+        confirmed: false,
+        navigationPending: false,
+        reason: '提交超时，未收到服务器响应'
+      };
+    }
+
+    // 给页面的 AJAX 完成回调留出更新错误提示的时间，然后刷新并在新文档中
+    // 通过评论文本、审核提示或明确错误完成三态确认。
+    await new Promise(resolve => setTimeout(resolve, 700));
+    const outcome = inspectSubmissionDocument({
+      allowClearedTextarea: false
+    });
+    if (outcome.status === 'rejected') {
+      return {
+        confirmed: false,
+        navigationPending: false,
+        reason: outcome.reason,
+        status: 'rejected'
+      };
+    }
+    if (requestSubmissionVerificationReload()) {
+      return {
+        confirmed: false,
+        navigationPending: true,
+        reason: '提交请求已完成，正在刷新页面验证评论状态',
+        status: 'verification-reload'
+      };
+    }
+    return {
+      confirmed: outcome.status === 'success',
+      navigationPending: false,
+      reason: outcome.reason,
+      status: outcome.status
+    };
   }
 
   // 执行点击操作
@@ -2919,19 +3281,39 @@
       });
     }
 
-    if (!isButtonClickable(button)) {
-      console.log('[AutoComment] 提交按钮不可见或被禁用');
-      return { success: false, error: '提交按钮不可见或被禁用' };
-    }
+    const buttonClickable = isButtonClickable(button);
+    const formEl = button.form || button.closest('form');
+    globalThis.AutoCommentReportBatchDiagnostic?.(
+      _batchCtx,
+      'submit_control_detected',
+      {
+      submitTag: String(button.tagName || '').toLowerCase(),
+      submitType: String(button.type || '').toLowerCase() || 'unknown',
+      formMethod: String(
+        button.form?.method ||
+        button.closest('form')?.method ||
+        'get'
+      ).toLowerCase(),
+      buttonDisabled: Boolean(
+        button.disabled ||
+        button.getAttribute('aria-disabled') === 'true'
+      ),
+      buttonClickable,
+      filled: Boolean(commentTextarea?.value),
+      contentLength: commentTextarea?.value?.length || 0
+      }
+    );
 
-    // 必须在触发点击前安装监听。部分站点会同步派发 submit，点击后再监听会漏报成功。
-    const submitDetection = waitForSubmitOrNavigate(10000);
-
-    function tryRequestSubmit(formEl, submitter) {
-      if (!formEl) return false;
-      if (typeof formEl.requestSubmit === 'function') {
+    async function tryRequestSubmit(targetForm, submitter) {
+      if (!targetForm) return false;
+      if (typeof targetForm.requestSubmit === 'function') {
         try {
-          formEl.requestSubmit(submitter);
+          await globalThis.AutoCommentReportBatchDiagnostic?.(
+            _batchCtx,
+            'submission_strategy_selected',
+            { strategy: 'request-submit' }
+          );
+          targetForm.requestSubmit(submitter);
           return true;
         } catch (err) {
           console.log('[AutoComment] requestSubmit 失败', {
@@ -2942,11 +3324,47 @@
       return false;
     }
 
+    if (!buttonClickable) {
+      globalThis.AutoCommentReportBatchDiagnostic?.(
+        _batchCtx,
+        'submit_control_unusable',
+        {
+        buttonDisabled: Boolean(
+          button.disabled ||
+          button.getAttribute('aria-disabled') === 'true'
+        ),
+        buttonClickable: false
+        }
+      );
+      // 后台标签页中，按钮可能因为没有可见布局而被判断为不可点击。
+      // requestSubmit 不依赖屏幕坐标，并且仍会执行原生表单校验。
+      if (formEl && typeof formEl.requestSubmit === 'function') {
+        const submitDetection = waitForSubmitOrNavigate(10000, formEl);
+        if (await tryRequestSubmit(formEl, button)) {
+          recordFormSubmit();
+          const submitResult = await submitDetection;
+          return {
+            success: true,
+            button,
+            submitResult,
+            strategy: 'request-submit'
+          };
+        }
+      }
+      console.log('[AutoComment] 提交按钮不可见或被禁用，表单降级提交失败');
+      return { success: false, error: '提交按钮不可见或被禁用' };
+    }
+
+    // 必须在触发点击前安装监听。部分站点会同步派发 submit，点击后再监听会漏报成功。
+    const submitDetection = waitForSubmitOrNavigate(
+      10000,
+      formEl
+    );
+
     try {
-      // 长页面若用 smooth，滚动未完成时 getBoundingClientRect 会算错坐标，合成点击落空
+      // worker 标签页以 active:false 打开。后台页的 requestAnimationFrame 可能永久暂停，
+      // 因此不能等待动画帧；auto 滚动加 getBoundingClientRect 会同步刷新布局。
       button.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'nearest' });
-      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-      await new Promise(resolve => setTimeout(resolve, 80));
 
       console.log('[AutoComment] 尝试点击提交按钮...');
 
@@ -2966,6 +3384,11 @@
       };
 
       try {
+        await globalThis.AutoCommentReportBatchDiagnostic?.(
+          _batchCtx,
+          'submission_strategy_selected',
+          { strategy: 'synthetic-pointer' }
+        );
         if (typeof PointerEvent !== 'undefined') {
           button.dispatchEvent(new PointerEvent('pointerdown', pointerOpts));
           await new Promise(resolve => setTimeout(resolve, 20));
@@ -3007,39 +3430,68 @@
         console.log('[AutoComment] 提交按钮点击成功 (pointer/mousedown→mouseup→click)');
         const submitResult = await submitDetection;
         console.log('[AutoComment] waitForSubmitOrNavigate 结果:', submitResult);
-        return { success: true, button: button, submitResult: submitResult };
+        return {
+          success: true,
+          button,
+          submitResult,
+          strategy: 'synthetic-pointer'
+        };
       } catch (e) {
         console.log('[AutoComment] 合成事件失败，尝试 button.click()', {
           errorCode: 'synthetic_click_failed'
         });
         try {
+          await globalThis.AutoCommentReportBatchDiagnostic?.(
+            _batchCtx,
+            'submission_strategy_selected',
+            { strategy: 'button-click' }
+          );
           button.click();
           recordFormSubmit();
           console.log('[AutoComment] button.click() 点击成功');
           const submitResult = await submitDetection;
           console.log('[AutoComment] waitForSubmitOrNavigate 结果:', submitResult);
-          return { success: true, button: button, submitResult: submitResult };
+          return {
+            success: true,
+            button,
+            submitResult,
+            strategy: 'button-click'
+          };
         } catch (e2) {
           console.log('[AutoComment] button.click() 也失败', {
             errorCode: 'button_click_failed'
           });
 
-          const formEl = button.form || button.closest('form');
-          if (tryRequestSubmit(formEl, button)) {
+          if (await tryRequestSubmit(formEl, button)) {
             recordFormSubmit();
             console.log('[AutoComment] form.requestSubmit(submitter) 成功');
             const submitResult = await submitDetection;
             console.log('[AutoComment] waitForSubmitOrNavigate 结果:', submitResult);
-            return { success: true, button: button, submitResult: submitResult };
+            return {
+              success: true,
+              button,
+              submitResult,
+              strategy: 'request-submit'
+            };
           }
           try {
             if (formEl) {
+              await globalThis.AutoCommentReportBatchDiagnostic?.(
+                _batchCtx,
+                'submission_strategy_selected',
+                { strategy: 'form-submit' }
+              );
               console.log('[AutoComment] 降级 form.submit()（无 submit 事件）');
               formEl.submit();
               recordFormSubmit();
               const submitResult = await submitDetection;
               console.log('[AutoComment] waitForSubmitOrNavigate 结果:', submitResult);
-              return { success: true, button: button, submitResult: submitResult };
+              return {
+                success: true,
+                button,
+                submitResult,
+                strategy: 'form-submit'
+              };
             }
           } catch (e3) {
             console.log('[AutoComment] 表单提交也失败', {
@@ -3056,6 +3508,11 @@
       });
 
       try {
+        await globalThis.AutoCommentReportBatchDiagnostic?.(
+          _batchCtx,
+          'submission_strategy_selected',
+          { strategy: 'dispatch-click' }
+        );
         const event = new MouseEvent('click', {
           view: window,
           bubbles: true,
@@ -3066,28 +3523,47 @@
         console.log('[AutoComment] 使用 dispatchEvent 点击成功');
         const submitResult = await submitDetection;
         console.log('[AutoComment] waitForSubmitOrNavigate 结果:', submitResult);
-        return { success: true, button: button, submitResult: submitResult };
+        return {
+          success: true,
+          button,
+          submitResult,
+          strategy: 'dispatch-click'
+        };
       } catch (e2) {
         console.log('[AutoComment] dispatchEvent 点击也失败', {
           errorCode: 'dispatch_click_failed'
         });
 
-        const formEl = button.form || button.closest('form');
-        if (tryRequestSubmit(formEl, button)) {
+        if (await tryRequestSubmit(formEl, button)) {
           recordFormSubmit();
           console.log('[AutoComment] form.requestSubmit(submitter) 成功');
           const submitResult = await submitDetection;
           console.log('[AutoComment] waitForSubmitOrNavigate 结果:', submitResult);
-          return { success: true, button: button, submitResult: submitResult };
+          return {
+            success: true,
+            button,
+            submitResult,
+            strategy: 'request-submit'
+          };
         }
         try {
           if (formEl) {
+            await globalThis.AutoCommentReportBatchDiagnostic?.(
+              _batchCtx,
+              'submission_strategy_selected',
+              { strategy: 'form-submit' }
+            );
             console.log('[AutoComment] 尝试 form.submit()');
             formEl.submit();
             recordFormSubmit();
             const submitResult = await submitDetection;
             console.log('[AutoComment] waitForSubmitOrNavigate 结果:', submitResult);
-            return { success: true, button: button, submitResult: submitResult };
+            return {
+              success: true,
+              button,
+              submitResult,
+              strategy: 'form-submit'
+            };
           }
         } catch (e3) {
           console.log('[AutoComment] 表单提交失败', {
@@ -3838,10 +4314,50 @@
           }
           const result = await clickCommentSubmitButton();
           if (result.success) {
+            const submissionConfirmation =
+              await confirmDispatchedSubmissionResult(
+                result.submitResult || 'timeout'
+              );
+            if (submissionConfirmation.navigationPending) {
+              setStatus('页面正在跳转，等待服务器确认评论…', '#9ca3af');
+              return;
+            }
+            if (!submissionConfirmation.confirmed) {
+              const message = submissionConfirmation.reason
+                || '未能确认服务器已接受评论';
+              if (_batchCtx) {
+                await writePendingResult(
+                  _batchCtx.batchId,
+                  _batchCtx.urlIndex,
+                  _batchCtx.attempt,
+                  _batchCtx.url,
+                  'manual_required',
+                  null,
+                  message,
+                  'submission_uncertain'
+                );
+                await confirmBatchHistoryDurably({
+                  type: 'BATCH_HANDLE_CONFIRM',
+                  batchId: _batchCtx.batchId,
+                  taskId: _batchCtx.taskId,
+                  urlIndex: _batchCtx.urlIndex,
+                  profileId: _batchCtx.profileId,
+                  promotionSiteId: _batchCtx.promotionSiteId,
+                  attempt: _batchCtx.attempt,
+                  url: _batchCtx.url || '',
+                  aiContent: '',
+                  result: 'manual_required',
+                  errorCode: 'submission_uncertain',
+                  errorMessage: message
+                });
+              }
+              setStatus(`提交结果待确认：${message}`, '#f59e0b');
+              return;
+            }
             if (_batchCtx) {
               await reportBatchPhase(_batchCtx, 'confirming');
             }
-            setStatus('评论已自动提交！', '#22c55e');
+            setStatus('服务器已确认评论提交！', '#22c55e');
             // 批处理模式：提交成功后上报结果到 batch.html
             if (_batchCtx) {
               await reportSuccessToBatch(text, history);
@@ -4393,6 +4909,14 @@
     }
     runningBatchTaskKey = taskKey;
     let submissionDispatched = false;
+    let diagnosticPhase = 'loading';
+    globalThis.AutoCommentReportBatchDiagnostic?.(
+      context,
+      'task_started',
+      {
+      phase: diagnosticPhase
+      }
+    );
     try {
       await reportBatchPhase(context, 'loading');
       console.log('[content] 1/6 等待页面加载...');
@@ -4438,6 +4962,7 @@
         return;
       }
       console.log('[content] 3/6 确认评论表单存在...');
+      diagnosticPhase = 'detecting';
       await reportBatchPhase(context, 'detecting');
       // 先尝试触发评论表单展开（如果表单是隐藏的需要点击回复链接）
       let form = findCommentForm();
@@ -4484,6 +5009,15 @@
         form = manualTargets.form;
         ta = manualTargets.textarea;
       }
+      globalThis.AutoCommentReportBatchDiagnostic?.(
+        context,
+        'form_detected',
+        {
+        phase: diagnosticPhase,
+        hasForm: Boolean(form),
+        hasTextarea: Boolean(ta)
+        }
+      );
       // 关键：确认找到评论框后再生成 AI 文案，避免无用请求。
       if (!form || !ta) {
         console.log('[content] 未找到评论框，跳过AI生成，结束任务');
@@ -4501,15 +5035,28 @@
         return;
       }
       let aiContent = await getCachedPromotionCopy() || lastGeneratedPromotionCopy;
+      let generationSource = 'cache';
       if (aiContent) {
         console.log('[content] 4/6 复用已有推广文案，跳过AI生成，长度:', aiContent.length);
       } else {
         console.log('[content] 4/6 生成AI文案...');
+        diagnosticPhase = 'generating';
+        generationSource = 'llm';
         await reportBatchPhase(context, 'generating');
         aiContent = await generatePromotionCopyWithLlm();
       }
+      globalThis.AutoCommentReportBatchDiagnostic?.(
+        context,
+        'comment_generated',
+        {
+        phase: diagnosticPhase,
+        generationSource,
+        contentLength: aiContent?.length || 0
+        }
+      );
       console.log('[content] AI文案生成完成，长度:', aiContent ? aiContent.length : 0);
       console.log('[content] 5/6 填充表单字段...');
+      diagnosticPhase = 'filling';
       await reportBatchPhase(context, 'filling');
       const manualFillResult = tryFillCommentTextareaWithPromotion(aiContent);
       console.log('[content] BATCH_HANDLE 手动按钮同款填充结果:', manualFillResult);
@@ -4539,6 +5086,21 @@
         throw new Error('表单字段缺失: ' + (fillResult.missingFields || []).join(', '));
       }
       const refillResult = await ensureAllCommentFormFieldsFilled(aiContent);
+      globalThis.AutoCommentReportBatchDiagnostic?.(
+        context,
+        'form_filled',
+        {
+        phase: diagnosticPhase,
+        success: refillResult.success === true,
+        filled: Boolean(
+          findLikelyCommentTextarea({ allowGenericFallback: true })?.value
+        ),
+        contentLength: aiContent?.length || 0,
+        missingFieldCount: Array.isArray(refillResult.missingFields)
+          ? refillResult.missingFields.length
+          : 0
+        }
+      );
       if (!refillResult.success) {
         throw new Error('表单填充失败: ' + (refillResult.missingFields || []).join(', '));
       }
@@ -4587,6 +5149,7 @@
         history
       );
       try {
+        diagnosticPhase = 'submitting';
         await reportBatchPhase(context, 'submitting');
       } catch (error) {
         await clearBatchSubmitContext({ batchId, urlIndex, attempt });
@@ -4595,34 +5158,71 @@
       await markBatchTaskSubmitting(batchId, urlIndex, attempt);
       console.log('[content] pending结果写入完成');
       console.log('[content] 7/7 点击提交按钮...');
+      globalThis.AutoCommentReportBatchDiagnostic?.(
+        context,
+        'submission_dispatch_started',
+        {
+        phase: diagnosticPhase
+        }
+      );
       const clickResult = await clickCommentSubmitButton();
+      globalThis.AutoCommentReportBatchDiagnostic?.(
+        context,
+        'submission_dispatch_result',
+        {
+        phase: diagnosticPhase,
+        success: clickResult.success === true,
+        strategy: clickResult.strategy || 'none',
+        dispatchResult: clickResult.submitResult || 'not-dispatched'
+        }
+      );
       console.log('[content] 点击结果:', clickResult);
       if (!clickResult.success) {
         await clearBatchSubmitContext({ batchId, urlIndex, attempt });
         throw new Error(clickResult.error || '提交按钮点击失败');
       }
       submissionDispatched = true;
+      diagnosticPhase = 'confirming';
       await reportBatchPhase(context, 'confirming');
 
-      // 检测表单是否成功提交：页面跳转、AJAX 请求、或表单被清空任一发生即确认成功
+      // submit 事件或请求开始都不能确认成功。AJAX 必须等待响应完成并验证页面状态；
+      // 原生表单由导航后的新文档恢复 submit context，再确认或标记需人工检查。
       const submitResult = clickResult.submitResult || 'timeout';
-      if (submitResult === 'timeout') {
-        // 超时后检查表单是否被清空（评论框内容消失表示提交成功）
-        await new Promise(resolve => setTimeout(resolve, 3000));
-        const ta = findLikelyCommentTextarea({ allowGenericFallback: true });
-        const formCleared = !ta || !ta.value.trim();
-        console.log('[content] 超时检测表单状态:', {
-          formCleared,
-          textareaFound: Boolean(ta),
-          textareaLength: ta?.value?.length || 0
-        });
-        if (!formCleared) {
-          throw new Error('提交超时，表单未被清空');
+      const submissionConfirmation =
+        await confirmDispatchedSubmissionResult(submitResult);
+      globalThis.AutoCommentReportBatchDiagnostic?.(
+        context,
+        'submission_confirmation',
+        {
+        phase: diagnosticPhase,
+        confirmed: submissionConfirmation.confirmed === true,
+        navigationPending: submissionConfirmation.navigationPending === true,
+        confirmationStatus: submissionConfirmation.status || (
+          submissionConfirmation.navigationPending ? 'navigation-pending' : 'uncertain'
+        ),
+        dispatchResult: submitResult
         }
-        console.log('[content] 表单已清空，确认为 AJAX 提交成功');
+      );
+      console.log('[content] 服务器提交确认结果:', {
+        confirmed: submissionConfirmation.confirmed,
+        navigationPending: submissionConfirmation.navigationPending,
+        status: submissionConfirmation.status || null
+      });
+      if (submissionConfirmation.navigationPending) {
+        console.log(
+          '[content] 原生表单正在导航；保留提交上下文并由新页面完成确认'
+        );
+        return;
+      }
+      if (!submissionConfirmation.confirmed) {
+        const error = new Error(submissionConfirmation.reason);
+        error.code = submissionConfirmation.status === 'rejected'
+          ? 'submission_rejected'
+          : 'submission_uncertain';
+        throw error;
       }
 
-      // 页面点击成功后，通知 background 再次落盘（防止刷新导致 context 丢失）
+      // AJAX 已获得服务器响应和页面成功状态后，才通知 background 关闭标签页。
       // 这是关键：即使页面刷新，background 仍持有 batchId，能正确上报
       // 同时等待 background 响应后再返回，使 batch.js 能收到确认再关闭标签页
       console.log('[content] 通知 background (BATCH_HANDLE_CONFIRM)...');
@@ -4639,6 +5239,21 @@
       console.log('[content] background 响应:', confirmation.acknowledgement);
       console.log('[content] handleBatchTask 完成 <<<', { batchId, urlIndex });
     } catch (err) {
+      globalThis.AutoCommentReportBatchDiagnostic?.(
+        context,
+        'task_error',
+        {
+        phase: diagnosticPhase,
+        errorCode: typeof err?.code === 'string'
+          ? err.code
+          : (
+              err?.message === '__NO_COMMENT_BOX__'
+                ? 'no_comment_box'
+                : 'batch_task_failed'
+            ),
+        submissionDispatched
+        }
+      );
       console.log('[content] handleBatchTask 转入队列错误处理', {
         errorCode: typeof err?.code === 'string'
           ? err.code
@@ -4685,9 +5300,69 @@
         return;
       }
       
-      const errorCode = submissionDispatched
-        ? 'submission_uncertain'
-        : 'task_failed';
+      const submissionRejected =
+        submissionDispatched && err?.code === 'submission_rejected';
+      const errorCode = submissionRejected
+        ? 'submission_rejected'
+        : submissionDispatched
+          ? 'submission_uncertain'
+          : 'task_failed';
+      if (submissionRejected) {
+        const errorMessage = err.message || String(err);
+        await writePendingResult(
+          batchId,
+          urlIndex,
+          attempt,
+          url,
+          'fail',
+          null,
+          errorMessage,
+          errorCode
+        );
+        await confirmBatchHistoryDurably({
+          type: 'BATCH_HANDLE_CONFIRM',
+          batchId,
+          taskId: context.taskId,
+          urlIndex,
+          profileId: context.profileId,
+          promotionSiteId: context.promotionSiteId,
+          attempt,
+          url: url || '',
+          aiContent: '',
+          result: 'fail',
+          errorCode,
+          errorMessage
+        });
+        return;
+      }
+      if (submissionDispatched) {
+        const errorMessage = err.message || String(err);
+        await writePendingResult(
+          batchId,
+          urlIndex,
+          attempt,
+          url,
+          'manual_required',
+          null,
+          errorMessage,
+          errorCode
+        );
+        await confirmBatchHistoryDurably({
+          type: 'BATCH_HANDLE_CONFIRM',
+          batchId,
+          taskId: context.taskId,
+          urlIndex,
+          profileId: context.profileId,
+          promotionSiteId: context.promotionSiteId,
+          attempt,
+          url: url || '',
+          aiContent: '',
+          result: 'manual_required',
+          errorCode,
+          errorMessage
+        });
+        return;
+      }
       await writePendingResult(
         batchId,
         urlIndex,

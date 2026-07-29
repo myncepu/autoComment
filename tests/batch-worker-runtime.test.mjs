@@ -153,6 +153,192 @@ test('confirmation seals and closes its tab before replenishing one worker slot'
   });
 });
 
+test('authoritative confirmation checkpoint closes the terminal tab without a duplicate terminal transition', async () => {
+  const harness = createWorkerHarness({ concurrency: 1, taskCount: 2 });
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  await runtime.start(harness.checkpoint);
+  const authoritative = structuredClone(harness.checkpoint);
+  authoritative.updatedAt = 1001;
+  Object.assign(authoritative.tasks['0'], {
+    state: 'terminal',
+    phase: null,
+    tabId: null,
+    windowId: null,
+    startedAt: null,
+    updatedAt: 1001
+  });
+  authoritative.results.push({
+    originalIndex: 0,
+    attempt: 1,
+    result: 'success',
+    aiContent: 'saved',
+    errorCode: null,
+    errorMessage: null,
+    timestamp: 1001
+  });
+  harness.calls.length = 0;
+
+  assert.equal(await runtime.handleConfirmation({
+    type: 'BATCH_CONFIRMED',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    sourceTabId: 100,
+    result: 'success',
+    aiContent: 'saved',
+    historySaveStatus: 'saved',
+    checkpoint: authoritative
+  }), true);
+
+  assert.deepEqual(harness.calls, [
+    ['close', 100],
+    ['runtime', 'BATCH_TASK_ACTIVE', 1, 1],
+    ['handle', 1, 1]
+  ]);
+  assert.equal(harness.terminalPayloads.length, 0);
+});
+
+test('one authoritative confirmation reconciles every terminal activity and refills all freed slots', async () => {
+  const harness = createWorkerHarness({ concurrency: 3, taskCount: 6 });
+  const baseRuntimeRequest = harness.dependencies.runtimeRequest;
+  let authoritativeState = null;
+  harness.dependencies.runtimeRequest = async (type, payload) => {
+    if (!authoritativeState) return baseRuntimeRequest(type, payload);
+    harness.calls.push(['runtime', type, payload.urlIndex, payload.attempt]);
+    if (type === 'BATCH_TASK_ACTIVE') {
+      Object.assign(authoritativeState.tasks[String(payload.urlIndex)], {
+        state: 'active',
+        tabId: payload.tabId,
+        windowId: payload.windowId,
+        startedAt: payload.startedAt
+      });
+    }
+    return { ok: true, checkpoint: authoritativeState };
+  };
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  await runtime.start(harness.checkpoint);
+  authoritativeState = structuredClone(harness.checkpoint);
+  authoritativeState.updatedAt = 1001;
+  for (const urlIndex of [0, 1, 2]) {
+    Object.assign(authoritativeState.tasks[String(urlIndex)], {
+      state: 'terminal',
+      phase: null,
+      tabId: null,
+      windowId: null,
+      startedAt: null,
+      updatedAt: 1001
+    });
+    authoritativeState.results.push({
+      originalIndex: urlIndex,
+      attempt: 1,
+      result: 'success',
+      aiContent: `saved-${urlIndex}`,
+      errorCode: null,
+      errorMessage: null,
+      timestamp: 1001
+    });
+  }
+  harness.calls.length = 0;
+
+  assert.equal(await runtime.handleConfirmation({
+    type: 'BATCH_CONFIRMED',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    sourceTabId: 100,
+    result: 'success',
+    aiContent: 'saved-0',
+    historySaveStatus: 'saved',
+    checkpoint: authoritativeState
+  }), true);
+
+  assert.deepEqual(harness.tabsApi.removeCalls, [100, 101, 102]);
+  assert.deepEqual(
+    harness.sentHandles.map(({ urlIndex }) => urlIndex),
+    [0, 1, 2, 3, 4, 5]
+  );
+  assert.equal(harness.terminalPayloads.length, 0);
+});
+
+test('manual authoritative reconcile releases a stale page activity and refills its slot', async () => {
+  const harness = createWorkerHarness({ concurrency: 1, taskCount: 2 });
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  await runtime.start(harness.checkpoint);
+  const authoritative = structuredClone(harness.checkpoint);
+  authoritative.updatedAt = 1001;
+  Object.assign(authoritative.tasks['0'], {
+    state: 'terminal',
+    phase: null,
+    tabId: null,
+    windowId: null,
+    startedAt: null,
+    updatedAt: 1001
+  });
+  authoritative.results.push({
+    originalIndex: 0,
+    attempt: 1,
+    result: 'success',
+    aiContent: 'saved',
+    errorCode: null,
+    errorMessage: null,
+    timestamp: 1001
+  });
+  harness.calls.length = 0;
+
+  assert.equal(await runtime.reconcile(authoritative), true);
+  assert.deepEqual(harness.calls, [
+    ['close', 100],
+    ['runtime', 'BATCH_TASK_ACTIVE', 1, 1],
+    ['handle', 1, 1]
+  ]);
+  assert.equal(harness.terminalPayloads.length, 0);
+});
+
+test('manual reconcile recovers a removed activity after its terminal race paused the page', async () => {
+  const harness = createWorkerHarness({ concurrency: 1, taskCount: 2 });
+  const baseRuntimeRequest = harness.dependencies.runtimeRequest;
+  harness.dependencies.runtimeRequest = async (type, payload) => {
+    if (type === 'BATCH_TASK_TERMINAL') {
+      harness.calls.push(['runtime', type, payload.urlIndex, payload.attempt]);
+      return { ok: false, error: 'task_already_terminal' };
+    }
+    return baseRuntimeRequest(type, payload);
+  };
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  await runtime.start(harness.checkpoint);
+
+  harness.tabsApi.emitRemoved(100);
+  await waitFor(
+    () => harness.calls.some(([, type]) => type === 'BATCH_TASK_TERMINAL'),
+    'failed page terminal race'
+  );
+
+  const authoritative = structuredClone(harness.checkpoint);
+  authoritative.updatedAt = 1001;
+  Object.assign(authoritative.tasks['0'], {
+    state: 'terminal',
+    phase: null,
+    tabId: null,
+    windowId: null,
+    startedAt: null,
+    updatedAt: 1001
+  });
+  authoritative.results.push({
+    originalIndex: 0,
+    attempt: 1,
+    result: 'manual_required',
+    errorCode: 'submission_uncertain',
+    errorMessage: 'Task deadline exceeded',
+    timestamp: 1001
+  });
+
+  assert.equal(await runtime.reconcile(authoritative), true);
+  assert.deepEqual(
+    harness.sentHandles.map(({ urlIndex }) => urlIndex),
+    [0, 1]
+  );
+});
+
 test('accepts removed-tab checkpoint and replenishes the freed worker slot', async () => {
   const harness = createWorkerHarness({ concurrency: 1, taskCount: 2 });
   const runtime = createBatchWorkerRuntime(harness.dependencies);
@@ -604,6 +790,38 @@ test('does not PING the previous document before pending navigation commits', as
   assert.equal(harness.sentHandles.length, 1);
 });
 
+test('waits while a worker still reports its placeholder before pendingUrl appears', async () => {
+  const tabsApi = createFakeTabsApi({
+    createdTab: {
+      url: 'chrome-extension://fixture/worker-pending.html',
+      pendingUrl: null,
+      status: 'loading'
+    }
+  });
+  const tab = await tabsApi.create({
+    windowId: 42,
+    url: 'chrome-extension://fixture/worker-pending.html',
+    active: false
+  });
+
+  const readiness = waitForContentScriptReady(
+    { tabId: tab.id, startTime: Date.now() },
+    { tabsApi, timeoutMs: 100, pollIntervalMs: 5 }
+  );
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(tabsApi.sendMessageCalls.length, 0);
+
+  tabsApi.emitUpdated(tab.id, {
+    url: 'https://target.test/0',
+    pendingUrl: null,
+    status: 'loading'
+  });
+  const result = await readiness;
+
+  assert.equal(result.tab.url, 'https://target.test/0');
+});
+
 test('retries when PING answers from a document that no longer matches the tab', async () => {
   let pingCount = 0;
   const harness = createWorkerHarness({
@@ -789,6 +1007,131 @@ test('refill reclaims a safely retried attempt after current terminal tasks', as
   });
 });
 
+test('authoritative capacity recovery bypasses a stuck terminal operation and refills all slots', async () => {
+  const harness = createWorkerHarness({ concurrency: 2, taskCount: 4 });
+  const baseRuntimeRequest = harness.dependencies.runtimeRequest;
+  let blockTerminal = false;
+  harness.dependencies.runtimeRequest = (type, payload) => {
+    if (blockTerminal && type === 'BATCH_TASK_TERMINAL') {
+      harness.calls.push(['runtime-blocked', type, payload.urlIndex]);
+      return new Promise(() => {});
+    }
+    return baseRuntimeRequest(type, payload);
+  };
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  await runtime.start(harness.checkpoint);
+
+  const authoritative = structuredClone(harness.checkpoint);
+  for (const urlIndex of [0, 1]) {
+    Object.assign(authoritative.tasks[String(urlIndex)], {
+      state: 'terminal',
+      phase: null,
+      tabId: null,
+      windowId: null,
+      startedAt: null,
+      updatedAt: 2000
+    });
+    authoritative.results.push({
+      originalIndex: urlIndex,
+      attempt: 1,
+      result: 'success',
+      aiContent: null,
+      errorCode: null,
+      errorMessage: null,
+      timestamp: 2000
+    });
+  }
+  authoritative.updatedAt = 2000;
+  blockTerminal = true;
+  void runtime.handleConfirmation({
+    type: 'BATCH_CONFIRMED',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    sourceTabId: 100,
+    result: 'success',
+    historySaveStatus: 'saved'
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    harness.calls.some(([kind]) => kind === 'runtime-blocked'),
+    true
+  );
+
+  const recovered = await Promise.race([
+    runtime.recoverCapacity(authoritative),
+    new Promise((resolve) => setTimeout(() => resolve('hung'), 100))
+  ]);
+
+  assert.equal(recovered, true);
+  assert.deepEqual(
+    harness.sentHandles.map(({ urlIndex }) => urlIndex),
+    [0, 1, 2, 3]
+  );
+});
+
+test('authoritative recovery bypasses a stuck final terminal operation and completes the batch', async () => {
+  const harness = createWorkerHarness({ concurrency: 1, taskCount: 1 });
+  const baseRuntimeRequest = harness.dependencies.runtimeRequest;
+  let blockTerminal = false;
+  harness.dependencies.runtimeRequest = (type, payload) => {
+    if (blockTerminal && type === 'BATCH_TASK_TERMINAL') {
+      harness.calls.push(['runtime-blocked', type, payload.urlIndex]);
+      return new Promise(() => {});
+    }
+    return baseRuntimeRequest(type, payload);
+  };
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  await runtime.start(harness.checkpoint);
+
+  const authoritative = structuredClone(harness.checkpoint);
+  Object.assign(authoritative.tasks['0'], {
+    state: 'terminal',
+    phase: null,
+    tabId: null,
+    windowId: null,
+    startedAt: null,
+    updatedAt: 2000
+  });
+  authoritative.results.push({
+    originalIndex: 0,
+    attempt: 1,
+    result: 'success',
+    aiContent: null,
+    errorCode: null,
+    errorMessage: null,
+    timestamp: 2000
+  });
+  authoritative.updatedAt = 2000;
+  blockTerminal = true;
+  void runtime.handleConfirmation({
+    type: 'BATCH_CONFIRMED',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    sourceTabId: 100,
+    result: 'success',
+    historySaveStatus: 'saved'
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    harness.calls.some(([kind]) => kind === 'runtime-blocked'),
+    true
+  );
+
+  const recovered = await Promise.race([
+    runtime.recoverCapacity(authoritative),
+    new Promise((resolve) => setTimeout(() => resolve('hung'), 100))
+  ]);
+
+  assert.equal(recovered, true);
+  assert.equal(harness.checkpoint.status, 'completed');
+  assert.equal(
+    harness.calls.some(([, type]) => type === 'BATCH_SESSION_COMPLETE'),
+    true
+  );
+});
+
 test('timeout closes a non-submitting tab without waiting for page sealing and replenishes capacity', async () => {
   let now = 1000;
   const harness = createWorkerHarness({
@@ -820,6 +1163,164 @@ test('timeout closes a non-submitting tab without waiting for page sealing and r
     harness.terminalPayloads[0].result.errorCode,
     'task_timeout'
   );
+});
+
+test('a timeout closes and replaces its tab while another finalizer is blocked', async () => {
+  const armed = [];
+  let expire;
+  let releaseBlockedTerminal;
+  const harness = createWorkerHarness({
+    concurrency: 2,
+    taskCount: 3,
+    timeoutSeconds: 45,
+    taskDeadlineFactory({ onExpire }) {
+      expire = onExpire;
+      return {
+        arm(identity) {
+          armed.push(structuredClone(identity));
+        },
+        clear() {
+          return true;
+        },
+        clearAll() {}
+      };
+    }
+  });
+  const runtimeRequest = harness.dependencies.runtimeRequest;
+  harness.dependencies.runtimeRequest = async (type, payload) => {
+    if (
+      type === 'BATCH_TASK_TERMINAL' &&
+      payload.urlIndex === 0
+    ) {
+      await new Promise((resolve) => {
+        releaseBlockedTerminal = resolve;
+      });
+    }
+    return runtimeRequest(type, payload);
+  };
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  await runtime.start(harness.checkpoint);
+
+  const blockedConfirmation = runtime.handleConfirmation({
+    type: 'BATCH_CONFIRMED',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    sourceTabId: 100,
+    result: 'success',
+    historySaveStatus: 'saved'
+  });
+  await waitFor(
+    () => typeof releaseBlockedTerminal === 'function',
+    'blocked terminal transition'
+  );
+
+  await expire(armed.find(({ urlIndex }) => urlIndex === 1));
+
+  assert.equal(
+    harness.tabsApi.removeCalls.includes(101),
+    true,
+    'the expired tab must close without waiting for the blocked finalizer'
+  );
+  assert.equal(
+    harness.terminalPayloads.some(
+      ({ urlIndex, result }) => (
+        urlIndex === 1 &&
+        result.errorCode === 'task_timeout'
+      )
+    ),
+    true
+  );
+  assert.deepEqual(
+    harness.sentHandles.map(({ urlIndex }) => urlIndex),
+    [0, 1, 2],
+    'the freed slot must be replenished immediately'
+  );
+
+  releaseBlockedTerminal();
+  await blockedConfirmation;
+});
+
+test('an authoritative background deadline refills behind a blocked page finalizer', async () => {
+  let releaseBlockedTerminal;
+  const harness = createWorkerHarness({
+    concurrency: 2,
+    taskCount: 3
+  });
+  const runtimeRequest = harness.dependencies.runtimeRequest;
+  harness.dependencies.runtimeRequest = async (type, payload) => {
+    if (
+      type === 'BATCH_TASK_TERMINAL' &&
+      payload.urlIndex === 0
+    ) {
+      await new Promise((resolve) => {
+        releaseBlockedTerminal = resolve;
+      });
+    }
+    return runtimeRequest(type, payload);
+  };
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  await runtime.start(harness.checkpoint);
+  const blockedConfirmation = runtime.handleConfirmation({
+    type: 'BATCH_CONFIRMED',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    sourceTabId: 100,
+    result: 'success',
+    historySaveStatus: 'saved'
+  });
+  await waitFor(
+    () => typeof releaseBlockedTerminal === 'function',
+    'blocked page finalizer'
+  );
+
+  harness.tabsApi.emitRemoved(101);
+  const terminalCheckpoint = structuredClone(harness.checkpoint);
+  terminalCheckpoint.updatedAt += 1;
+  Object.assign(terminalCheckpoint.tasks['1'], {
+    state: 'terminal',
+    phase: null,
+    tabId: null,
+    windowId: null,
+    startedAt: null,
+    updatedAt: terminalCheckpoint.updatedAt
+  });
+  terminalCheckpoint.results.push({
+    originalIndex: 1,
+    attempt: 1,
+    result: 'fail',
+    errorCode: 'task_timeout',
+    errorMessage: 'Task deadline exceeded'
+  });
+
+  const outcome = await Promise.race([
+    runtime.acceptRemovedTabCheckpoint({
+      batchId: 'batch-1',
+      urlIndex: 1,
+      attempt: 1,
+      tabId: 101,
+      deadlineExpired: true,
+      checkpoint: terminalCheckpoint
+    }).then((accepted) => accepted ? 'accepted' : 'rejected'),
+    new Promise((resolve) => setTimeout(() => resolve('blocked'), 100))
+  ]);
+
+  assert.equal(outcome, 'accepted');
+  assert.deepEqual(
+    harness.sentHandles.map(({ urlIndex }) => urlIndex),
+    [0, 1, 2]
+  );
+
+  Object.assign(
+    harness.checkpoint.tasks['1'],
+    structuredClone(terminalCheckpoint.tasks['1'])
+  );
+  harness.checkpoint.results.push(
+    structuredClone(terminalCheckpoint.results.at(-1))
+  );
+  releaseBlockedTerminal();
+  await blockedConfirmation;
 });
 
 test('an attempt deadline expires and closes a task without the scan interval', async () => {
@@ -1230,6 +1731,95 @@ test('an unexpected worker-tab close terminalizes only that activity and refills
     /用户关闭/
   );
   assert.deepEqual(harness.tabsApi.removeCalls, []);
+});
+
+test('adopts background terminal winners when three submitted tabs close together and refills', async () => {
+  const harness = createWorkerHarness({ concurrency: 3, taskCount: 6 });
+  const originalRuntimeRequest = harness.dependencies.runtimeRequest;
+  let authoritativeCheckpoint = null;
+  harness.dependencies.runtimeRequest = async (type, payload) => {
+    if (type === 'BATCH_TASK_TERMINAL' && payload.urlIndex < 3) {
+      harness.calls.push(['runtime', type, payload.urlIndex, payload.attempt]);
+      authoritativeCheckpoint = structuredClone(harness.checkpoint);
+      authoritativeCheckpoint.updatedAt = 2000;
+      for (const urlIndex of [0, 1, 2]) {
+        Object.assign(authoritativeCheckpoint.tasks[String(urlIndex)], {
+          state: 'terminal',
+          phase: null,
+          tabId: null,
+          windowId: null,
+          startedAt: null,
+          updatedAt: 2000
+        });
+        authoritativeCheckpoint.results.push({
+          originalIndex: urlIndex,
+          attempt: 1,
+          result: 'success',
+          aiContent: `saved-${urlIndex}`,
+          errorCode: null,
+          errorMessage: null,
+          timestamp: 2000
+        });
+      }
+      return {
+        ok: false,
+        error: 'task_already_terminal',
+        checkpoint: authoritativeCheckpoint
+      };
+    }
+    if (!authoritativeCheckpoint) {
+      return originalRuntimeRequest(type, payload);
+    }
+    harness.calls.push(['runtime', type, payload.urlIndex, payload.attempt]);
+    if (type === 'BATCH_TASK_ACTIVE') {
+      Object.assign(
+        authoritativeCheckpoint.tasks[String(payload.urlIndex)],
+        {
+          state: 'active',
+          tabId: payload.tabId,
+          windowId: payload.windowId,
+          startedAt: payload.startedAt
+        }
+      );
+    }
+    if (type === 'BATCH_SESSION_COMPLETE') {
+      authoritativeCheckpoint.status = 'completed';
+    }
+    return { ok: true, checkpoint: authoritativeCheckpoint };
+  };
+  const events = [];
+  const runtime = createBatchWorkerRuntime(harness.dependencies);
+  runtime.subscribe((event) => events.push(event));
+  await runtime.start(harness.checkpoint);
+  for (const urlIndex of [0, 1, 2]) {
+    Object.assign(harness.checkpoint.tasks[String(urlIndex)], {
+      state: 'submitting',
+      phase: 'confirming'
+    });
+  }
+
+  for (const tabId of [100, 101, 102]) {
+    harness.tabsApi.emitRemoved(tabId);
+  }
+  await waitFor(
+    () => harness.sentHandles.length === 6,
+    'three replacement workers after terminal race'
+  );
+
+  assert.deepEqual(
+    harness.sentHandles.map(({ urlIndex }) => urlIndex),
+    [0, 1, 2, 3, 4, 5]
+  );
+  assert.deepEqual(
+    [0, 1, 2].map(
+      (urlIndex) => authoritativeCheckpoint.tasks[String(urlIndex)].state
+    ),
+    ['terminal', 'terminal', 'terminal']
+  );
+  assert.equal(
+    events.some(({ type }) => type === 'runtime-error'),
+    false
+  );
 });
 
 test('ignores a late readiness failure from a worker that was already replaced', async () => {

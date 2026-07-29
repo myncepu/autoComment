@@ -182,6 +182,7 @@ function calculateCounts(rows) {
     queued: 0,
     running: 0,
     success: 0,
+    skipped: 0,
     failed: 0,
     manual: 0
   };
@@ -668,6 +669,15 @@ export function createBatchConsoleFixtureAdapter() {
         value: {
           fileName: `${snapshot.batchId || 'empty'}-fixture.csv`,
           rowCount: snapshot.rows.length
+        }
+      }));
+    },
+    exportDiagnostics() {
+      return runCommand('export-diagnostics', {}, async () => ({
+        message: `已导出 ${snapshot.rows.length} 条任务的 fixture 诊断日志`,
+        value: {
+          fileName: `${snapshot.batchId || 'empty'}-diagnostics.json`,
+          taskCount: snapshot.rows.length
         }
       }));
     }

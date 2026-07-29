@@ -622,6 +622,7 @@ test('moves one task through active, submitting, and terminal states', () => {
       errorCode: null,
       errorMessage: null,
       timestamp: 1400,
+      submittedAt: 1400,
       elapsed: 0,
       originalRow: ['0', 'https://example.test/0'],
       taskId: 'batch-1:legacy:0',
@@ -996,6 +997,7 @@ test('normalizes active and submitting work into one safe paused checkpoint', ()
       errorCode: 'submission_uncertain',
       errorMessage: '任务在提交确认前中断，评论可能已提交，请人工确认',
       timestamp: 2000,
+      submittedAt: null,
       elapsed: 1,
       originalRow: ['2', 'https://example.test/2'],
       taskId: 'batch-1:legacy:2',
@@ -1125,12 +1127,14 @@ test('current checkpoints backfill stable empty result preview values once', () 
       commentText: migrated.checkpoint.results[0].commentText,
       anchorTexts: migrated.checkpoint.results[0].anchorTexts,
       promotedWebsiteUrl:
-        migrated.checkpoint.results[0].promotedWebsiteUrl
+        migrated.checkpoint.results[0].promotedWebsiteUrl,
+      submittedAt: migrated.checkpoint.results[0].submittedAt
     },
     {
       commentText: null,
       anchorTexts: [],
-      promotedWebsiteUrl: null
+      promotedWebsiteUrl: null,
+      submittedAt: migrated.checkpoint.results[0].timestamp
     }
   );
   assert.equal(repeated.ok, true);

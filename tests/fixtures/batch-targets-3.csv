@@ -1,0 +1,4 @@
+页面AS,原URL,URL对应域名,目标域名,类型,外部链接数量
+1,http://127.0.0.1:4173/multi/1?acceptance=3,127.0.0.1,fixture.local,comment,0
+2,http://127.0.0.1:4173/multi/2?acceptance=3,127.0.0.1,fixture.local,comment,0
+3,http://127.0.0.1:4173/multi/3?acceptance=3,127.0.0.1,fixture.local,comment,0

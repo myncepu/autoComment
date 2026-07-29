@@ -249,6 +249,64 @@ test('routes runtime requests and accepts only own-extension page events', async
   assert.equal(harness.runtimeOnMessage.listeners.size, 0);
 });
 
+test('accepts local debug page commands only from the extension background', async () => {
+  const harness = createChromeHarness();
+  const dependencies = createChromeBatchDependencies(harness.chromeApi);
+  const received = [];
+  const unsubscribe = dependencies.subscribeLocalDebugCommands(
+    async (message) => {
+      received.push(message);
+      return {
+        ok: true,
+        page: { status: 'paused' },
+        token: 'must-not-leak'
+      };
+    }
+  );
+  const listener = [...harness.runtimeOnMessage.listeners][0];
+  let forgedResponse = null;
+  assert.equal(listener(
+    {
+      type: 'LOCAL_DEBUG_PAGE_COMMAND',
+      command: 'pause',
+      requestId: 'forged'
+    },
+    {
+      id: 'extension-id',
+      tab: { id: 501 },
+      url: 'https://target.test/post'
+    },
+    (response) => { forgedResponse = response; }
+  ), false);
+  assert.equal(forgedResponse, null);
+
+  let response = null;
+  assert.equal(listener(
+    {
+      type: 'LOCAL_DEBUG_PAGE_COMMAND',
+      command: 'pause',
+      requestId: 'request-1'
+    },
+    {
+      id: 'extension-id',
+      url: 'chrome-extension://extension-id/background.js'
+    },
+    (value) => { response = value; }
+  ), true);
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.deepEqual(received, [{
+    command: 'pause',
+    requestId: 'request-1'
+  }]);
+  assert.deepEqual(response, {
+    ok: true,
+    page: { status: 'paused' }
+  });
+  unsubscribe();
+});
+
 test('accepts removed worker checkpoint from MV3 background with or without sender URL and scrubs secrets', () => {
   const harness = createChromeHarness();
   const dependencies = createChromeBatchDependencies(harness.chromeApi);

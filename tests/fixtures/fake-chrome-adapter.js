@@ -19,6 +19,34 @@
     return value == null ? value : structuredClone(value);
   }
 
+  function restorePersistentState() {
+    try {
+      const saved = JSON.parse(
+        root.sessionStorage.getItem('fixtureAdapterState') || 'null'
+      );
+      if (!saved || typeof saved !== 'object') return;
+      if (Array.isArray(saved.modelRequests)) {
+        modelRequests.push(...saved.modelRequests.map(clone));
+      }
+      if (Array.isArray(saved.confirmations)) {
+        confirmations.push(...saved.confirmations.map(clone));
+      }
+      currentHandle = clone(saved.currentHandle);
+    } catch (_) {}
+  }
+
+  function persistState() {
+    try {
+      root.sessionStorage.setItem('fixtureAdapterState', JSON.stringify({
+        modelRequests,
+        confirmations,
+        currentHandle
+      }));
+    } catch (_) {}
+  }
+
+  restorePersistentState();
+
   function storageArea(data, areaName) {
     return {
       get(keys, callback) {
@@ -59,6 +87,7 @@
     switch (message?.type) {
       case 'LLM_GENERATE_COPY': {
         modelRequests.push(clone(message.payload));
+        persistState();
         if (modelDelayMs > 0) {
           await new Promise((resolve) => root.setTimeout(resolve, modelDelayMs));
         }
@@ -101,6 +130,7 @@
       case 'BATCH_HANDLE_CONFIRM':
       case 'BATCH_HISTORY_PENDING_FALLBACK':
         confirmations.push(clone(message));
+        persistState();
         submitContext = null;
         try {
           root.sessionStorage.removeItem('fixtureSubmitContext');
@@ -129,6 +159,7 @@
 
   async function dispatchHandle(handle) {
     currentHandle = clone(handle);
+    persistState();
     let response = null;
     for (const listener of runtimeListeners) {
       response = await new Promise((resolve, reject) => {

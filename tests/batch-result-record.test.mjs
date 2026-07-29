@@ -61,6 +61,7 @@ test('records IDs and display snapshots without PII or site description', () => 
     promotedWebsiteUrl: 'https://promo-a.test/?token=REDACTED',
     errorMessage: null,
     timestamp: 1_000,
+    submittedAt: 1_000,
     elapsed: 3,
     originalRow: ['https://target.test/post', 'target.test'],
     profileId: 'profile-a',
@@ -96,6 +97,7 @@ test('normalizes failed outcomes and never stores raw error objects', () => {
   assert.equal(result.errorCode, 'content_ready_timeout');
   assert.equal(result.skipReason, 'retry_exhausted');
   assert.equal(result.attemptCount, 0);
+  assert.equal(result.submittedAt, null);
   assert.equal(JSON.stringify(result).includes('DO_NOT_STORE'), false);
 });
 
@@ -122,6 +124,7 @@ test('appends stable assignment CSV columns with formula protection', () => {
     'assignmentSource',
     'configRevision',
     'attemptCount',
+    'submittedAt',
     'errorCode',
     'skipReason'
   ]);

@@ -46,7 +46,13 @@ test('batch fixture is a CSP-safe local module page with a responsive wizard mou
   assert.ok(document.querySelector('main[data-batch-console]'));
   assert.ok(document.querySelector('select[data-fixture-scenario]'));
   assert.ok(document.querySelector('dialog[data-batch-wizard]'));
+  assert.ok(document.querySelector(
+    'link[href="../../lib/vendor/tabulator/tabulator.min.css"]'
+  ));
   assert.ok(document.querySelector('link[href="../../styles/batch-console.css"]'));
+  assert.ok(document.querySelector(
+    'script[src="../../lib/vendor/tabulator/tabulator.min.js"]'
+  ));
   assert.ok(document.querySelector('script[type="module"][src="./batch-console-app.mjs"]'));
   assert.equal(document.querySelector('[onclick],[onchange],[onsubmit],[onkeydown]'), null);
   assert.equal(document.querySelector('script:not([src])'), null);
@@ -300,7 +306,7 @@ test('fixture app boots shell and completes the wizard in an ordinary HTTP docum
 
   assert.ok(app);
   assert.equal(document.querySelector('[aria-current="page"]').textContent, '批次');
-  assert.equal(document.querySelectorAll('[data-summary-count]').length, 6);
+  assert.equal(document.querySelectorAll('[data-summary-count]').length, 7);
   assert.equal(document.querySelectorAll('[data-worker-slot]').length, 3);
   assert.equal(document.querySelectorAll('[data-task-row]').length, 5);
   const failedRow = document.querySelector('[data-task-row="18"]');

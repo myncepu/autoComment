@@ -140,6 +140,25 @@ test('parses quoted newlines and maps an old CSV without assignments', () => {
   });
 });
 
+test('accepts a valid single-column URL CSV despite Papa delimiter warning', () => {
+  const parsed = parse([
+    '原URL',
+    'https://a.test/post',
+    'https://b.test/post'
+  ].join('\n'));
+
+  assert.deepEqual(parsed, {
+    headers: ['原URL'],
+    rows: [{
+      rowNumber: 2,
+      originalRow: ['https://a.test/post']
+    }, {
+      rowNumber: 3,
+      originalRow: ['https://b.test/post']
+    }]
+  });
+});
+
 test('recognizes canonical assignment headers and legacy URL/domain aliases', () => {
   assert.deepEqual(inferBatchColumnMapping([
     '\ufeffurl',

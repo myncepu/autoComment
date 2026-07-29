@@ -29,6 +29,10 @@ import {
 import {
   createOptionsConfigBundleView
 } from './lib/options-config-bundle-view.mjs';
+import {
+  LOCAL_DEBUG_BRIDGE_ORIGIN,
+  LOCAL_DEBUG_BRIDGE_STORAGE_KEY
+} from './lib/local-debug-bridge.mjs';
 
 const SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY =
   'show_export_outlinks_floating_button';
@@ -119,7 +123,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     'importPreviewSummary',
     'openBatchBtn',
     'openHistoryBtn',
-    'toggleExportOutlinksFloatingBtn'
+    'toggleExportOutlinksFloatingBtn',
+    'localDebugStatus',
+    'toggleLocalDebugBtn',
+    'openLocalDebugBtn'
   ].map((id) => [id, element(id)]));
   if (Object.values(ui).some((value) => !value)) {
     console.error('[options] Required options controls are missing');
@@ -484,6 +491,50 @@ document.addEventListener('DOMContentLoaded', async () => {
       [SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY]: showOutlinks
     });
     renderOutlinksToggle();
+  });
+
+  let localDebugSettings = (
+    await chrome.storage.local.get([LOCAL_DEBUG_BRIDGE_STORAGE_KEY])
+  )[LOCAL_DEBUG_BRIDGE_STORAGE_KEY] || null;
+  function renderLocalDebugBridge() {
+    const enabled = localDebugSettings?.enabled === true;
+    ui.localDebugStatus.textContent = enabled
+      ? '已启用：仅允许本机 127.0.0.1，令牌不会同步。'
+      : '已关闭（默认）。';
+    ui.localDebugStatus.style.color = enabled ? '#059669' : '';
+    ui.toggleLocalDebugBtn.textContent = enabled
+      ? '关闭本地调试'
+      : '启用本地调试';
+    ui.openLocalDebugBtn.disabled = !enabled;
+  }
+  function localDebugDashboardUrl() {
+    const params = new URLSearchParams({
+      extensionId: chrome.runtime.id,
+      token: localDebugSettings.token
+    });
+    return `${LOCAL_DEBUG_BRIDGE_ORIGIN}/#${params}`;
+  }
+  renderLocalDebugBridge();
+  ui.toggleLocalDebugBtn.addEventListener('click', async () => {
+    if (localDebugSettings?.enabled === true) {
+      await chrome.storage.local.remove([LOCAL_DEBUG_BRIDGE_STORAGE_KEY]);
+      localDebugSettings = null;
+    } else {
+      localDebugSettings = {
+        enabled: true,
+        origin: LOCAL_DEBUG_BRIDGE_ORIGIN,
+        token: `${crypto.randomUUID()}${crypto.randomUUID()}`,
+        updatedAt: Date.now()
+      };
+      await chrome.storage.local.set({
+        [LOCAL_DEBUG_BRIDGE_STORAGE_KEY]: localDebugSettings
+      });
+    }
+    renderLocalDebugBridge();
+  });
+  ui.openLocalDebugBtn.addEventListener('click', () => {
+    if (localDebugSettings?.enabled !== true) return;
+    chrome.tabs.create({ url: localDebugDashboardUrl() });
   });
 
   createOptionsConfigBundleView({

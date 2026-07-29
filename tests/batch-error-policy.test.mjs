@@ -22,6 +22,10 @@ test('classifies safe, confirmed-risk, and blocked retries', () => {
     result: 'blocked_illegal',
     errorCode: 'illegal_site'
   }), 'blocked');
+  assert.equal(getBatchRetryPolicy({
+    result: 'fail',
+    errorCode: 'submission_rejected'
+  }), 'blocked');
 });
 
 test('returns a safe structured timeout error without credentials', () => {
