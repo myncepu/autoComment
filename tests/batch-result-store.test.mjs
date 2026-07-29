@@ -58,6 +58,34 @@ test('updates a duplicate task result instead of appending it', async () => {
   assert.deepEqual(storage.data.batchReportedUrls, ['a:0:1']);
 });
 
+test('records only confirmed success time and keeps the first confirmation time', async () => {
+  const storage = createDelayedStorage();
+  const store = createBatchResultStore(storage);
+
+  await store.save({
+    batchId: 'submitted-time',
+    urlIndex: 0,
+    attempt: 1,
+    result: 'success',
+    submittedAt: 1_000
+  });
+  await store.save({
+    batchId: 'submitted-time',
+    urlIndex: 0,
+    attempt: 1,
+    result: 'success'
+  });
+  await store.save({
+    batchId: 'submitted-time',
+    urlIndex: 1,
+    attempt: 1,
+    result: 'manual_required'
+  });
+
+  assert.equal(storage.data.batchResults[0].submittedAt, 1_000);
+  assert.equal(storage.data.batchResults[1].submittedAt, null);
+});
+
 test('keeps retry attempts distinct and preserves their stable error codes', async () => {
   const storage = createDelayedStorage();
   const store = createBatchResultStore(storage);
@@ -222,7 +250,8 @@ test('a full store still trims normally for a different task', async () => {
     aiContent: null,
     errorCode: null,
     errorMessage: null,
-    timestamp: null
+    timestamp: null,
+    submittedAt: null
   });
   assert.equal(typeof newestResult.timestamp, 'number');
   assert.equal(storage.data.batchReportedUrls.length, 500);

@@ -1,0 +1,136 @@
+{
+  "format": "autocomment-config-bundle",
+  "version": 3,
+  "exportedAt": 1785222124000,
+  "data": {
+    "domainConfig": {
+      "version": 2,
+      "revision": 0,
+      "profiles": [
+        {
+          "id": "profile-alex-morgan",
+          "displayName": "Alex Morgan · Muse Generator",
+          "name": "Alex Morgan",
+          "email": "support@musegenerator.org",
+          "createdAt": 1785222124000,
+          "updatedAt": 1785222124000
+        },
+        {
+          "id": "profile-jamie-taylor",
+          "displayName": "Jamie Taylor · Flux Klein AI",
+          "name": "Jamie Taylor",
+          "email": "support@fluxklein.ai",
+          "createdAt": 1785222124000,
+          "updatedAt": 1785222124000
+        },
+        {
+          "id": "profile-jordan-lee",
+          "displayName": "Jordan Lee · Increase Image Size in KB",
+          "name": "Jordan Lee",
+          "email": "support@increaseimagesizeinkb.net",
+          "createdAt": 1785222124000,
+          "updatedAt": 1785222124000
+        },
+        {
+          "id": "profile-casey-wilson",
+          "displayName": "Casey Wilson · NanoPic AI",
+          "name": "Casey Wilson",
+          "email": "support@nanopic.ai",
+          "createdAt": 1785222124000,
+          "updatedAt": 1785222124000
+        }
+      ],
+      "promotionSites": [
+        {
+          "id": "site-musegenerator-org",
+          "name": "Muse Generator",
+          "url": "https://musegenerator.org/",
+          "content": "Muse Generator is a browser-based AI creative tool for turning prompts into images and videos. In each comment, include exactly one relevant HTML link to the homepage only when it fits the surrounding discussion. Use one contextually appropriate anchor from a varied keyword pool such as “Muse Generator”, “Muse AI generator”, “AI image generator”, “free AI image generator”, “text to image generator”, “AI video generator”, “prompt to image tool”, or “browser-based AI creative tool”. Vary the anchor naturally between comments, mix brand, feature, and longer intent phrases, and never force several keywords or repeat the same anchor in one comment. The linked phrase must read as a normal part of a useful sentence rather than as a standalone promotion.",
+          "enabled": true,
+          "createdAt": 1785222124000,
+          "updatedAt": 1785222124000
+        },
+        {
+          "id": "site-fluxklein-ai",
+          "name": "Flux Klein AI",
+          "url": "https://fluxklein.ai/",
+          "content": "Flux Klein AI is a browser workspace for Klein AI image generation, reference-led image editing, and short video creation. It helps creators make concept art, product scenes, thumbnails, ads, social clips, and image-to-video experiments from prompts or reference images. In each comment, include exactly one relevant HTML link to the homepage only when it fits the topic. Choose a natural anchor from varied page keywords such as “Flux Klein AI”, “Klein AI image generator”, “Flux Klein image generator”, “Klein AI video generator”, “AI image and video generator”, “reference image editor”, “image to video generator”, or “browser creative workspace”. Rotate between brand, feature, and long-tail phrases without following a rigid sequence; do not repeat or cluster keywords, and make the anchor flow naturally inside an informative sentence.",
+          "enabled": true,
+          "createdAt": 1785222124000,
+          "updatedAt": 1785222124000
+        },
+        {
+          "id": "site-increase-image-size-in-kb",
+          "name": "Increase Image Size in KB",
+          "url": "https://increaseimagesizeinkb.net/",
+          "content": "Increase Image Size in KB is a free, private browser tool that changes JPG, PNG, and WebP files to an exact target file size without uploading the source image. It is useful for application photos, signatures, and other portal uploads with precise KB limits. In each comment, include exactly one relevant HTML link to the homepage only when it genuinely helps the discussion. Select a context-fitting anchor from a diverse pool such as “increase image size in KB”, “image size increaser”, “resize an image to exact KB”, “exact image file size tool”, “increase JPG size”, “increase PNG size”, “make an image 50 KB”, “private browser image resizer”, or “change photo size in KB”. Distribute brand-like, functional, and task-specific anchors naturally across comments; never stack multiple target phrases, repeat the same anchor in one comment, or insert an awkward keyword-only sentence.",
+          "enabled": true,
+          "createdAt": 1785222124000,
+          "updatedAt": 1785222124000
+        },
+        {
+          "id": "site-nanopic-ai",
+          "name": "NanoPic AI",
+          "url": "https://nanopic.ai/",
+          "content": "NanoPic AI is a browser-based AI image generator, image editor, and image upscaler for ads, thumbnails, product mockups, portraits, social posts, and storyboards. It supports Nano Banana, Nano Banana Pro, image-to-image editing, upscaling, and follow-up image-to-video workflows. In each comment, include exactly one relevant HTML link to the homepage only when it matches the conversation. Pick a natural anchor from varied page keywords such as “NanoPic AI”, “free AI image generator”, “Nano Banana image generator”, “Nano Banana Pro”, “AI image editor”, “AI photo editor”, “image to image generator”, “AI image upscaler”, or “4K image upscaler”. Vary short and long phrases according to context, avoid a fixed rotation, and do not concentrate or repeat keywords. The link should be embedded in a genuinely helpful sentence and should not sound like a promotional call to action.",
+          "enabled": true,
+          "createdAt": 1785222124000,
+          "updatedAt": 1785222124000
+        }
+      ],
+      "assignmentPolicy": {
+        "defaultPairId": "pair-musegenerator-org",
+        "pairs": [
+          {
+            "id": "pair-musegenerator-org",
+            "profileId": "profile-alex-morgan",
+            "promotionSiteId": "site-musegenerator-org",
+            "weight": 1,
+            "enabled": true
+          },
+          {
+            "id": "pair-fluxklein-ai",
+            "profileId": "profile-jamie-taylor",
+            "promotionSiteId": "site-fluxklein-ai",
+            "weight": 1,
+            "enabled": true
+          },
+          {
+            "id": "pair-increase-image-size-in-kb",
+            "profileId": "profile-jordan-lee",
+            "promotionSiteId": "site-increase-image-size-in-kb",
+            "weight": 1,
+            "enabled": true
+          },
+          {
+            "id": "pair-nanopic-ai",
+            "profileId": "profile-casey-wilson",
+            "promotionSiteId": "site-nanopic-ai",
+            "weight": 1,
+            "enabled": true
+          }
+        ],
+        "quotas": {
+          "batch": 80,
+          "perProfile": 30,
+          "perPromotionSite": 30,
+          "perTargetDomain": 1
+        }
+      }
+    },
+    "llm": {
+      "apiBaseUrl": "https://openrouter.ai/api/v1",
+      "model": "qwen/qwen-plus"
+    },
+    "batchDefaults": {
+      "autoOpenPanel": true,
+      "autoGenerate": true,
+      "autoSubmit": false,
+      "concurrency": 3,
+      "timeoutSeconds": 120
+    },
+    "preferences": {
+      "showExportOutlinksFloatingButton": true
+    }
+  }
+}

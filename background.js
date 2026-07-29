@@ -18,6 +18,13 @@ import {
   createBatchRuntimeController,
   installBatchRuntimeController
 } from './lib/batch-runtime-controller.mjs';
+import {
+  createBatchDiagnosticService,
+  installBatchDiagnosticListener
+} from './lib/batch-diagnostic-log.mjs';
+import {
+  createBatchDeadlineWatchdog
+} from './lib/batch-deadline-watchdog.mjs';
 import { createDomainConfigRepository } from './lib/domain-config-repository.mjs';
 import {
   installDomainConfigRepositoryMessageListener
@@ -44,6 +51,7 @@ import {
   installBatchSubmitContextListener
 } from './lib/batch-submit-context-store.mjs';
 import { isDurableBatchConfirmation } from './lib/batch-scheduler.mjs';
+import { installLocalDebugBridge } from './lib/local-debug-bridge.mjs';
 
 installLlmMessageListener(chrome);
 installActionClickHandler(chrome);
@@ -82,6 +90,19 @@ const batchRuntimeController = createBatchRuntimeController({
     batchSecretVaultStore.clear(batchId)
   )
 });
+const batchDiagnosticService = createBatchDiagnosticService({
+  storageArea: chrome.storage.local,
+  runtime: chrome.runtime
+});
+installBatchDiagnosticListener(chrome, batchDiagnosticService);
+createBatchDeadlineWatchdog({
+  alarms: chrome.alarms,
+  storageArea: chrome.storage.local,
+  storageChanged: chrome.storage.onChanged,
+  runtimeController: batchRuntimeController,
+  runtime: chrome.runtime,
+  diagnosticService: batchDiagnosticService
+}).start();
 const batchSubmitContextStore = createBatchSubmitContextStore(
   chrome.storage.local,
   { maxAgeMs: Number.POSITIVE_INFINITY }
@@ -137,6 +158,9 @@ const commentHistoryService = createCommentHistoryService({
 installCommentHistoryMessageListener(chrome, commentHistoryService);
 void domainConfigReady.then(() => {
   installBatchRuntimeController(chrome, secretAwareBatchRuntimeController);
+  installLocalDebugBridge(chrome, {
+    batchRuntimeController
+  });
   installBatchDomainConfigListener(chrome, domainConfigRepository);
   installBatchSecretVaultListener(chrome, {
     vaultStore: batchSecretVaultStore,
@@ -226,8 +250,6 @@ function submitContextMatches(context, message) {
 }
 
 async function clearExactSubmitContext(message, sender) {
-  const result = message.result ?? 'success';
-  if (result !== 'success') return;
   if (!Number.isInteger(sender?.tab?.id)) {
     throw batchIngressError('missing_sender_tab');
   }

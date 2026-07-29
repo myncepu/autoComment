@@ -247,6 +247,11 @@ textarea {
   flex-wrap: wrap;
 }
 
+.local-debug-actions {
+  flex: 0 0 auto;
+  justify-content: flex-end;
+}
+
 .settings-card-heading {
   gap: 8px;
   margin-bottom: 6px;

@@ -877,10 +877,10 @@ test('forwards one captured history payload through direct, restored, and panel 
   );
 
   assert.match(persist, /AutoCommentBatchSubmitContext\.save\(\{[\s\S]*history\s*\n\s*\}\)/);
-  assert.match(restored, /history:\s*ctx\.history/);
+  assert.match(restored, /history:\s*confirmedSuccess\s*\?\s*ctx\.history\s*:\s*undefined/);
   assert.match(
     restored,
-    /historyUnavailableReason:\s*ctx\.history\s*\?\s*undefined\s*:\s*'legacy_context'/
+    /historyUnavailableReason:\s*confirmedSuccess\s*&&\s*!ctx\.history[\s\S]*?'legacy_context'/
   );
   assert.match(restored, /confirmBatchHistoryDurably\(message\)/);
   assert.match(reporter, /async function reportSuccessToBatch\(aiContent, history\)/);
@@ -916,7 +916,7 @@ test('forwards one captured history payload through direct, restored, and panel 
   );
 });
 
-test('pre-click context persistence rejects quota errors and ambiguous post-click paths preserve it', async () => {
+test('pre-click context persistence rejects quota errors and post-click outcomes require confirmation', async () => {
   const dom = new JSDOM('<!doctype html><body></body>', {
     url: 'https://target.test/post',
     runScripts: 'outside-only'
@@ -957,27 +957,32 @@ test('pre-click context persistence rejects quota errors and ambiguous post-clic
   const postClickFlow = taskFlow.slice(taskFlow.indexOf('const clickResult'));
   const definiteFailure = sourceBetween(
     'const clickResult = await clickCommentSubmitButton();',
-    '\n\n      // 检测表单是否成功提交'
+    '\n\n      // submit 事件或请求开始都不能确认成功'
   );
   assert.match(
     definiteFailure,
     /if \(!clickResult\.success\) \{\s*await clearBatchSubmitContext\(\{\s*batchId,\s*urlIndex,\s*attempt\s*\}\);/,
     'a definite no-click result must clear the pre-click success context'
   );
-  const ambiguousTimeout = sourceBetween(
-    "if (submitResult === 'timeout')",
-    '\n\n      // 页面点击成功后'
+  const outcomeGate = sourceBetween(
+    'const submissionConfirmation =',
+    '\n\n      // AJAX 已获得服务器响应和页面成功状态后'
   );
-  assert.doesNotMatch(
-    ambiguousTimeout,
-    /clearBatchSubmitContext\(\)/,
-    'a dispatched click with an ambiguous timeout must preserve its context'
+  assert.match(
+    outcomeGate,
+    /submissionConfirmation\.navigationPending[\s\S]*?return;/,
+    'native navigation must leave confirmation to the restored document'
+  );
+  assert.match(
+    outcomeGate,
+    /!submissionConfirmation\.confirmed[\s\S]*?submission_uncertain/,
+    'an unverified AJAX result must never continue as success'
   );
   const taskCatch = postClickFlow.slice(postClickFlow.indexOf('} catch (err) {'));
-  assert.doesNotMatch(
+  assert.match(
     taskCatch,
-    /clearBatchSubmitContext\(\)/,
-    'the generic catch must not discard an ambiguously dispatched submission'
+    /submissionDispatched[\s\S]*?'submission_uncertain'[\s\S]*?'manual_required'/,
+    'a dispatched but unverified submission must finish as manual review'
   );
 });
 
@@ -986,9 +991,10 @@ function createConfirmationHarness({
   rejection,
   fallbackLastError,
   fallbackThrows = false,
-  pendingEntryIds = []
+  pendingEntryIds = [],
+  html = '<!doctype html><body></body>'
 } = {}) {
-  const dom = new JSDOM('<!doctype html><body></body>', {
+  const dom = new JSDOM(html, {
     url: 'https://target.test/post',
     runScripts: 'outside-only'
   });
@@ -1038,6 +1044,8 @@ function createConfirmationHarness({
       return Promise.resolve();
     }
   };
+  context.detectManualRequiredChallenge = () => ({ found: false });
+  context.findLikelyCommentTextarea = () => null;
   context.console = { log() {}, warn() {}, error() {} };
   const confirmationSource = sourceBetween(
     'function createHistoryUniqueId',
@@ -1191,7 +1199,11 @@ test('content requests a proven background history fallback without local writes
 
 test('restored exact and marked legacy contexts rely on background acknowledgement', async () => {
   const exactHarness = createConfirmationHarness({
-    response: { ok: true, historySaveStatus: 'saved' }
+    response: { ok: true, historySaveStatus: 'saved' },
+    html: '<!doctype html><body><section id="comments">'
+      + '<article id="comment-7"><div class="comment-content">'
+      + 'Exact submitted body'
+      + '</div></article></section></body>'
   });
   const exactContext = {
     ...exactConfirmationMessage(),
@@ -1207,7 +1219,10 @@ test('restored exact and marked legacy contexts rely on background acknowledgeme
   assert.deepEqual(exactHarness.storageRemovals, []);
 
   const legacyHarness = createConfirmationHarness({
-    response: { ok: true, historySaveStatus: 'not_applicable' }
+    response: { ok: true, historySaveStatus: 'not_applicable' },
+    html: '<!doctype html><body>'
+      + '<p class="comment-awaiting-moderation">Awaiting moderation</p>'
+      + '</body>'
   });
   await legacyHarness.context.confirmRestoredBatchSubmit({
     batchId: 'batch-old',
@@ -1224,6 +1239,45 @@ test('restored exact and marked legacy contexts rely on background acknowledgeme
   );
   assert.deepEqual(legacyHarness.storageWrites, []);
   assert.deepEqual(legacyHarness.storageRemovals, []);
+});
+
+test('restored confirmation maps explicit rejection to failure', async () => {
+  const harness = createConfirmationHarness({
+    response: { ok: true, historySaveStatus: 'not_applicable' },
+    html: '<!doctype html><body><main id="error-page">'
+      + '<p class="wp-die-message">Duplicate comment detected</p>'
+      + '</main></body>'
+  });
+
+  await harness.context.confirmRestoredBatchSubmit({
+    ...exactConfirmationMessage(),
+    type: undefined
+  });
+
+  assert.equal(harness.sentMessages[0].result, 'fail');
+  assert.equal(
+    harness.sentMessages[0].errorCode,
+    'submission_rejected'
+  );
+  assert.equal(Object.hasOwn(harness.sentMessages[0], 'history'), false);
+});
+
+test('restored confirmation maps missing evidence to manual review', async () => {
+  const harness = createConfirmationHarness({
+    response: { ok: true, historySaveStatus: 'not_applicable' }
+  });
+
+  await harness.context.confirmRestoredBatchSubmit({
+    ...exactConfirmationMessage(),
+    type: undefined
+  });
+
+  assert.equal(harness.sentMessages[0].result, 'manual_required');
+  assert.equal(
+    harness.sentMessages[0].errorCode,
+    'submission_uncertain'
+  );
+  assert.equal(Object.hasOwn(harness.sentMessages[0], 'history'), false);
 });
 
 test('restored legacy context without an attempt is not reported or cleared', async () => {

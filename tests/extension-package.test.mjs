@@ -44,6 +44,15 @@ test('builds a loadable extension package without development dependencies or pr
   assert.equal(files.includes('history.html'), true);
   assert.equal(files.includes('options.html'), true);
   assert.equal(
+    files.includes('lib/vendor/tabulator/tabulator.min.js'),
+    true
+  );
+  assert.equal(
+    files.includes('lib/vendor/tabulator/tabulator.min.css'),
+    true
+  );
+  assert.equal(files.includes('lib/vendor/tabulator/LICENSE'), true);
+  assert.equal(
     files.some((file) => (
       file.split(path.sep).includes('node_modules')
       || /\.(?:pem|key)$/i.test(file)

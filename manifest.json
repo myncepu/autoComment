@@ -25,6 +25,11 @@
     "service_worker": "background.js",
     "type": "module"
   },
+  "externally_connectable": {
+    "matches": [
+      "http://127.0.0.1/*"
+    ]
+  },
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'none'; default-src 'self'; connect-src https: http:; base-uri 'none'"
   },

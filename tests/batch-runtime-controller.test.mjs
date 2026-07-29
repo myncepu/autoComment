@@ -3948,6 +3948,40 @@ test('trusted batch page terminal transition closes its worker before persistenc
   assert.equal(response.checkpoint.tasks['0'].state, 'terminal');
 });
 
+test('background deadline expiration closes and terminalizes an active task', async () => {
+  const harness = createHarness();
+  await harness.controller.handleMessage(startMessage(1));
+  await harness.controller.handleMessage({
+    type: 'BATCH_TASK_ACTIVE',
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 11,
+    windowId: 21
+  });
+
+  const response = await harness.controller.expireTask({
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.changed, true);
+  assert.deepEqual(response.expiration, {
+    batchId: 'batch-1',
+    urlIndex: 0,
+    attempt: 1,
+    tabId: 11
+  });
+  assert.deepEqual(harness.removedTabs, [11]);
+  assert.equal(response.checkpoint.tasks['0'].state, 'terminal');
+  assert.equal(
+    response.checkpoint.results[0].errorCode,
+    'task_timeout'
+  );
+});
+
 test('serializes simultaneous task updates without losing either activity', async () => {
   const { controller, data } = createHarness();
   const started = await controller.handleMessage(startMessage());

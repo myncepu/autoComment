@@ -139,6 +139,15 @@ async function layoutState(page) {
       previewTitles: Array.from(document.querySelectorAll(
         '[data-task-row="18"] [data-preview-value]'
       )).map((node) => node.title),
+      tabulatorMounted: Boolean(
+        document.querySelector('[data-task-grid].tabulator')
+      ),
+      tabulatorHeaderFilters: document.querySelectorAll(
+        '[data-task-grid] .tabulator-header-filter'
+      ).length,
+      submittedAtColumn: Boolean(document.querySelector(
+        '[data-task-grid] .tabulator-col[tabulator-field="gridSubmittedAt"]'
+      )),
       queueLeft: queueRect.left,
       queueRight: queueRect.right,
       queueRect: {
@@ -209,6 +218,9 @@ async function main() {
       );
       if (expectedMode === 'table') {
         assert.equal(state.cardsDisplay, 'none');
+        assert.equal(state.tabulatorMounted, true);
+        assert.ok(state.tabulatorHeaderFilters >= 8);
+        assert.equal(state.submittedAtColumn, true);
       } else {
         assert.equal(state.tableDisplay, 'none');
         assert.equal(state.cards, 5);
@@ -219,6 +231,63 @@ async function main() {
           'Old Blog Guide · Promotion Home',
           'https://fixture-promo.test/old-blog'
         ]);
+        await page.locator(
+          '.tabulator-col[tabulator-field="urlIndex"] .tabulator-col-title'
+        ).click();
+        await page.locator(
+          '.tabulator-row:first-child '
+            + '.tabulator-cell[tabulator-field="urlIndex"]'
+        ).filter({ hasText: /^0$/ }).waitFor();
+        const urlFilter = page.locator(
+          '.tabulator-col[tabulator-field="url"] '
+            + '.tabulator-header-filter input'
+        );
+        await urlFilter.pressSequentially('old.blog');
+        await page.waitForFunction(() => (
+          [...document.querySelectorAll(
+            '[data-task-grid] .tabulator-row[data-task-row]'
+          )].filter((row) => row.getClientRects().length > 0).length === 1
+        ));
+        assert.equal(
+          await page.locator(
+            '.tabulator-row[data-task-row="18"]:visible'
+          ).count(),
+          1
+        );
+        await urlFilter.press('ControlOrMeta+A');
+        await urlFilter.press('Backspace');
+        await page.waitForFunction(() => (
+          [...document.querySelectorAll(
+            '[data-task-grid] .tabulator-row[data-task-row]'
+          )].filter((row) => row.getClientRects().length > 0).length === 5
+        ));
+        await page.evaluate(() => {
+          window.__batchGridIdentity = document.querySelector(
+            '[data-task-grid]'
+          );
+        });
+        await page.locator('[name="queueStatus"]').selectOption('failed');
+        await page.waitForFunction(() => (
+          document.querySelectorAll(
+            '[data-task-grid] .tabulator-row[data-task-row]'
+          ).length === 1
+        ));
+        assert.equal(
+          await page.evaluate(() => (
+            document.querySelector('[data-task-grid]') ===
+              window.__batchGridIdentity
+          )),
+          true
+        );
+        await page.locator('[name="queueStatus"]').selectOption('all');
+        await page.waitForFunction(() => (
+          document.querySelectorAll(
+            '[data-task-grid] .tabulator-row[data-task-row]'
+          ).length === 5
+        ));
+        await page.evaluate(() => {
+          delete window.__batchGridIdentity;
+        });
       }
       await page.screenshot({
         fullPage: true,
@@ -254,6 +323,13 @@ async function main() {
     );
 
     await page.getByLabel('状态', { exact: true }).selectOption('all');
+    await page.getByRole('button', {
+      name: '导出诊断日志',
+      exact: true
+    }).click();
+    await page.locator('[data-command-result]').filter({
+      hasText: /诊断日志/
+    }).waitFor();
     await page.getByRole('button', { name: '暂停', exact: true }).click();
     await page.getByRole('button', {
       name: '安全暂停',
@@ -313,10 +389,14 @@ async function main() {
         }]
       )),
       interactions: [
+        'stable-data-refresh',
+        'column-sort',
+        'column-filter',
         'filter',
         'details',
         'preview',
         'focus-restore',
+        'diagnostic-export',
         'pause',
         'resume',
         'stop'

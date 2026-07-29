@@ -104,6 +104,40 @@ test('confirmation cleanup retains the complete multi-assignment identity', asyn
   assert.equal(await store.get(11), null);
 });
 
+test('non-success confirmation without history still releases its exact task context', async () => {
+  const storage = createStorageArea();
+  const store = createBatchSubmitContextStore(storage, { now: () => 1000 });
+  const identity = {
+    batchId: 'batch-plan',
+    taskId: 'batch-plan:1',
+    urlIndex: 0,
+    profileId: 'profile-a',
+    promotionSiteId: 'site-a',
+    attempt: 1
+  };
+  await store.save(11, {
+    ...identity,
+    history: {
+      historyRevision: {
+        capturedAt: 1000,
+        recordedAt: 1001,
+        sequence: 1,
+        id: 'revision-plan'
+      }
+    }
+  });
+
+  const match = submitContextModule.createSubmitContextMatch({
+    ...identity,
+    result: 'manual_required',
+    errorCode: 'submission_uncertain'
+  });
+
+  assert.deepEqual(match, identity);
+  assert.equal(await store.clearIfMatches(11, match), true);
+  assert.equal(await store.get(11), null);
+});
+
 test('normalizes an all-legacy identity but rejects partial assignment identity', async () => {
   const storage = createStorageArea();
   const store = createBatchSubmitContextStore(storage, { now: () => 1000 });

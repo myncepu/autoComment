@@ -19,6 +19,7 @@ test('derives counters, slots and latest-attempt rows from one checkpoint', () =
     queued: 1,
     running: 2,
     success: 1,
+    skipped: 0,
     failed: 0,
     manual: 1
   });
@@ -31,6 +32,8 @@ test('derives counters, slots and latest-attempt rows from one checkpoint', () =
     { urlIndex: 2, attempt: 2, phase: 'detecting' }
   ]);
   assert.equal(snapshot.rows[2].result, null);
+  assert.equal(snapshot.rows[3].submittedAt, 67000);
+  assert.equal(snapshot.rows[4].submittedAt, null);
   assert.deepEqual(snapshot.rows[1].actions, ['details', 'focus-tab']);
   assert.equal(snapshot.rows[2].attemptHistory.length, 1);
   assert.deepEqual(snapshot.rows[2].attemptHistory[0], {
@@ -54,6 +57,26 @@ test('does not count manual resolution as automatic success', () => {
   assert.equal(snapshot.counts.success, 0);
   assert.equal(snapshot.counts.manual, 1);
   assert.equal(snapshot.rows[0].manualResolution.status, 'resolved');
+});
+
+test('counts only successful or recent-success results as published', () => {
+  const checkpoint = createConsoleCheckpointFixture();
+  checkpoint.results[1] = {
+    ...checkpoint.results[1],
+    result: 'skipped',
+    skipReason: 'duplicate_in_batch'
+  };
+
+  let snapshot = createBatchConsoleSnapshot(checkpoint, { now: 70000 });
+  assert.equal(snapshot.counts.success, 0);
+  assert.equal(snapshot.counts.skipped, 1);
+  assert.equal(snapshot.rows[3].status, 'skipped');
+
+  checkpoint.results[1].skipReason = 'recent_success';
+  snapshot = createBatchConsoleSnapshot(checkpoint, { now: 70000 });
+  assert.equal(snapshot.counts.success, 1);
+  assert.equal(snapshot.counts.skipped, 0);
+  assert.equal(snapshot.rows[3].status, 'success');
 });
 
 test('terminal task elapsed time stays frozen across periodic renders', () => {

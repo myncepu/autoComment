@@ -72,3 +72,34 @@ test('rejects incomplete attempt identity before sending a phase', async () => {
 
   assert.equal(sent, false);
 });
+
+test('reports a bounded diagnostic event without task content', async () => {
+  const sent = [];
+  const reporter = loadReporter();
+
+  await reporter.reportDiagnostic({
+    sendMessage(message) {
+      sent.push(message);
+      return Promise.resolve({ ok: true });
+    }
+  }, {
+    batchId: 'batch-1',
+    urlIndex: 2,
+    attempt: 3
+  }, 'submission_dispatch_result', {
+    success: true,
+    dispatchResult: 'ajax-success'
+  });
+
+  assert.deepEqual(JSON.parse(JSON.stringify(sent)), [{
+    type: 'BATCH_DIAGNOSTIC_EVENT',
+    batchId: 'batch-1',
+    urlIndex: 2,
+    attempt: 3,
+    event: 'submission_dispatch_result',
+    details: {
+      success: true,
+      dispatchResult: 'ajax-success'
+    }
+  }]);
+});

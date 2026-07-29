@@ -84,14 +84,6 @@ function closeServer(server) {
   return new Promise((resolve) => server.close(resolve));
 }
 
-async function injectProduction(page) {
-  for (const relativePath of productionScripts) {
-    await page.addScriptTag({
-      path: path.join(projectRoot, relativePath)
-    });
-  }
-}
-
 async function readSubmissions(origins) {
   const recordsByBlog = await Promise.all(origins.map(
     (origin) => fetch(`${origin}/__fixture/submissions`)
@@ -158,7 +150,12 @@ async function main() {
         path.join(projectRoot, 'tests/fixtures/fake-chrome-adapter.js'),
         'utf8'
       );
-      await context.addInitScript({ content: adapterSource });
+      const productionSource = (
+        await Promise.all(productionScripts.map((relativePath) => (
+          fs.readFile(path.join(projectRoot, relativePath), 'utf8')
+        )))
+      ).join(';\n');
+      const pageInitSource = `${adapterSource};\n${productionSource}`;
       context.on('request', (request) => requestedUrls.push(request.url()));
 
     async function runTask(task) {
@@ -167,13 +164,13 @@ async function main() {
       const page = await context.newPage();
       page.on('pageerror', (error) => pageErrors.push(error.message));
       try {
+        await page.addInitScript({ content: pageInitSource });
         await page.goto(task.url, { waitUntil: 'domcontentloaded' });
         await page.evaluate((passwordsByProfileId) => {
           globalThis.LocalFixtureChrome.configurePasswords(
             passwordsByProfileId
           );
         }, plan.passwordsByProfileId);
-        await injectProduction(page);
         const response = await page.evaluate(
           (handle) => globalThis.LocalFixtureChrome.dispatchHandle(handle),
           task.handle

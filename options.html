@@ -204,6 +204,29 @@
             <button id="toggleExportOutlinksFloatingBtn" class="btn btn-secondary" type="button">加载中...</button>
           </div>
         </div>
+
+        <div class="settings-card settings-card-neutral">
+          <div class="settings-card-row">
+            <div>
+              <div class="settings-card-title">本地调试桥</div>
+              <div class="hint">
+                允许本机调试页读取批次状态并执行暂停、继续和权威进度同步。
+                默认关闭，不提供停止批次命令。
+              </div>
+              <div id="localDebugStatus" class="hint" role="status" aria-live="polite">
+                正在读取状态…
+              </div>
+            </div>
+            <div class="row local-debug-actions">
+              <button id="toggleLocalDebugBtn" class="btn btn-secondary" type="button">
+                加载中...
+              </button>
+              <button id="openLocalDebugBtn" class="btn btn-primary" type="button" disabled>
+                打开本地控制台
+              </button>
+            </div>
+          </div>
+        </div>
       
       <!-- 批量外链评论入口 -->
       <div class="settings-card settings-card-batch">

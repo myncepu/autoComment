@@ -30,6 +30,7 @@ export function consoleHandlers(overrides = {}) {
     onFilterChange() {},
     onNewBatch() {},
     onExport() {},
+    onExportDiagnostics() {},
     ...overrides
   };
 }
@@ -138,6 +139,7 @@ export function runningSnapshotFixture() {
       queued: 0,
       running: 3,
       success: 0,
+      skipped: 0,
       failed: 1,
       manual: 1
     },
@@ -252,6 +254,7 @@ export function emptySnapshotFixture() {
       queued: 0,
       running: 0,
       success: 0,
+      skipped: 0,
       failed: 0,
       manual: 0
     },

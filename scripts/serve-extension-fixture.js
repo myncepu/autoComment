@@ -54,15 +54,36 @@ function escapeHtml(value) {
     .replaceAll("'", '&#39;');
 }
 
-function renderFixturePage({ requestedPath, targetId = '', delayMs = 0 }) {
+function renderFixturePage({
+  requestedPath,
+  targetId = '',
+  delayMs = 0,
+  submissions = []
+}) {
   const pageTitle = targetId
     ? `Local fixture target ${targetId}`
     : 'Practical accessibility checks';
+  const publishedComments = submissions
+    .filter((submission) => (
+      String(submission.targetId || '') === String(targetId || '')
+    ))
+    .map((submission, index) => (
+      `<li id="comment-${index + 1}" class="comment">`
+      + `<div class="comment-content">${escapeHtml(submission.comment)}</div>`
+      + '</li>'
+    ))
+    .join('');
+  const commentsMarkup = publishedComments
+    ? '<section id="comments" aria-label="Published comments">'
+      + `<ol class="comment-list">${publishedComments}</ol>`
+      + '</section>'
+    : '';
   return fixtureTemplate
     .replaceAll('{{PAGE_TITLE}}', escapeHtml(pageTitle))
     .replaceAll('{{REQUESTED_PATH}}', escapeHtml(requestedPath))
     .replaceAll('{{TARGET_ID}}', escapeHtml(targetId))
-    .replaceAll('{{DELAY_MS}}', escapeHtml(delayMs));
+    .replaceAll('{{DELAY_MS}}', escapeHtml(delayMs))
+    .replace('<!-- PUBLISHED_COMMENTS -->', commentsMarkup);
 }
 
 function writeJson(response, statusCode, body) {
@@ -206,7 +227,14 @@ function createFixtureServer(options = {}) {
       && requestUrl.pathname === '/__fixture/submissions'
     ) {
       try {
+        let clientDisconnected = false;
+        response.on('close', () => {
+          if (!response.writableEnded) clientDisconnected = true;
+        });
         const submission = safeSubmission(await readBoundedJson(request));
+        const responseDelay = getClampedDelay(requestUrl.search);
+        if (responseDelay > 0) await wait(responseDelay);
+        if (clientDisconnected) return;
         submissions.push(submission);
         writeJson(response, 201, submission);
       } catch (_) {
@@ -275,7 +303,8 @@ function createFixtureServer(options = {}) {
         multiMatch?.[1] ||
         stressMatch?.[1] ||
         '',
-      delayMs: getClampedDelay(requestUrl.search)
+      delayMs: getClampedDelay(requestUrl.search),
+      submissions
     }));
   });
 }

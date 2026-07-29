@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Auto Comment 本地控制台</title>
+    <link rel="stylesheet" href="/local-debug.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <p class="eyebrow">127.0.0.1 · 本机调试</p>
+          <h1>Auto Comment 本地控制台</h1>
+          <p class="muted">通过受限调试桥控制当前批次页，不模拟点击扩展按钮。</p>
+        </div>
+        <div id="connection" class="badge waiting">正在连接</div>
+      </header>
+
+      <section class="actions" aria-label="批次控制">
+        <button id="refresh" type="button">刷新状态</button>
+        <button id="pause" type="button">暂停</button>
+        <button id="resume" type="button">继续</button>
+        <button id="reconcile" class="accent" type="button">同步并补位</button>
+      </section>
+
+      <section class="grid">
+        <article>
+          <h2>后台权威状态</h2>
+          <dl id="backgroundStatus"></dl>
+        </article>
+        <article>
+          <h2>批次页面状态</h2>
+          <dl id="pageStatus"></dl>
+        </article>
+      </section>
+
+      <section class="log-card">
+        <div class="log-heading">
+          <h2>本地事件日志</h2>
+          <button id="exportLog" type="button">导出日志</button>
+        </div>
+        <pre id="eventLog" aria-live="polite"></pre>
+      </section>
+    </main>
+    <script src="/local-debug.js"></script>
+  </body>
+</html>

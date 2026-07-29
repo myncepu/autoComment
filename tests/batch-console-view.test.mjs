@@ -81,20 +81,37 @@ test('renders a paused producer snapshot without hand-authored view fields', () 
   assert.match(document.querySelector('[data-console-overview]').textContent, /producer-promo.test/);
 });
 
-test('renders fixed controls, six counters, tab slots and full-lifecycle rows', () => {
+test('renders fixed controls, seven counters, tab slots and full-lifecycle rows', () => {
   const document = consoleDocument();
   const view = createBatchConsoleView(document, consoleHandlers());
 
   view.render(runningSnapshotFixture());
 
   assert.equal(document.querySelector('[data-command-bar]').dataset.sticky, 'true');
-  assert.equal(document.querySelectorAll('[data-summary-count]').length, 6);
+  assert.equal(document.querySelectorAll('[data-summary-count]').length, 7);
   assert.equal(document.querySelectorAll('[data-worker-slot]').length, 3);
   assert.equal(document.querySelectorAll('[data-task-row]').length, 5);
   assert.equal(document.querySelectorAll('[data-task-card]').length, 5);
   assert.match(document.querySelector('[data-worker-slot]').textContent, /标签页 101/);
   assert.doesNotMatch(document.querySelector('[data-console-overview]').textContent, /窗口槽位/);
   assert.match(document.querySelector('[data-task-row="18"]').textContent, /处理超时/);
+});
+
+test('offers a separate diagnostic-log export for the active batch', () => {
+  const document = consoleDocument();
+  let exports = 0;
+  const view = createBatchConsoleView(document, consoleHandlers({
+    onExportDiagnostics() {
+      exports += 1;
+    }
+  }));
+
+  view.render(runningSnapshotFixture());
+  const button = document.querySelector('[data-action="export-diagnostics"]');
+  assert.equal(button.textContent, '导出诊断日志');
+  assert.equal(button.disabled, false);
+  click(document, '[data-action="export-diagnostics"]');
+  assert.equal(exports, 1);
 });
 
 test('renders truncated preview columns with full hover and focus text', () => {
@@ -108,6 +125,7 @@ test('renders truncated preview columns with full hover and focus text', () => {
   assert.ok(headers.includes('评论文本'));
   assert.ok(headers.includes('锚文本'));
   assert.ok(headers.includes('推广网址'));
+  assert.ok(headers.includes('提交成功时间'));
 
   const row = document.querySelector('[data-task-row="18"]');
   const previews = row.querySelectorAll('[data-preview-value]');
@@ -125,6 +143,145 @@ test('renders truncated preview columns with full hover and focus text', () => {
   assert.match(drawer.textContent, /A safe generated draft with the complete comment text/);
   assert.match(drawer.textContent, /Old Blog Guide · Promotion Home/);
   assert.match(drawer.textContent, /https:\/\/promo\.test\/old-blog/);
+});
+
+test('shows the confirmed submission time in the table, card, and task drawer', () => {
+  const document = consoleDocument();
+  const view = createBatchConsoleView(document, consoleHandlers());
+  const snapshot = runningSnapshotFixture();
+  const submittedAt = Date.UTC(2026, 6, 28, 4, 5, 6);
+  Object.assign(snapshot.rows[0], {
+    result: 'success',
+    status: 'success',
+    submittedAt
+  });
+  snapshot.filteredRows = snapshot.rows;
+
+  view.render(snapshot);
+
+  const expected = new Date(submittedAt).toLocaleString('zh-CN', {
+    hour12: false
+  });
+  assert.match(
+    document.querySelector('[data-task-row="18"]').textContent,
+    new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  );
+  assert.match(
+    document.querySelector('[data-task-card="18"]').textContent,
+    /提交成功时间/
+  );
+  assert.match(
+    document.querySelector('[data-task-card="18"]').textContent,
+    new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  );
+
+  click(document, '[data-action="details"][data-url-index="18"]');
+  assert.match(document.querySelector('[data-task-drawer]').textContent, /提交成功时间/);
+  assert.match(
+    document.querySelector('[data-task-drawer]').textContent,
+    new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  );
+});
+
+test('uses Tabulator for sortable columns, per-column filters, and pagination', () => {
+  const document = consoleDocument();
+  const instances = [];
+  class FakeTabulator {
+    constructor(mount, options) {
+      this.mount = mount;
+      this.options = options;
+      this.destroyed = false;
+      this.replacements = [];
+      this.updates = [];
+      instances.push(this);
+    }
+
+    on(event, callback) {
+      if (event === 'tableBuilt') callback();
+    }
+
+    getSorters() {
+      return [{ field: 'gridSubmittedAt', dir: 'desc' }];
+    }
+
+    getHeaderFilters() {
+      return [{ field: 'status', value: 'success' }];
+    }
+
+    getPage() {
+      return 2;
+    }
+
+    setPage() {
+      return Promise.resolve();
+    }
+
+    setHeaderFilterFocus() {}
+
+    replaceData(rows) {
+      this.replacements.push(rows);
+      this.options.data = rows;
+      return Promise.resolve();
+    }
+
+    updateData(rows) {
+      this.updates.push(rows);
+      return Promise.resolve();
+    }
+
+    destroy() {
+      this.destroyed = true;
+    }
+  }
+  const view = createBatchConsoleView(
+    document,
+    consoleHandlers(),
+    { Tabulator: FakeTabulator }
+  );
+  const snapshot = runningSnapshotFixture();
+  snapshot.rows[0].submittedAt = Date.UTC(2026, 6, 28, 4, 5, 6);
+  snapshot.filteredRows = snapshot.rows;
+
+  view.render(snapshot);
+
+  assert.equal(instances.length, 1);
+  assert.equal(document.querySelector('.batch-console__table'), null);
+  assert.ok(document.querySelector('[data-task-grid]'));
+  assert.equal(instances[0].options.pagination, true);
+  assert.deepEqual(instances[0].options.paginationSizeSelector, [
+    25, 50, 100, 200
+  ]);
+  const columns = instances[0].options.columns;
+  assert.equal(columns.find((column) => column.title === '目标 URL').headerFilter, 'input');
+  assert.equal(columns.find((column) => column.title === '状态').headerFilter, 'list');
+  assert.equal(
+    columns.find((column) => column.title === '提交成功时间').sorter,
+    'number'
+  );
+  assert.equal(
+    instances[0].options.data[0].gridSubmittedAt,
+    snapshot.rows[0].submittedAt
+  );
+
+  const gridMount = document.querySelector('[data-task-grid]');
+  snapshot.rows[0].elapsedMs = 75_000;
+  snapshot.filteredRows = snapshot.rows;
+  view.render(snapshot);
+  assert.equal(instances.length, 1);
+  assert.equal(instances[0].destroyed, false);
+  assert.equal(document.querySelector('[data-task-grid]'), gridMount);
+  assert.equal(instances[0].replacements.length, 0);
+  assert.equal(instances[0].updates.length, 1);
+  assert.equal(instances[0].updates[0].length, 1);
+  assert.equal(instances[0].updates[0][0].elapsedMs, 75_000);
+
+  view.render(snapshot);
+  assert.equal(instances.length, 1);
+  assert.equal(instances[0].updates.length, 1);
+  assert.equal(instances[0].replacements.length, 0);
+
+  view.destroy();
+  assert.equal(instances[0].destroyed, true);
 });
 
 test('uses distinct pause and irreversible stop confirmations with semantic arguments', () => {
