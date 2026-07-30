@@ -12,6 +12,7 @@ const TOKEN = '1234567890abcdefghijklmnopqrstuvwxyz123456';
 
 function createHarness({ enabled = true } = {}) {
   const sent = [];
+  const createdTabs = [];
   const checkpoint = {
     batchId: 'batch-1',
     status: 'running',
@@ -26,6 +27,9 @@ function createHarness({ enabled = true } = {}) {
   };
   const bridge = createLocalDebugBridge({
     runtime: {
+      getURL(pathname) {
+        return `chrome-extension://extension-id/${pathname}`;
+      },
       async sendMessage(message) {
         sent.push(structuredClone(message));
         return {
@@ -35,6 +39,18 @@ function createHarness({ enabled = true } = {}) {
             status: message.command === 'pause' ? 'paused' : 'running'
           }
         };
+      }
+    },
+    tabs: {
+      async query() {
+        return [{
+          id: 41,
+          url: 'chrome-extension://extension-id/batch.html'
+        }];
+      },
+      async create(details) {
+        createdTabs.push(structuredClone(details));
+        return { id: 42, ...details };
       }
     },
     storageArea: {
@@ -57,7 +73,7 @@ function createHarness({ enabled = true } = {}) {
     },
     now: () => 2000
   });
-  return { bridge, sent };
+  return { bridge, sent, createdTabs };
 }
 
 function request(command, token = TOKEN) {
@@ -113,17 +129,47 @@ test('local debug bridge rejects non-local origins, bad tokens, and disabled set
   );
 });
 
-test('local debug bridge exposes only reversible commands', async () => {
+test('local control bridge exposes start and requires exact permanent stop confirmation', async () => {
   const { bridge, sent } = createHarness();
-  const forbidden = await bridge.handle(request('stop'), trustedSender);
-  assert.deepEqual(forbidden, {
+  const unconfirmed = await bridge.handle(request('stop'), trustedSender);
+  assert.deepEqual(unconfirmed, {
     ok: false,
-    error: 'local_debug_command_forbidden'
+    requestId: 'request-1',
+    error: 'stop_confirmation_required',
+    background: {
+      batchId: 'batch-1',
+      status: 'running',
+      updatedAt: 1234,
+      total: 2,
+      taskCounts: { terminal: 1, active: 1 },
+      resultCounts: { success: 1 },
+      timeoutSeconds: 90,
+      concurrency: 2
+    }
   });
   assert.deepEqual(sent, []);
+
+  const started = await bridge.handle(request('start'), trustedSender);
+  assert.equal(started.ok, true);
+  assert.equal(started.command, 'start');
 
   const paused = await bridge.handle(request('pause'), trustedSender);
   assert.equal(paused.ok, true);
   assert.equal(paused.command, 'pause');
   assert.equal(paused.page.status, 'paused');
+
+  const stopped = await bridge.handle({
+    ...request('stop'),
+    batchId: 'batch-1',
+    confirmPermanent: true
+  }, trustedSender);
+  assert.equal(stopped.ok, true);
+  assert.equal(stopped.command, 'stop');
+  assert.deepEqual(sent.at(-1), {
+    type: 'LOCAL_DEBUG_PAGE_COMMAND',
+    command: 'stop',
+    requestId: 'request-1',
+    batchId: 'batch-1',
+    confirmPermanent: true
+  });
 });

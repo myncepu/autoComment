@@ -503,8 +503,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       : '已关闭（默认）。';
     ui.localDebugStatus.style.color = enabled ? '#059669' : '';
     ui.toggleLocalDebugBtn.textContent = enabled
-      ? '关闭本地调试'
-      : '启用本地调试';
+      ? '关闭本地控制'
+      : '启用本地控制';
     ui.openLocalDebugBtn.disabled = !enabled;
   }
   function localDebugDashboardUrl() {

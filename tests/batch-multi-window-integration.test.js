@@ -274,6 +274,7 @@ async function createProductionHarness(options = {}) {
   }
   const runtimeMessages = [];
   const runtimePageListeners = new Set();
+  let localControlListener = null;
   const backgroundBroadcasts = [];
   const manualCreateCalls = [];
   const manualCloseCalls = [];
@@ -422,6 +423,12 @@ async function createProductionHarness(options = {}) {
       runtimePageListeners.add(listener);
       return () => runtimePageListeners.delete(listener);
     },
+    subscribeLocalDebugCommands(listener) {
+      localControlListener = listener;
+      return () => {
+        if (localControlListener === listener) localControlListener = null;
+      };
+    },
     async loadBatchSettings() {
       return {
         userName: 'Alice',
@@ -532,6 +539,10 @@ async function createProductionHarness(options = {}) {
       for (const listener of [...runtimePageListeners]) {
         listener(clone(message));
       }
+    },
+    runLocalControl(message) {
+      assert.equal(typeof localControlListener, 'function');
+      return localControlListener(clone(message));
     }
   };
 }
@@ -1387,6 +1398,44 @@ test('permanent stop closes owned tabs and cannot resume', async (t) => {
     ).length,
     1
   );
+});
+
+test('local control starts a paused batch and stops only the exact confirmed batch', async (t) => {
+  const permissionCalls = [];
+  const harness = await createProductionHarness({
+    requestTargetPermissions: async (urls) => {
+      permissionCalls.push(clone(urls));
+      return true;
+    }
+  });
+  t.after(() => harness.page.destroy());
+
+  const started = await harness.runLocalControl({ command: 'start' });
+  assert.equal(started.ok, true);
+  assert.equal(started.page.status, 'running');
+  assert.equal(permissionCalls.length, 1);
+  assert.equal(harness.tabsApi.tabs.size, 3);
+
+  const staleStop = await harness.runLocalControl({
+    command: 'stop',
+    batchId: 'another-batch',
+    confirmPermanent: true
+  });
+  assert.equal(staleStop.ok, false);
+  assert.equal(staleStop.error, 'stale_batch');
+  assert.equal(
+    harness.storageLocal.data.batchRuntimeCheckpoint.status,
+    'running'
+  );
+
+  const stopped = await harness.runLocalControl({
+    command: 'stop',
+    batchId: 'batch-1',
+    confirmPermanent: true
+  });
+  assert.equal(stopped.ok, true);
+  assert.equal(stopped.page.status, 'terminated');
+  assert.equal(harness.tabsApi.tabs.size, 0);
 });
 
 test('checkpoint results are authoritative for export and history remains navigable', async (t) => {
