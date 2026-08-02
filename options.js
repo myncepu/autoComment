@@ -33,6 +33,13 @@ import {
   LOCAL_DEBUG_BRIDGE_ORIGIN,
   LOCAL_DEBUG_BRIDGE_STORAGE_KEY
 } from './lib/local-debug-bridge.mjs';
+import {
+  bindSafeTabNavigation,
+  bindStoredBooleanToggle,
+  installOptionsPageBoot,
+  optionsErrorMessage,
+  stableOptionsErrorCode
+} from './lib/options-page-reliability.mjs';
 
 const SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY =
   'show_export_outlinks_floating_button';
@@ -45,12 +52,25 @@ function generatedId(prefix) {
   return `${prefix}-${crypto.randomUUID()}`;
 }
 
-function positiveInteger(input, label) {
+function codedOptionsError(code) {
+  const error = new Error(code);
+  error.code = code;
+  return error;
+}
+
+function positiveInteger(input, code) {
   const value = Number(input.value);
   if (!Number.isInteger(value) || value < 1) {
-    throw new Error(`${label}必须是正整数`);
+    throw codedOptionsError(code);
   }
   return value;
+}
+
+function reportOptionsDiagnostic(area, error, fallbackCode) {
+  console.error(
+    `[options] ${area}:`,
+    stableOptionsErrorCode(error, fallbackCode)
+  );
 }
 
 function downloadJson(value, fileName) {
@@ -67,14 +87,7 @@ function downloadJson(value, fileName) {
   URL.revokeObjectURL(url);
 }
 
-document.addEventListener('DOMContentLoaded', async () => {
-  bootAppShell(document, { currentUrl: window.location.href });
-  const focusCurrentSection = () => (
-    focusOptionsSection(document, window.location.hash)
-  );
-  focusCurrentSection();
-  window.addEventListener('hashchange', focusCurrentSection);
-
+export async function bootOptionsPage() {
   const ui = Object.fromEntries([
     'profileSelect',
     'newProfileBtn',
@@ -156,6 +169,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     settingsAdapter: safeSettingsAdapter
   });
   let snapshot = await domainController.snapshot();
+  bootAppShell(document, { currentUrl: window.location.href });
+  const focusCurrentSection = () => (
+    focusOptionsSection(document, window.location.hash)
+  );
+  focusCurrentSection();
+  window.addEventListener('hashchange', focusCurrentSection);
   let editingProfileId = snapshot.profiles[0]?.id ?? null;
   let editingSiteId = snapshot.promotionSites[0]?.id ?? null;
   let editingPairId = snapshot.pairs[0]?.id ?? null;
@@ -289,6 +308,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     renderSite();
     renderPair();
   }
+  renderAll();
 
   async function runConfigCommand(command, successText) {
     try {
@@ -296,9 +316,14 @@ document.addEventListener('DOMContentLoaded', async () => {
       renderAll();
       showStatus(ui.settingsStatus, successText);
     } catch (error) {
+      reportOptionsDiagnostic(
+        'domain config command failed',
+        error,
+        'domain_config_command_failed'
+      );
       showStatus(
         ui.settingsStatus,
-        error?.message || '保存失败',
+        optionsErrorMessage(error, '保存失败，请稍后重试。'),
         true,
         4200
       );
@@ -320,7 +345,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const name = ui.userName.value.trim();
       const email = ui.userEmail.value.trim();
       if (!displayName || !name || !email) {
-        throw new Error('请填写显示名、姓名和邮箱');
+        throw codedOptionsError('missing_profile_fields');
       }
       const profileId = editingProfileId || generatedId('profile');
       editingProfileId = profileId;
@@ -404,7 +429,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         id: pairId,
         profileId: ui.pairProfileSelect.value,
         promotionSiteId: ui.pairPromotionSiteSelect.value,
-        weight: positiveInteger(ui.pairWeight, '权重'),
+        weight: positiveInteger(
+          ui.pairWeight,
+          'invalid_assignment_pair_weight'
+        ),
         enabled: ui.pairEnabled.checked
       });
     },
@@ -421,15 +449,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     () => domainController.savePolicy({
       defaultPairId: ui.defaultPairSelect.value || null,
       quotas: {
-        batch: positiveInteger(ui.quotaBatch, '批次上限'),
-        perProfile: positiveInteger(ui.quotaProfile, '每 Profile 上限'),
+        batch: positiveInteger(ui.quotaBatch, 'invalid_quota_batch'),
+        perProfile: positiveInteger(
+          ui.quotaProfile,
+          'invalid_quota_profile'
+        ),
         perPromotionSite: positiveInteger(
           ui.quotaPromotionSite,
-          '每 Promotion Site 上限'
+          'invalid_quota_promotion_site'
         ),
         perTargetDomain: positiveInteger(
           ui.quotaTargetDomain,
-          '每目标域名上限'
+          'invalid_quota_target_domain'
         )
       }
     }),
@@ -441,7 +472,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     permissions: chrome.permissions,
     runtime: chrome.runtime
   };
-  const modelConfig = await loadLlmConfig(chrome.storage);
+  let modelConfig;
+  try {
+    modelConfig = await loadLlmConfig(chrome.storage);
+  } catch {
+    modelConfig = DEFAULT_LLM_CONFIG;
+    showStatus(
+      ui.llmStatus,
+      '模型配置暂时无法加载，请稍后重试。',
+      true,
+      4200
+    );
+  }
   ui.llmApiBaseUrl.value =
     modelConfig.apiBaseUrl || DEFAULT_LLM_CONFIG.apiBaseUrl;
   ui.llmModel.value = modelConfig.model || DEFAULT_LLM_CONFIG.model;
@@ -455,7 +497,16 @@ document.addEventListener('DOMContentLoaded', async () => {
       });
       showStatus(ui.llmStatus, '模型配置已保存');
     } catch (error) {
-      showStatus(ui.llmStatus, error.message, true);
+      reportOptionsDiagnostic(
+        'model config save failed',
+        error,
+        'model_config_save_failed'
+      );
+      showStatus(
+        ui.llmStatus,
+        optionsErrorMessage(error, '模型配置保存失败，请稍后重试。'),
+        true
+      );
     }
   });
   ui.testLlmConnectionBtn.addEventListener('click', async () => {
@@ -468,29 +519,63 @@ document.addEventListener('DOMContentLoaded', async () => {
       });
       showStatus(ui.llmStatus, `连接成功：${text}`, false, 5000);
     } catch (error) {
-      showStatus(ui.llmStatus, error.message, true, 5000);
+      reportOptionsDiagnostic(
+        'model connection test failed',
+        error,
+        'model_connection_test_failed'
+      );
+      showStatus(
+        ui.llmStatus,
+        optionsErrorMessage(error, '连接测试失败，请稍后重试。'),
+        true,
+        5000
+      );
     } finally {
       ui.testLlmConnectionBtn.disabled = false;
     }
   });
 
-  let showOutlinks = (
-    await chrome.storage.sync.get([
-      SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY
-    ])
-  )[SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY] !== false;
+  let showOutlinks = true;
+  try {
+    showOutlinks = (
+      await chrome.storage.sync.get([
+        SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY
+      ])
+    )[SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY] !== false;
+  } catch {
+    showStatus(
+      ui.settingsStatus,
+      '外链按钮设置暂时无法加载，当前使用默认值。',
+      true,
+      4200
+    );
+  }
   function renderOutlinksToggle() {
     ui.toggleExportOutlinksFloatingBtn.textContent = showOutlinks
       ? '隐藏导出外链按钮'
       : '显示导出外链按钮';
   }
-  renderOutlinksToggle();
-  ui.toggleExportOutlinksFloatingBtn.addEventListener('click', async () => {
-    showOutlinks = !showOutlinks;
-    await chrome.storage.sync.set({
-      [SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY]: showOutlinks
-    });
-    renderOutlinksToggle();
+  const outlinksToggle = bindStoredBooleanToggle({
+    button: ui.toggleExportOutlinksFloatingBtn,
+    initialValue: showOutlinks,
+    write: (nextValue) => chrome.storage.sync.set({
+      [SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY]: nextValue
+    }),
+    render: (nextValue) => {
+      showOutlinks = nextValue;
+      renderOutlinksToggle();
+    },
+    onCommit: () => {
+      showStatus(ui.settingsStatus, '外链按钮设置已保存');
+    },
+    onError: () => {
+      showStatus(
+        ui.settingsStatus,
+        '外链按钮设置保存失败，请重试。',
+        true,
+        4200
+      );
+    }
   });
 
   let localDebugSettings = (
@@ -549,20 +634,36 @@ document.addEventListener('DOMContentLoaded', async () => {
         importedSettings.llm.apiBaseUrl || DEFAULT_LLM_CONFIG.apiBaseUrl;
       ui.llmModel.value =
         importedSettings.llm.model || DEFAULT_LLM_CONFIG.model;
-      showOutlinks =
-        importedSettings.preferences.showExportOutlinksFloatingButton;
-      renderOutlinksToggle();
+      outlinksToggle.setValue(
+        importedSettings.preferences.showExportOutlinksFloatingButton
+      );
     }
   });
 
-  ui.openBatchBtn.addEventListener(
-    'click',
-    () => chrome.tabs.create({ url: 'batch.html' })
-  );
-  ui.openHistoryBtn.addEventListener(
-    'click',
-    () => chrome.tabs.create({ url: 'history.html' })
-  );
+  bindSafeTabNavigation({
+    button: ui.openBatchBtn,
+    open: () => chrome.tabs.create({ url: 'batch.html' }),
+    onError: () => {
+      showStatus(
+        ui.settingsStatus,
+        '批量处理页面打开失败，请稍后重试。',
+        true,
+        4200
+      );
+    }
+  });
+  bindSafeTabNavigation({
+    button: ui.openHistoryBtn,
+    open: () => chrome.tabs.create({ url: 'history.html' }),
+    onError: () => {
+      showStatus(
+        ui.settingsStatus,
+        '评论历史页面打开失败，请稍后重试。',
+        true,
+        4200
+      );
+    }
+  });
 
   const cloudSyncElements = Object.fromEntries([
     'cloudSyncCreateBtn',
@@ -588,5 +689,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     await cloudSyncController.refresh();
   }
 
-  renderAll();
-});
+}
+
+if (typeof document !== 'undefined') {
+  installOptionsPageBoot({
+    document,
+    boot: () => bootOptionsPage()
+  });
+}

@@ -92,3 +92,52 @@ test('background secret listener rejects content and serves options without retu
   });
   assert.equal(JSON.stringify(calls).includes('runtime-secret'), false);
 });
+
+test('secret listener invokes retryable readiness before each request', async () => {
+  let listener;
+  let attempts = 0;
+  const chromeApi = {
+    runtime: {
+      id: 'extension-id',
+      getURL: (path) => `chrome-extension://extension-id/${path}`,
+      onMessage: {
+        addListener(value) { listener = value; }
+      }
+    }
+  };
+  installProfileSecretMessageListener(chromeApi, {
+    async getConfiguredStates() {
+      return { 'profile-a': true };
+    }
+  }, {
+    ready: async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        const error = new Error('private migration failure');
+        error.code = 'domain_config_migration_deferred';
+        throw error;
+      }
+    }
+  });
+  const sender = {
+    id: 'extension-id',
+    url: 'chrome-extension://extension-id/options.html',
+    tab: { id: 12 }
+  };
+
+  assert.deepEqual(await dispatch(listener, {
+    type: 'PROFILE_SECRET_STATES',
+    profileIds: ['profile-a']
+  }, sender), {
+    ok: false,
+    error: 'domain_config_migration_deferred'
+  });
+  assert.deepEqual(await dispatch(listener, {
+    type: 'PROFILE_SECRET_STATES',
+    profileIds: ['profile-a']
+  }, sender), {
+    ok: true,
+    states: { 'profile-a': true }
+  });
+  assert.equal(attempts, 2);
+});

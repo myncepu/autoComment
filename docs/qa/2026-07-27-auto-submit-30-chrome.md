@@ -6,9 +6,16 @@
 
 ## 范围
 
+证据标签：**普通网页 production content-flow 负载验收（非 MV3
+端到端验收）**。
+
 本次验收使用 6 个独立 loopback HTTP origin 模拟 6 个客座博客，每个博客
 提供 5 个目标页面，共 30 个目标。浏览器加载实际 production content
 scripts；测试 adapter 只替代 Chrome runtime/storage 和模型服务边界。
+runner 没有加载 `manifest.json`、MV3 service worker 或 Chrome 的原生静态
+content-script 注入，因此这 30 次提交结果不能标记为 MV3 extension E2E。
+真实扩展的 MV3 service-worker 停止/重启、批次页、worker tab 补位和
+生命周期身份验证由 `npm run test:chrome:multi-assignment` 单独证明。
 
 所有任务均启用：
 
@@ -79,6 +86,7 @@ server 因 `finally` 尚未继续执行而保持监听。runner 现在对浏览�
 
 ## 结论
 
-在本地授权测试环境中，插件的自动生成、自动提交、多目标博客并发、
-多身份和多推广网站分配均按预期工作。该结果不代表对未授权公网博客的
-发布许可；本次第三方请求与第三方提交均为 0。
+在本地授权的普通网页 harness 中，production content flow 的自动生成、
+自动提交、多目标博客并发、多身份和多推广网站分配均按预期工作。该结论
+不外推为 MV3 端到端结果，也不代表对未授权公网博客的发布许可；本次
+第三方请求与第三方提交均为 0。

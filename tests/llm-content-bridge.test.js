@@ -62,6 +62,7 @@ test('loads the bridge before content code and routes every generation through i
   const content = fs.readFileSync(path.join(root, 'content.js'), 'utf8');
 
   assert.deepEqual(manifest.content_scripts[0].js, [
+    'lib/content-runtime-bootstrap.js',
     'illegal-site-filter.js',
     'lib/llm-content-bridge.js',
     'lib/batch-task-config.js',

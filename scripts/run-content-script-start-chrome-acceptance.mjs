@@ -6,6 +6,10 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
+import {
+  buildExtensionPackage
+} from './build-extension-package.mjs';
+
 const require = createRequire(import.meta.url);
 const projectRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -110,33 +114,7 @@ function createSlowPageServer() {
 
 async function prepareExtensionCopy(temporaryRoot) {
   const extensionRoot = path.join(temporaryRoot, 'extension');
-  const includedTopLevel = new Set([
-    'background.js',
-    'batch.html',
-    'batch.js',
-    'content.js',
-    'history.html',
-    'history.js',
-    'icons',
-    'illegal-site-filter.js',
-    'index.html',
-    'lib',
-    'manifest.json',
-    'options.html',
-    'options.js',
-    'payment.html',
-    'payment.js',
-    'styles',
-    'worker-pending.html'
-  ]);
-  await fs.cp(projectRoot, extensionRoot, {
-    recursive: true,
-    filter(source) {
-      const relative = path.relative(projectRoot, source);
-      if (relative === '') return true;
-      return includedTopLevel.has(relative.split(path.sep)[0]);
-    }
-  });
+  await buildExtensionPackage({ outputRoot: extensionRoot });
   const manifestPath = path.join(extensionRoot, 'manifest.json');
   const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
   manifest.host_permissions = ['http://127.0.0.1/*'];

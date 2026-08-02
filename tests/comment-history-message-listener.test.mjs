@@ -335,6 +335,7 @@ test('background migrates an old record before its startup retention check and c
   const alarmListeners = [];
   const notificationClickListeners = [];
   const startupListeners = [];
+  const tabRemovedListeners = [];
   const powerCalls = [];
   const syncStorageData = {
     auto_fill_user_name: 'Legacy Alice',
@@ -460,7 +461,11 @@ test('background migrates an old record before its startup retention check and c
       }
     },
     tabs: {
-      onRemoved: { addListener() {} },
+      onRemoved: {
+        addListener(listener) {
+          tabRemovedListeners.push(listener);
+        }
+      },
       async sendMessage() {},
       async create(details) {
         const tab = { id: 42, windowId: details.windowId, ...details };
@@ -572,7 +577,11 @@ test('background migrates an old record before its startup retention check and c
       (response) => responses.push(response)
     ));
     assert.ok(handled.includes(true));
-    for (let attempt = 0; attempt < 20 && responses.length === 0; attempt += 1) {
+    for (
+      let attempt = 0;
+      attempt < 200 && responses.length === 0;
+      attempt += 1
+    ) {
       await new Promise(setImmediate);
     }
     return responses;
@@ -1541,4 +1550,89 @@ globalThis.confirmBatchHistoryDurably = confirmBatchHistoryDurably;`,
     historyPendingCount: 0
   }]);
   assert.equal(storageData.batchSubmitContextsByTab['42'], undefined);
+
+  const closeRaceStartResponses = await dispatchConfirm({
+    type: 'BATCH_SESSION_START',
+    batchId: assignedIdentity.batchId,
+    plan: assignedPlan,
+    confirmation: createPlanConfirmation(assignedPlan, {
+      normalConfirmed: true,
+      highRiskConfirmed: false
+    }, () => fixedNow),
+    settings: {
+      autoOpenPanel: true,
+      autoGenerate: true,
+      autoSubmit: true,
+      timeoutSeconds: 60,
+      concurrency: 1
+    }
+  }, {
+    id: 'extension-id',
+    tab: { id: 900, windowId: 52 },
+    url: 'chrome-extension://extension-id/batch.html'
+  });
+  assert.equal(closeRaceStartResponses[0]?.ok, true);
+  assert.deepEqual(await dispatchConfirm({
+    type: 'BATCH_CREATE_WORKER_TAB',
+    ...assignedIdentity,
+    requestId: 'assigned-plan:0:1'
+  }, {
+    id: 'extension-id',
+    tab: { id: 900, windowId: 52 },
+    url: 'chrome-extension://extension-id/batch.html'
+  }).then((responses) => responses.map((response) => response.ok)), [true]);
+  assert.deepEqual(await dispatchConfirm({
+    type: 'BATCH_SAVE_SUBMIT_CONTEXT',
+    context: {
+      ...assignedIdentity,
+      result: 'success',
+      history: {
+        ...assignedHistory,
+        commentText: 'close-race submitted text'
+      }
+    }
+  }), [{ ok: true }]);
+  assert.equal(
+    storageData.batchRuntimeCheckpoint.tasks['0'].state,
+    'active'
+  );
+  assert.equal(tabRemovedListeners.length, 1);
+
+  tabData.delete(42);
+  tabRemovedListeners[0](42);
+  for (
+    let attempt = 0;
+    attempt < 100 &&
+      storageData.batchRuntimeCheckpoint.tasks['0'].state !== 'terminal';
+    attempt += 1
+  ) {
+    await new Promise(setImmediate);
+  }
+
+  assert.equal(
+    storageData.batchRuntimeCheckpoint.results[0].result,
+    'manual_required'
+  );
+  assert.equal(
+    storageData.batchRuntimeCheckpoint.results[0].errorCode,
+    'submission_uncertain'
+  );
+  assert.equal(storageData.batchSubmitContextsByTab['42'], undefined);
+  assert.equal(
+    Object.values(storageData.batchSubmitRecoveriesByTask).some(
+      (entry) =>
+        entry.batchId === assignedIdentity.batchId &&
+        entry.taskId === assignedIdentity.taskId &&
+        entry.profileId === assignedIdentity.profileId &&
+        entry.promotionSiteId === assignedIdentity.promotionSiteId &&
+        entry.sourceTabId === 42
+    ),
+    true,
+    JSON.stringify(storageData.batchSubmitRecoveriesByTask)
+  );
+  assert.equal(
+    JSON.stringify(storageData.batchSubmitRecoveriesByTask)
+      .includes('legacy-runtime-secret'),
+    false
+  );
 });

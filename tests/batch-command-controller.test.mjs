@@ -1327,6 +1327,39 @@ test('teardown pause persistence failure publishes a local recovery checkpoint',
   );
 });
 
+test('retries a pending recovery checkpoint and unlocks resume after persistence succeeds', async () => {
+  const runtimeFailures = {
+    BATCH_SESSION_PAUSE: {
+      error: 'checkpoint_write_failed'
+    }
+  };
+  const harness = createCommandHarness({ runtimeFailures });
+
+  await assert.rejects(
+    harness.controller.pause(),
+    (error) => error?.code === 'checkpoint_write_failed'
+  );
+  const pending = assertPendingRecoveryProjection(harness);
+  delete runtimeFailures.BATCH_SESSION_PAUSE;
+
+  const persisted = await harness.controller.retryPersistence();
+
+  assert.equal(persisted.status, 'paused_recovery');
+  assert.notEqual(persisted.persistencePending, true);
+  assert.deepEqual(
+    harness.calls.filter(
+      ([name, type]) => name === 'runtime' &&
+        type === 'BATCH_SESSION_PAUSE'
+    ).map((call) => call[2].batchId),
+    [pending.batchId, pending.batchId, pending.batchId]
+  );
+  assert.equal(
+    harness.published.at(-1).checkpoint.persistencePending,
+    undefined
+  );
+  await assert.doesNotReject(harness.controller.resume());
+});
+
 test('detaches old online listeners before attaching a replacement target', async () => {
   const harness = createCommandHarness();
   const replacement = createOnlineTarget();

@@ -22,6 +22,7 @@ export function consoleHandlers(overrides = {}) {
   return {
     onPause() {},
     onResume() {},
+    onRetryPersistence() {},
     onStop() {},
     onRetry() {},
     onOpenManual() {},
@@ -226,7 +227,9 @@ export function persistencePendingSnapshotFixture() {
     }],
     command: {
       ...snapshot.command,
-      canResume: false
+      canResume: false,
+      canCreate: false,
+      canRetryPersistence: true
     }
   };
 }

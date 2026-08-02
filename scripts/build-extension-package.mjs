@@ -11,7 +11,7 @@ const defaultOutput = path.join(
   'dist',
   'auto-comment-plugin'
 );
-const includedTopLevel = new Set([
+export const extensionPackageTopLevelEntries = Object.freeze([
   'background.js',
   'batch.html',
   'batch.js',
@@ -27,6 +27,7 @@ const includedTopLevel = new Set([
   'styles',
   'worker-pending.html'
 ]);
+const includedTopLevel = new Set(extensionPackageTopLevelEntries);
 const blockedSegments = new Set([
   '.git',
   '.superpowers',
@@ -52,10 +53,14 @@ function packageFilter(source) {
   const segments = relative.split(path.sep);
   if (!includedTopLevel.has(segments[0])) return false;
   if (segments.some((segment) => blockedSegments.has(segment))) return false;
-  return !/\.(?:key|pem)$/i.test(relative);
+  if (segments.some((segment) => segment.startsWith('.'))) return false;
+  return !/\.(?:key|map|pem)$/i.test(relative);
 }
 
-async function build(outputRoot) {
+export async function buildExtensionPackage({
+  outputRoot = defaultOutput
+} = {}) {
+  outputRoot = path.resolve(outputRoot);
   if (
     outputRoot === projectRoot
     || outputRoot === path.parse(outputRoot).root
@@ -72,7 +77,7 @@ async function build(outputRoot) {
     await fs.rm(outputRoot, { recursive: true, force: true });
   }
   await fs.mkdir(outputRoot, { recursive: true });
-  for (const entry of includedTopLevel) {
+  for (const entry of extensionPackageTopLevelEntries) {
     await fs.cp(
       path.join(projectRoot, entry),
       path.join(outputRoot, entry),
@@ -85,9 +90,14 @@ async function build(outputRoot) {
   return outputRoot;
 }
 
-const outputRoot = parseOutput(process.argv.slice(2));
-const built = await build(outputRoot);
-console.log(JSON.stringify({
-  ok: true,
-  output: built
-}));
+if (
+  process.argv[1]
+  && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  const outputRoot = parseOutput(process.argv.slice(2));
+  const built = await buildExtensionPackage({ outputRoot });
+  console.log(JSON.stringify({
+    ok: true,
+    output: built
+  }));
+}
