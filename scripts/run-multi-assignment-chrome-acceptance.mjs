@@ -505,7 +505,13 @@ async function waitForValue(load, accepts, timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs;
   let latest = null;
   while (Date.now() < deadline) {
-    latest = await load();
+    try {
+      latest = await load();
+    } catch (error) {
+      latest = { transientLoadError: error?.message || String(error) };
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      continue;
+    }
     if (accepts(latest)) return latest;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
@@ -609,12 +615,6 @@ function handleFor(origin, index, profileId, promotionSiteId, source) {
   };
 }
 
-async function injectProduction(page) {
-  for (const relativePath of productionScripts) {
-    await page.addScriptTag({ path: path.join(projectRoot, relativePath) });
-  }
-}
-
 async function waitForSubmissions(origin, expected, timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -697,7 +697,17 @@ async function main() {
       path.join(projectRoot, 'tests/fixtures/fake-chrome-adapter.js'),
       'utf8'
     );
-    await context.addInitScript({ content: adapterSource });
+    const productionSource = (await Promise.all(
+      productionScripts.map((relativePath) => fs.readFile(
+        path.join(projectRoot, relativePath),
+        'utf8'
+      ))
+    )).join('\n;\n');
+    // Match Chrome's content-script lifecycle: install the adapter first, then
+    // run the manifest scripts for both the initial document and every reload.
+    await context.addInitScript({
+      content: `${adapterSource}\n;\n${productionSource}`
+    });
     context.on('request', (request) => requestedUrls.push(request.url()));
 
     async function createLegacyPage(phase) {
@@ -727,7 +737,6 @@ async function main() {
         }, Object.fromEntries(Object.entries(profiles()).map(
           ([id, profile]) => [id, profile.password]
         )));
-        await injectProduction(page);
         const assignment = assignments()[index];
         const handle = handleFor(origin, index, ...assignment);
         const response = await page.evaluate(
@@ -736,11 +745,14 @@ async function main() {
         );
         assert.equal(response?.ok, true);
         assert.equal(response?.accepted, true);
-        await page.waitForFunction((taskId) => (
-          globalThis.LocalFixtureChrome.safeState().confirmations.some(
-            (message) => message.taskId === taskId
+        await waitForValue(
+          () => page.evaluate(
+            () => globalThis.LocalFixtureChrome.safeState()
+          ),
+          (state) => state.confirmations.some(
+            (message) => message.taskId === handle.taskId
           )
-        ), handle.taskId);
+        );
         const state = await page.evaluate(
           () => globalThis.LocalFixtureChrome.safeState()
         );
@@ -795,7 +807,6 @@ async function main() {
 
     const failurePage = await createLegacyPage('failure');
     await failurePage.goto(`${origin}/multi/1`, { waitUntil: 'domcontentloaded' });
-    await injectProduction(failurePage);
     const invalid = handleFor(origin, 0, ...assignments()[0]);
     delete invalid.profileId;
     const rejected = await failurePage.evaluate(
@@ -814,7 +825,6 @@ async function main() {
       });
       globalThis.LocalFixtureChrome.configureFaults({ llmDelayMs: 5_000 });
     });
-    await injectProduction(timeoutPage);
     const timeoutHandle = {
       ...handleFor(origin, 0, ...assignments()[0]),
       batchId: 'timeout-plan',
@@ -844,7 +854,6 @@ async function main() {
         'profile-b': 'fixture-password-b'
       });
     });
-    await injectProduction(retryPage);
     const retryHandle = {
       ...timeoutHandle,
       attempt: 2
@@ -877,7 +886,6 @@ async function main() {
       });
       globalThis.LocalFixtureChrome.configureFaults({ submitDelayMs: 5_000 });
     });
-    await injectProduction(interruptionPage);
     const interruptionHandle = {
       ...handleFor(origin, 1, ...assignments()[1]),
       batchId: 'interruption-plan',
@@ -926,7 +934,6 @@ async function main() {
       });
     }, { handle: recoveryHandle });
     await recoveryPage.reload({ waitUntil: 'domcontentloaded' });
-    await injectProduction(recoveryPage);
     await recoveryPage.waitForFunction(() => (
       globalThis.LocalFixtureChrome.safeState().confirmations.length === 1
     ));

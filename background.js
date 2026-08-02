@@ -59,6 +59,9 @@ import {
 import {
   isBenignRuntimeDeliveryError
 } from './lib/chrome-runtime-delivery.mjs';
+import {
+  installLocalControlPoller
+} from './lib/local-control-poller.mjs';
 
 installLlmMessageListener(chrome);
 installActionClickHandler(chrome);
@@ -179,8 +182,11 @@ const commentHistoryService = createCommentHistoryService({
 
 installCommentHistoryMessageListener(chrome, commentHistoryService);
 installBatchRuntimeController(chrome, secretAwareBatchRuntimeController);
-installLocalDebugBridge(chrome, {
+const localDebugBridge = installLocalDebugBridge(chrome, {
   batchRuntimeController: initializationAwareBatchRuntimeController
+});
+installLocalControlPoller(chrome, {
+  bridge: localDebugBridge.bridge
 });
 installBatchDomainConfigListener(chrome, domainConfigRepository, {
   ready: ensureDomainConfigReady

@@ -529,7 +529,11 @@ test('background migrates an old record before its startup retention check and c
   ) {
     await new Promise(setImmediate);
   }
-  assert.equal(alarmListeners.length, 1);
+  assert.equal(
+    alarmListeners.length,
+    2,
+    'deadline watchdog and local-control polling must both install synchronously'
+  );
   assert.equal(storageData.domainConfigMigrationVersion, 2);
   assert.equal(storageData.autoCommentDomainConfig.profiles[0].id, 'default-profile');
   assert.equal(storageData.autoCommentProfileSecrets.passwordsByProfileId['default-profile'],

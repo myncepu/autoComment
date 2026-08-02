@@ -584,12 +584,12 @@ export async function bootOptionsPage() {
   function renderLocalDebugBridge() {
     const enabled = localDebugSettings?.enabled === true;
     ui.localDebugStatus.textContent = enabled
-      ? '已启用：仅允许本机 127.0.0.1，令牌不会同步。'
+      ? `已启用：扩展 ID ${chrome.runtime.id}。首次使用需通过 autocommentctl 明确授权。`
       : '已关闭（默认）。';
     ui.localDebugStatus.style.color = enabled ? '#059669' : '';
     ui.toggleLocalDebugBtn.textContent = enabled
-      ? '关闭本地调试'
-      : '启用本地调试';
+      ? '关闭本地控制'
+      : '启用本地控制';
     ui.openLocalDebugBtn.disabled = !enabled;
   }
   function localDebugDashboardUrl() {

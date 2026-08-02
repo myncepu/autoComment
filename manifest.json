@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "minimum_chrome_version": "102",
+  "minimum_chrome_version": "120",
   "name": "Auto Register Filler",
   "version": "1.6.0",
   "description": "自动填充注册表单，并为当前网站生成推广文案。",
@@ -13,6 +13,7 @@
     "power"
   ],
   "host_permissions": [
+    "http://127.0.0.1:4376/*",
     "https://openrouter.ai/*",
     "https://auto-comment-sync.yan2010.workers.dev/*"
   ],

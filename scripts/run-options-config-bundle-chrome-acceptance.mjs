@@ -232,7 +232,7 @@ async function main() {
     await page.locator('#fixtureFailSettingsSave').check();
     await page.locator('#applyImportConfigBtn').click();
     await page.locator('#importExportStatus').getByText(
-      /config_bundle_apply_failed/
+      /配置应用失败，原有设置已恢复/
     ).waitFor();
     assert.equal(
       await textOf(page, '#fixtureRollbackStatus'),
@@ -257,7 +257,9 @@ async function main() {
       (requestedUrl) => new URL(requestedUrl).origin !== origin
     ).length;
     assert.deepEqual(pageErrors, []);
-    assert.deepEqual(consoleErrors, []);
+    assert.deepEqual(consoleErrors, [
+      '[options-config] apply: config_bundle_apply_failed'
+    ]);
     assert.deepEqual(requestFailures, []);
     assert.deepEqual(nonSuccessfulResponses, []);
     assert.equal(thirdPartyRequests, 0);

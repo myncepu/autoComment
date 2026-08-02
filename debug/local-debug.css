@@ -50,6 +50,7 @@ button {
 button:hover { border-color: #7892ef; }
 button:disabled { opacity: .5; cursor: wait; }
 button.accent { background: #5577e7; border-color: #5577e7; color: #fff; }
+button.danger { background: #b42318; border-color: #b42318; color: #fff; }
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 18px; }
 article, .log-card { padding: 22px; }
 dl { display: grid; grid-template-columns: 150px 1fr; gap: 10px 16px; margin: 0; }

@@ -25,6 +25,7 @@ const STATIC_FIXTURE_ROUTES = new Map([
   ...[
     '/tests/fixtures/options-config-bundle-app.mjs',
     '/lib/options-config-bundle-view.mjs',
+    '/lib/options-page-reliability.mjs',
     '/lib/options-config-bundle-controller.mjs',
     '/lib/config-bundle.mjs',
     '/lib/domain-config-import-export.mjs',
