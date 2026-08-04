@@ -18,7 +18,12 @@ import {
 } from '../lib/local-control-command-store.mjs';
 
 const HOST = '127.0.0.1';
-const PORT = 4376;
+const requestedPort = Number(process.env.AUTOCOMMENT_CONTROL_PORT ?? 4376);
+const PORT = Number.isInteger(requestedPort) &&
+  requestedPort >= 0 &&
+  requestedPort <= 65535
+  ? requestedPort
+  : 4376;
 const ORIGIN = `http://${HOST}:${PORT}`;
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'debug');
 const CONFIG_PATH = process.env.AUTOCOMMENT_CONTROL_CONFIG || join(
@@ -39,6 +44,10 @@ function token() {
   return randomBytes(32).toString('base64url');
 }
 
+function validExtensionId(value) {
+  return typeof value === 'string' && /^[a-p]{32}$/.test(value);
+}
+
 async function saveConfig(config) {
   await mkdir(dirname(CONFIG_PATH), { recursive: true, mode: 0o700 });
   const temporary = `${CONFIG_PATH}.${process.pid}.tmp`;
@@ -56,14 +65,28 @@ async function loadConfig() {
       typeof parsed?.cliToken === 'string' &&
       parsed.cliToken.length >= 32
     ) {
-      return parsed;
+      await chmod(CONFIG_PATH, 0o600).catch(() => {});
+      return {
+        ...parsed,
+        version: 2,
+        extensionId: validExtensionId(parsed.extensionId)
+          ? parsed.extensionId
+          : null,
+        bridgeToken: typeof parsed.bridgeToken === 'string'
+          ? parsed.bridgeToken
+          : null,
+        approvedExtensionId: validExtensionId(parsed.approvedExtensionId)
+          ? parsed.approvedExtensionId
+          : null
+      };
     }
   } catch (_) {}
   const created = {
-    version: 1,
+    version: 2,
     cliToken: token(),
     extensionId: null,
     bridgeToken: null,
+    approvedExtensionId: null,
     updatedAt: Date.now()
   };
   await saveConfig(created);
@@ -90,10 +113,6 @@ function bearer(request) {
 
 function extensionOrigin(extensionId) {
   return `chrome-extension://${extensionId}`;
-}
-
-function validExtensionId(value) {
-  return typeof value === 'string' && /^[a-p]{32}$/.test(value);
 }
 
 function writeJson(response, statusCode, body) {
@@ -176,10 +195,12 @@ async function handlePair(request, response) {
     writeJson(response, 401, { ok: false, error: 'local_control_unauthorized' });
     return;
   }
-  if (config.extensionId && config.extensionId !== body.extensionId) {
+  const alreadyPaired = config.extensionId === body.extensionId;
+  const explicitlyApproved = config.approvedExtensionId === body.extensionId;
+  if (!alreadyPaired && !explicitlyApproved) {
     writeJson(response, 409, {
       ok: false,
-      error: 'local_control_extension_mismatch'
+      error: 'local_control_pairing_approval_required'
     });
     return;
   }
@@ -191,6 +212,7 @@ async function handlePair(request, response) {
       ...config,
       extensionId: body.extensionId,
       bridgeToken: body.token,
+      approvedExtensionId: null,
       updatedAt: Date.now()
     };
     await saveConfig(config);
@@ -238,6 +260,62 @@ async function handleExtensionApi(request, response, pathname) {
 async function handleCliApi(request, response, pathname) {
   if (!cliAuthorized(request)) {
     writeJson(response, 401, { ok: false, error: 'local_control_unauthorized' });
+    return;
+  }
+  if (request.method === 'POST' && pathname === '/api/v1/pair/approve') {
+    const body = await readJsonBody(request);
+    if (!validExtensionId(body.extensionId)) {
+      writeJson(response, 400, {
+        ok: false,
+        error: 'local_control_extension_id_invalid'
+      });
+      return;
+    }
+    const replacing = Boolean(
+      config.extensionId && config.extensionId !== body.extensionId
+    );
+    if (replacing && body.replace !== true) {
+      writeJson(response, 409, {
+        ok: false,
+        error: 'local_control_pairing_replacement_confirmation_required'
+      });
+      return;
+    }
+    config = {
+      ...config,
+      ...(replacing
+        ? { extensionId: null, bridgeToken: null }
+        : {}),
+      approvedExtensionId: body.extensionId,
+      updatedAt: Date.now()
+    };
+    await saveConfig(config);
+    writeJson(response, 200, {
+      ok: true,
+      approved: true,
+      extensionId: body.extensionId,
+      replacing
+    });
+    return;
+  }
+  if (request.method === 'POST' && pathname === '/api/v1/pair/reset') {
+    const body = await readJsonBody(request);
+    if (body.confirm !== true) {
+      writeJson(response, 409, {
+        ok: false,
+        error: 'local_control_pairing_reset_confirmation_required'
+      });
+      return;
+    }
+    config = {
+      ...config,
+      extensionId: null,
+      bridgeToken: null,
+      approvedExtensionId: null,
+      updatedAt: Date.now()
+    };
+    await saveConfig(config);
+    writeJson(response, 200, { ok: true, paired: false });
     return;
   }
   if (request.method === 'POST' && pathname === '/api/v1/commands') {
@@ -308,10 +386,11 @@ const server = createServer(async (request, response) => {
       return;
     }
     if (pathname === '/health') {
+      const address = server.address();
       writeJson(response, 200, {
         ok: true,
         host: HOST,
-        port: PORT,
+        port: typeof address === 'object' && address ? address.port : PORT,
         paired: validExtensionId(config.extensionId)
       });
       return;
@@ -328,6 +407,8 @@ const server = createServer(async (request, response) => {
       return;
     }
     if (
+      pathname === '/api/v1/pair/approve' ||
+      pathname === '/api/v1/pair/reset' ||
       pathname === '/api/v1/commands' ||
       /^\/api\/v1\/commands\/[^/]+$/.test(pathname)
     ) {
@@ -344,8 +425,13 @@ const server = createServer(async (request, response) => {
 });
 
 server.listen(PORT, HOST, () => {
+  const address = server.address();
+  const listeningPort = typeof address === 'object' && address
+    ? address.port
+    : PORT;
+  const listeningOrigin = `http://${HOST}:${listeningPort}`;
   process.stdout.write(
-    `Auto Comment local control: ${ORIGIN}/\n`
+    `Auto Comment local control: ${listeningOrigin}/\n`
       + `CLI config: ${CONFIG_PATH}\n`
   );
 });

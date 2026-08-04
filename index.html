@@ -210,7 +210,6 @@
 
   <h2>7. Permissions explained</h2>
   <ul>
-    <li><strong><code>activeTab</code></strong>: Available for user-initiated tab interactions; it does not grant or describe the static content scripts' page access.</li>
     <li><strong>Content-script matches</strong>: Static content scripts use <code>&lt;all_urls&gt;</code> to run on matching loaded pages, including user-initiated batch tabs, where they read the page data and fill recognized form fields described above.</li>
     <li><strong>Model API host permissions</strong>: OpenRouter has default model API host permission; saving or testing another HTTP(S) API Base URL requests optional permission only for that provider host.</li>
     <li><strong><code>storage</code></strong>: Used to store your profile data, API Base URL, model ID, locally stored API key and sync key, preferences, and cooldown records as described above.</li>
@@ -341,7 +340,6 @@
 
     <h2>七、权限说明</h2>
     <ul>
-      <li><strong><code>activeTab</code></strong>：可用于用户发起的标签页交互；它不授予也不描述静态内容脚本对页面 DOM 的访问。</li>
       <li><strong>内容脚本匹配范围</strong>：静态内容脚本通过 <code>&lt;all_urls&gt;</code> 在匹配的已加载页面运行，包括用户发起的批量处理标签页；它们会读取上述页面数据并填写识别到的表单字段。</li>
       <li><strong>模型 API 主机权限</strong>：OpenRouter 默认拥有模型 API 主机权限；保存或测试其他 HTTP(S) API Base URL 时，只会为该服务商主机请求可选权限。</li>
       <li><strong><code>storage</code></strong>：用于保存上述资料、API Base URL、模型 ID、仅本地保存的 API Key 与同步密钥、偏好设置和冷却记录。</li>

@@ -10,6 +10,60 @@ import { bootAppShell } from './lib/app-shell.mjs';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const EXPIRY_DAYS = 90;
+const HISTORY_ERROR_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,95}$/;
+const HISTORY_ERROR_MESSAGES = Object.freeze({
+  HISTORY_RUNTIME_UNAVAILABLE:
+    '评论历史服务暂时不可用，请重新加载扩展页面后重试。',
+  HISTORY_REQUEST_FAILED: '评论历史请求失败，请稍后重试。',
+  INVALID_HISTORY_RESPONSE: '评论历史服务返回了无效响应，请稍后重试。',
+  INVALID_HISTORY_CURSOR: '评论历史分页状态已失效，请重新应用筛选条件。',
+  CLOUD_HISTORY_UNAVAILABLE_OFFLINE:
+    '当前离线，无法读取所需的云端评论历史。',
+  CONFIRMATION_REQUIRED: '该操作需要明确确认。',
+  FORBIDDEN_SENDER: '评论历史请求被拒绝。',
+  HISTORY_EXPORT_CHANGED: '导出记录集合已变化，请重新导出。'
+});
+
+function stableHistoryErrorCode(error, fallback = 'HISTORY_REQUEST_FAILED') {
+  const candidate = typeof error?.code === 'string'
+    ? error.code
+    : '';
+  return (
+    HISTORY_ERROR_CODE_PATTERN.test(candidate)
+    && Object.hasOwn(HISTORY_ERROR_MESSAGES, candidate)
+  ) ? candidate : fallback;
+}
+
+function historyError(code, fallbackMessage) {
+  const stableCode = (
+    HISTORY_ERROR_CODE_PATTERN.test(code)
+    && Object.hasOwn(HISTORY_ERROR_MESSAGES, code)
+  )
+    ? code
+    : 'HISTORY_REQUEST_FAILED';
+  const error = new Error(
+    HISTORY_ERROR_MESSAGES[stableCode]
+      || fallbackMessage
+      || HISTORY_ERROR_MESSAGES.HISTORY_REQUEST_FAILED
+  );
+  error.code = stableCode;
+  return error;
+}
+
+function historyErrorMessage(
+  error,
+  fallback = HISTORY_ERROR_MESSAGES.HISTORY_REQUEST_FAILED
+) {
+  return HISTORY_ERROR_MESSAGES[stableHistoryErrorCode(error, '')] || fallback;
+}
+
+function reportHistoryDiagnostic(reportDiagnostic, code) {
+  try {
+    reportDiagnostic(code);
+  } catch (_) {
+    // Diagnostics must never break the user-facing recovery path.
+  }
+}
 
 function validLocalDateParts(value) {
   if (typeof value !== 'string') return null;
@@ -188,20 +242,41 @@ export function downloadCsvPart(documentRef, parts, filename, {
   }
 }
 
-function sendHistoryMessage(message) {
+export function sendHistoryMessage(message, {
+  chromeApi = globalThis.chrome,
+  reportDiagnostic = (code) => {
+    console.error('[history] request failed:', code);
+  }
+} = {}) {
   return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage(message, (response) => {
-      const runtimeError = chrome.runtime.lastError;
-      if (runtimeError) {
-        reject(new Error(runtimeError.message || '无法连接评论历史服务。'));
-        return;
-      }
-      if (!response?.ok) {
-        reject(new Error(response?.error?.message || '评论历史请求失败。'));
-        return;
-      }
-      resolve(response.data);
-    });
+    const runtime = chromeApi?.runtime;
+    if (typeof runtime?.sendMessage !== 'function') {
+      const error = historyError('HISTORY_RUNTIME_UNAVAILABLE');
+      reportHistoryDiagnostic(reportDiagnostic, error.code);
+      reject(error);
+      return;
+    }
+    const fail = (code) => {
+      const error = historyError(code);
+      reportHistoryDiagnostic(reportDiagnostic, error.code);
+      reject(error);
+    };
+    try {
+      runtime.sendMessage(message, (response) => {
+        const runtimeError = runtime.lastError;
+        if (runtimeError) {
+          fail('HISTORY_RUNTIME_UNAVAILABLE');
+          return;
+        }
+        if (!response?.ok) {
+          fail(stableHistoryErrorCode(response?.error));
+          return;
+        }
+        resolve(response.data);
+      });
+    } catch (_) {
+      fail('HISTORY_RUNTIME_UNAVAILABLE');
+    }
   });
 }
 
@@ -296,6 +371,7 @@ function renderSummary(elements, summary, estimatedUsage, cloudEnabled = false) 
 
   const dueSoonCount = Number(summary?.dueSoonCount) || 0;
   const expiredCount = Number(summary?.expiredCount) || 0;
+  elements.retentionBanner.classList.remove('error');
   elements.retentionBanner.hidden = dueSoonCount === 0 && expiredCount === 0;
   if (expiredCount > 0) {
     setStoredText(
@@ -311,109 +387,32 @@ function renderSummary(elements, summary, estimatedUsage, cloudEnabled = false) 
         ? `有 ${dueSoonCount} 条本机缓存将在近期达到 90 天；仅已确认同步且无待处理更改的记录会自动清理。`
         : `有 ${dueSoonCount} 条记录将在近期达到 90 天，请提前安排导出归档。`
     );
+  } else {
+    setStoredText(elements.retentionBanner, '');
   }
 }
 
-async function loadAnchorDetails(documentRef, detailContainer, record) {
-  detailContainer.dataset.loaded = 'loading';
-  setStoredText(detailContainer, '正在加载锚链接…');
-  try {
-    const anchors = await sendHistoryMessage(buildAnchorsRequest(record.id));
-    detailContainer.textContent = '';
-
-    const commentTitle = documentRef.createElement('strong');
-    setStoredText(commentTitle, '完整评论 HTML（按文本显示）');
-    detailContainer.appendChild(commentTitle);
-    const comment = documentRef.createElement('pre');
-    comment.className = 'stored-html';
-    setStoredText(comment, record.commentHtml || record.commentText || '');
-    detailContainer.appendChild(comment);
-
-    const anchorTitle = documentRef.createElement('strong');
-    setStoredText(anchorTitle, `锚链接（${Array.isArray(anchors) ? anchors.length : 0}）`);
-    detailContainer.appendChild(anchorTitle);
-    const anchorList = documentRef.createElement('div');
-    anchorList.className = 'anchor-list';
-    if (!Array.isArray(anchors) || anchors.length === 0) {
-      setStoredText(anchorList, '无锚链接');
-    } else {
-      for (const anchor of anchors) {
-        const item = documentRef.createElement('div');
-        item.className = 'anchor-item';
-        const destination = anchor.hrefResolved || anchor.hrefRaw || '无链接';
-        setStoredText(item, `${anchor.anchorText || '（无锚文本）'} → ${destination}`);
-        anchorList.appendChild(item);
-      }
-    }
-    detailContainer.appendChild(anchorList);
-    detailContainer.dataset.loaded = 'true';
-  } catch (error) {
-    setStoredText(detailContainer, error.message);
-    detailContainer.dataset.loaded = 'error';
+function renderSummaryUnavailable(elements, estimatedUsage) {
+  for (const element of [
+    elements.summaryTotal,
+    elements.summaryLast24Hours,
+    elements.summaryDueSoon,
+    elements.summaryExpired
+  ]) {
+    setStoredText(element, '暂不可用');
   }
-}
-
-function renderRecords(documentRef, elements, records) {
-  elements.historyTableBody.textContent = '';
-  if (!Array.isArray(records) || records.length === 0) {
-    const row = documentRef.createElement('tr');
-    const cell = createTextCell(documentRef, '没有符合条件的评论历史。', 'empty-cell');
-    cell.colSpan = 8;
-    row.appendChild(cell);
-    elements.historyTableBody.appendChild(row);
-    return;
-  }
-
-  for (const record of records) {
-    const row = documentRef.createElement('tr');
-    const expandCell = documentRef.createElement('td');
-    const expandButton = documentRef.createElement('button');
-    expandButton.type = 'button';
-    expandButton.className = 'expand-button';
-    expandButton.setAttribute('aria-expanded', 'false');
-    setStoredText(expandButton, '展开');
-    expandCell.appendChild(expandButton);
-    row.appendChild(expandCell);
-    row.appendChild(createTextCell(documentRef, formatDateTime(record.submittedAt), 'time-cell'));
-    row.appendChild(createUrlCell(documentRef, record.targetPageUrl));
-    row.appendChild(createUrlCell(documentRef, record.promotedWebsiteUrl));
-    row.appendChild(createTextCell(
-      documentRef,
-      record.profileDisplayName || record.profileId || '—'
-    ));
-    row.appendChild(createTextCell(
-      documentRef,
-      record.promotionSiteName || record.promotionSiteId || '—'
-    ));
-    row.appendChild(createTextCell(documentRef, record.commentText || record.commentHtml, 'comment-cell'));
-    row.appendChild(createTextCell(documentRef, record.source === 'legacy' ? '旧记录' : '当前记录'));
-
-    const detailRow = documentRef.createElement('tr');
-    detailRow.className = 'detail-row';
-    detailRow.hidden = true;
-    const detailCell = documentRef.createElement('td');
-    detailCell.colSpan = 8;
-    const detailContainer = documentRef.createElement('div');
-    detailContainer.className = 'detail-content';
-    detailCell.appendChild(detailContainer);
-    detailRow.appendChild(detailCell);
-
-    expandButton.addEventListener('click', () => {
-      const expanded = expandButton.getAttribute('aria-expanded') === 'true';
-      expandButton.setAttribute('aria-expanded', String(!expanded));
-      setStoredText(expandButton, expanded ? '展开' : '收起');
-      detailRow.hidden = expanded;
-      if (!expanded && !detailContainer.dataset.loaded) {
-        loadAnchorDetails(documentRef, detailContainer, record);
-      }
-    });
-
-    elements.historyTableBody.append(row, detailRow);
-  }
+  setStoredText(elements.summaryStorage, formatBytes(estimatedUsage));
+  elements.retentionBanner.hidden = false;
+  elements.retentionBanner.classList.add('error');
+  setStoredText(
+    elements.retentionBanner,
+    '评论历史摘要暂时无法加载，请刷新页面重试。'
+  );
 }
 
 function renderArchiveEvents(documentRef, elements, events) {
   elements.archiveTableBody.textContent = '';
+  elements.archiveTableBody.classList.remove('error');
   if (!Array.isArray(events) || events.length === 0) {
     const row = documentRef.createElement('tr');
     const cell = createTextCell(documentRef, '暂无归档清理记录。', 'empty-cell');
@@ -428,14 +427,33 @@ function renderArchiveEvents(documentRef, elements, events) {
     row.appendChild(createTextCell(documentRef, formatDateTime(event.deletedAt)));
     row.appendChild(createTextCell(documentRef, formatDateTime(event.rangeStart)));
     row.appendChild(createTextCell(documentRef, formatDateTime(event.rangeEnd)));
-    row.appendChild(createTextCell(documentRef, event.recordCount ?? 0));
+    row.appendChild(createTextCell(
+      documentRef,
+      Number.isInteger(event.recordCount) ? event.recordCount : '不可用'
+    ));
     const filenames = event.fileNames ?? event.filenames;
     row.appendChild(createTextCell(
       documentRef,
-      Array.isArray(filenames) ? filenames.join('、') : ''
+      Array.isArray(filenames) && filenames.length > 0
+        ? filenames.join('、')
+        : '文件名不可用'
     ));
     elements.archiveTableBody.appendChild(row);
   }
+}
+
+function renderArchiveUnavailable(documentRef, elements) {
+  elements.archiveTableBody.textContent = '';
+  elements.archiveTableBody.classList.add('error');
+  const row = documentRef.createElement('tr');
+  const cell = createTextCell(
+    documentRef,
+    '历史归档摘要暂时无法加载，请刷新页面重试。',
+    'empty-cell'
+  );
+  cell.colSpan = 5;
+  row.appendChild(cell);
+  elements.archiveTableBody.appendChild(row);
 }
 
 function getElements(documentRef) {
@@ -503,13 +521,12 @@ export function bootHistoryPage(documentRef = document, {
       try {
         return { ok: true, data: await requestMessage(message) };
       } catch (error) {
+        const code = stableHistoryErrorCode(error);
         return {
           ok: false,
           error: {
-            code: typeof error?.code === 'string'
-              ? error.code
-              : 'HISTORY_REQUEST_FAILED',
-            message: error?.message || '评论历史请求失败。',
+            code,
+            message: historyErrorMessage(error),
             retryable: error?.retryable !== false
           }
         };
@@ -558,12 +575,12 @@ export function bootHistoryPage(documentRef = document, {
     );
   }
 
-  async function loadPage() {
+  async function loadPage(requestedPagination = pagination) {
     const generation = ++requestGeneration;
     const pageState = {
       filter: { ...activeFilter },
-      cursor: pagination.cursor,
-      pageIndex: pagination.pageIndex
+      cursor: requestedPagination.cursor,
+      pageIndex: requestedPagination.pageIndex
     };
     elements.previousPageBtn.disabled = true;
     elements.nextPageBtn.disabled = true;
@@ -578,6 +595,7 @@ export function bootHistoryPage(documentRef = document, {
       nextCursor = page?.nextCursor && typeof page.nextCursor === 'object'
         ? page.nextCursor
         : null;
+      pagination = requestedPagination;
       historyController.renderRecords(page?.records);
       setStoredText(elements.pageLabel, `第 ${pageState.pageIndex + 1} 页`);
       setPageStatus(elements, `本页 ${page?.records?.length || 0} 条`);
@@ -586,13 +604,13 @@ export function bootHistoryPage(documentRef = document, {
       if (generation !== requestGeneration) return false;
       setPageStatus(
         elements,
-        error?.message || '评论历史请求失败，请稍后重试。',
+        historyErrorMessage(error),
         true
       );
       return false;
     } finally {
       if (generation !== requestGeneration) return;
-      elements.previousPageBtn.disabled = pageState.pageIndex === 0;
+      elements.previousPageBtn.disabled = pagination.pageIndex === 0;
       elements.nextPageBtn.disabled = !nextCursor;
     }
   }
@@ -603,18 +621,31 @@ export function bootHistoryPage(documentRef = document, {
       requestMessage({ type: 'HISTORY_ARCHIVE_EVENTS' }),
       estimateStorageForPage()
     ]);
-    const summary = summaryResult.status === 'fulfilled' ? summaryResult.value : {};
-    renderSummary(
-      elements,
-      summary,
-      estimatedUsage.status === 'fulfilled' ? estimatedUsage.value : undefined,
-      cloudSyncStatus.enabled === true
-    );
-    renderArchiveEvents(
-      documentRef,
-      elements,
-      archiveResult.status === 'fulfilled' ? archiveResult.value : []
-    );
+    const usage = estimatedUsage.status === 'fulfilled'
+      ? estimatedUsage.value
+      : undefined;
+    if (
+      summaryResult.status === 'fulfilled'
+      && summaryResult.value
+      && typeof summaryResult.value === 'object'
+    ) {
+      renderSummary(
+        elements,
+        summaryResult.value,
+        usage,
+        cloudSyncStatus.enabled === true
+      );
+    } else {
+      renderSummaryUnavailable(elements, usage);
+    }
+    if (
+      archiveResult.status === 'fulfilled'
+      && Array.isArray(archiveResult.value)
+    ) {
+      renderArchiveEvents(documentRef, elements, archiveResult.value);
+    } else {
+      renderArchiveUnavailable(documentRef, elements);
+    }
   }
 
   function setExportStatus(message, isError = false) {
@@ -691,7 +722,7 @@ export function bootHistoryPage(documentRef = document, {
       } while (cursor);
 
       if (processedCount !== started.expectedCount) {
-        throw new Error('导出记录集合已变化，请重新导出。');
+        throw historyError('HISTORY_EXPORT_CHANGED');
       }
       if (currentPartRows > 0 || processedCount === 0) await flushPart();
 
@@ -727,7 +758,10 @@ export function bootHistoryPage(documentRef = document, {
     } catch (error) {
       csvParts = [];
       resetConfirmedDelete();
-      setExportStatus(error.message || '导出失败，请重试。', true);
+      setExportStatus(
+        historyErrorMessage(error, '导出失败，请稍后重试。'),
+        true
+      );
     } finally {
       exportInProgress = false;
       elements.exportHistoryBtn.disabled = false;
@@ -746,7 +780,10 @@ export function bootHistoryPage(documentRef = document, {
       );
     } catch (error) {
       elements.confirmDeleteBtn.disabled = false;
-      setExportStatus(error.message || '删除失败，请重新导出后再试。', true);
+      setExportStatus(
+        historyErrorMessage(error, '删除失败，请重新导出后再试。'),
+        true
+      );
       elements.exportHistoryBtn.disabled = false;
       return;
     }
@@ -785,25 +822,23 @@ export function bootHistoryPage(documentRef = document, {
     commitActiveFilter();
   });
   elements.previousPageBtn.addEventListener('click', () => {
-    pagination = retreatPagination(pagination);
-    loadPage();
+    loadPage(retreatPagination(pagination));
   });
   elements.nextPageBtn.addEventListener('click', () => {
     if (!nextCursor) return;
-    pagination = advancePagination(pagination, nextCursor);
-    loadPage();
+    loadPage(advancePagination(pagination, nextCursor));
   });
   elements.exportHistoryBtn.addEventListener('click', exportActiveSnapshot);
   elements.confirmDeleteBtn.addEventListener('click', deleteCompletedExport);
 
   elements.exportHistoryBtn.disabled = false;
   elements.confirmDeleteBtn.hidden = true;
-  (async () => {
+  void (async () => {
     try {
       const retryResult = await requestMessage({ type: 'HISTORY_RETRY_PENDING' });
       renderPendingQueue(retryResult?.pending);
     } catch (_) {
-      // The page remains usable if the retry status cannot be refreshed.
+      renderPendingQueue(undefined);
     }
     try {
       cloudSyncStatus = Object.freeze(await dataSource.status());
@@ -815,7 +850,13 @@ export function bootHistoryPage(documentRef = document, {
     }
     historyController.renderStatus(cloudSyncStatus, isOnline());
     await Promise.all([loadOverview(), loadPage()]);
-  })();
+  })().catch(() => {
+    setPageStatus(
+      elements,
+      '评论历史页面初始化失败，请重新打开页面后重试。',
+      true
+    );
+  });
 }
 
 if (typeof document !== 'undefined') {

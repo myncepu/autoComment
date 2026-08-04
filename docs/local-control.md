@@ -9,6 +9,8 @@ Mac 仍保持唤醒时，读取并控制 Auto Comment 批次。
 - 扩展控制令牌保存在 `chrome.storage.local`，不会同步。
 - CLI 令牌保存在
   `~/Library/Application Support/AutoComment/control.json`，权限为 `0600`。
+- 首次配对必须由持有 CLI 令牌的本机用户明确批准完整的 Chrome 扩展
+  ID；扩展不能用自己生成的令牌抢占控制服务。
 - 命令带租约；扩展保存最近命令结果，重复投递不会重复执行。
 - 永久停止必须同时提供 `--confirm-permanent` 和当前精确 `batchId`。
 - 本地控制桥默认关闭。
@@ -29,10 +31,30 @@ Mac 仍保持唤醒时，读取并控制 Auto Comment 批次。
    npm run control:install
    ```
 
-3. 打开扩展设置，启用“本地控制桥”。
+3. 打开扩展设置，启用“本地控制桥”，复制页面显示的 32 位扩展 ID。
+
+4. 明确批准该扩展 ID：
+
+   ```bash
+   npm run control -- pair --extension-id '这里替换为扩展-ID'
+   ```
 
 扩展后台会立即尝试配对，并通过 30 秒兜底闹钟继续重试。服务与扩展
 的先后启动顺序不重要。
+
+如果重新加载方式或安装位置变化导致扩展 ID 改变，需要显式确认替换：
+
+```bash
+npm run control -- pair \
+  --extension-id '新的扩展-ID' \
+  --replace
+```
+
+需要完全解除配对时运行：
+
+```bash
+npm run control -- unpair --confirm-pairing-reset
+```
 
 `LaunchAgent` 会在当前用户登录时启动控制服务，并在异常退出时重新
 启动。可用以下命令检查、重启或卸载：

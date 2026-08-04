@@ -49,6 +49,7 @@ test('serves the ordinary config bundle fixture and its production modules', asy
       '/options-config-bundle/',
       '/tests/fixtures/options-config-bundle-app.mjs',
       '/lib/options-config-bundle-view.mjs',
+      '/lib/options-page-reliability.mjs',
       '/lib/options-config-bundle-controller.mjs',
       '/lib/config-bundle.mjs'
     ]) {

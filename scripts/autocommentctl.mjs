@@ -2,7 +2,8 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-const BASE_URL = 'http://127.0.0.1:4376';
+const BASE_URL = process.env.AUTOCOMMENT_CONTROL_URL ||
+  'http://127.0.0.1:4376';
 const CONFIG_PATH = process.env.AUTOCOMMENT_CONTROL_CONFIG || join(
   homedir(),
   'Library',
@@ -17,7 +18,9 @@ const COMMANDS = new Set([
   'pause',
   'resume',
   'reconcile',
-  'stop'
+  'stop',
+  'pair',
+  'unpair'
 ]);
 
 function usage() {
@@ -33,11 +36,18 @@ function usage() {
     '  reconcile              Reconcile the page with the authoritative checkpoint',
     '  stop --confirm-permanent',
     '                         Permanently stop the current batch and retain results',
+    '  pair --extension-id <id>',
+    '                         Authorize one exact Chrome extension ID',
+    '  unpair --confirm-pairing-reset',
+    '                         Remove the current extension pairing',
     '',
     'Options:',
     '  --batch-id <id>        Require an exact batch id',
     '  --timeout <seconds>    Wait timeout (default: 90)',
-    '  --confirm-permanent    Required for stop'
+    '  --confirm-permanent    Required for stop',
+    '  --replace              Confirm replacement of a different paired ID',
+    '  --confirm-pairing-reset',
+    '                         Required for unpair'
   ].join('\n');
 }
 
@@ -129,6 +139,35 @@ async function main() {
   }
   const timeoutMs = Math.round(timeoutSeconds * 1000);
   const token = await loadToken();
+
+  if (command === 'pair') {
+    const extensionId = option('--extension-id');
+    if (!/^[a-p]{32}$/.test(extensionId || '')) {
+      throw new Error('--extension-id 必须是 Chrome 显示的 32 位扩展 ID');
+    }
+    const result = await api(token, '/api/v1/pair/approve', {
+      method: 'POST',
+      body: JSON.stringify({
+        extensionId,
+        replace: has('--replace')
+      })
+    });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+
+  if (command === 'unpair') {
+    if (!has('--confirm-pairing-reset')) {
+      throw new Error('解除配对必须显式传入 --confirm-pairing-reset');
+    }
+    const result = await api(token, '/api/v1/pair/reset', {
+      method: 'POST',
+      body: JSON.stringify({ confirm: true })
+    });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+
   const payload = {};
   const explicitBatchId = option('--batch-id');
   if (explicitBatchId) payload.batchId = explicitBatchId;

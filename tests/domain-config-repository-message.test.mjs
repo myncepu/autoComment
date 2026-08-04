@@ -193,3 +193,52 @@ test('rejects non-options callers before invoking the background repository', as
   assert.deepEqual(response, { ok: false, error: 'forbidden_sender' });
   assert.equal(harness.area.writes.length, 0);
 });
+
+test('waits for retryable initialization and returns a structured migration error', async () => {
+  const area = storageArea();
+  const repository = createDomainConfigRepository(area, { now: () => 100 });
+  let listener;
+  let readinessAttempts = 0;
+  const chromeApi = {
+    runtime: {
+      id: 'extension-id',
+      getURL: (path) => `chrome-extension://extension-id/${path}`,
+      onMessage: {
+        addListener(value) { listener = value; }
+      }
+    }
+  };
+  installDomainConfigRepositoryMessageListener(chromeApi, repository, {
+    ready: async () => {
+      readinessAttempts += 1;
+      if (readinessAttempts === 1) {
+        const error = new Error('private migration details');
+        error.code = 'domain_config_migration_deferred';
+        throw error;
+      }
+    }
+  });
+  const sender = {
+    id: 'extension-id',
+    url: 'chrome-extension://extension-id/options.html',
+    tab: { id: 12 }
+  };
+
+  assert.deepEqual(await dispatch(listener, {
+    type: 'DOMAIN_CONFIG_REPOSITORY_REQUEST',
+    operation: 'load',
+    args: []
+  }, sender), {
+    ok: false,
+    error: 'domain_config_migration_deferred'
+  });
+  assert.equal(readinessAttempts, 1);
+
+  const recovered = await dispatch(listener, {
+    type: 'DOMAIN_CONFIG_REPOSITORY_REQUEST',
+    operation: 'load',
+    args: []
+  }, sender);
+  assert.equal(recovered.ok, true);
+  assert.equal(readinessAttempts, 2);
+});

@@ -4787,15 +4787,6 @@
   // 监听 background.js 中点击扩展图标发送的消息
   if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
     chrome.runtime.onMessage.addListener((message, _sender, _sendResponse) => {
-      // 就绪检测：batch.js 发 PING 确认 content.js 已注入
-      if (message && message.type === 'PING') {
-        _sendResponse({
-          ok: true,
-          documentUrl: location.href,
-          readyState: document.readyState
-        });
-        return;
-      }
       if (message && message.type === 'TOGGLE_PROMOTE_PANEL') {
         createOrToggleQwenPanel();
       }
@@ -4813,6 +4804,7 @@
         return false;
       }
     });
+    globalThis.AutoCommentContentRuntimeBootstrap?.markRuntimeReady?.();
   }
 
   // ==================== 批量处理任务函数 ====================
@@ -5491,8 +5483,8 @@
       url: url || '',
       aiContent: aiContent || '',
       result: 'skipped',
-      errorCode: null,
-      errorMessage: 'already_commented'
+      errorCode: 'already_commented',
+      errorMessage: null
     });
   }
 

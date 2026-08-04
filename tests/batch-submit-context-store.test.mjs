@@ -165,13 +165,13 @@ test('normalizes an all-legacy identity but rejects partial assignment identity'
   }), /invalid_submit_context_identity/);
 });
 
-test('keeps contexts at ten minutes and removes contexts older than ten minutes', async () => {
+test('keeps contexts for a full recovery day and removes them after it', async () => {
   let now = 1000;
   const storage = createStorageArea();
   const store = createBatchSubmitContextStore(storage, { now: () => now });
   await store.save(11, { batchId: 'a', urlIndex: 0, attempt: 1 });
 
-  now += 10 * 60 * 1000;
+  now += 24 * 60 * 60 * 1000;
   assert.equal((await store.get(11)).urlIndex, 0);
 
   now += 1;
@@ -179,7 +179,7 @@ test('keeps contexts at ten minutes and removes contexts older than ten minutes'
   assert.deepEqual(storage.data.batchSubmitContextsByTab, {});
 });
 
-test('can retain an exact pre-submit history context until durable acknowledgement', async () => {
+test('does not allow an infinite override to retain submitted comment text forever', async () => {
   let now = 1000;
   const storage = createStorageArea();
   const store = createBatchSubmitContextStore(storage, {
@@ -203,13 +203,8 @@ test('can retain an exact pre-submit history context until durable acknowledgeme
 
   await store.save(11, context);
   now += 30 * 24 * 60 * 60 * 1000;
-  assert.deepEqual(await store.get(11), {
-    ...context,
-    taskId: 'history-batch:legacy:4',
-    profileId: 'default-profile',
-    promotionSiteId: 'default-promotion-site',
-    timestamp: 1000
-  });
+  assert.equal(await store.get(11), null);
+  assert.deepEqual(storage.data.batchSubmitContextsByTab, {});
 });
 
 test('clearIfMatches cannot remove a replacement context from a delayed acknowledgement', async () => {
@@ -464,6 +459,97 @@ test('a delayed sealed save recovers the old task without deleting a replacement
     Object.values(storage.data.batchSubmitRecoveriesByTask)[0].batchId,
     'batch-old'
   );
+});
+
+test('garbage collection expires contexts, recoveries, and late-save seals independently', async () => {
+  let now = 1000;
+  const storage = createStorageArea();
+  const store = createBatchSubmitContextStore(storage, {
+    now: () => now,
+    maxAgeMs: 100,
+    recoveryMaxAgeMs: 200,
+    sealMaxAgeMs: 150
+  });
+  await store.save(11, {
+    batchId: 'batch-context',
+    urlIndex: 0,
+    attempt: 1,
+    history: { commentText: 'context text must expire' }
+  });
+  await store.save(22, {
+    batchId: 'batch-recovery',
+    urlIndex: 1,
+    attempt: 1,
+    history: { commentText: 'recovery text must expire' }
+  });
+  await store.sealAndRecover(22, {
+    batchId: 'batch-recovery',
+    urlIndex: 1,
+    attempt: 1
+  }, 'unexpected_close');
+  await store.sealAndRecover(33, {
+    batchId: 'batch-late-save',
+    urlIndex: 2,
+    attempt: 1
+  }, 'unexpected_close');
+
+  now = 1100;
+  assert.deepEqual(await store.pruneExpired(), {
+    contexts: 0,
+    recoveries: 0,
+    seals: 0
+  });
+  assert.equal((await store.get(11)).batchId, 'batch-context');
+
+  now = 1151;
+  assert.deepEqual(await store.pruneExpired(), {
+    contexts: 1,
+    recoveries: 0,
+    seals: 1
+  });
+  assert.deepEqual(storage.data.batchSubmitContextsByTab, {});
+  assert.deepEqual(storage.data.batchSubmitRecoverySealsByTab, {});
+  assert.equal(
+    Object.values(storage.data.batchSubmitRecoveriesByTask).length,
+    1
+  );
+
+  now = 1201;
+  assert.deepEqual(await store.pruneExpired(), {
+    contexts: 0,
+    recoveries: 1,
+    seals: 0
+  });
+  assert.deepEqual(storage.data.batchSubmitRecoveriesByTask, {});
+});
+
+test('repeated close recovery still reports an already-moved context as recovered', async () => {
+  const storage = createStorageArea();
+  const store = createBatchSubmitContextStore(storage, {
+    now: () => 3000
+  });
+  const expected = {
+    batchId: 'batch-idempotent',
+    taskId: 'batch-idempotent:task',
+    urlIndex: 4,
+    profileId: 'profile-canonical',
+    promotionSiteId: 'site-canonical',
+    attempt: 1
+  };
+  await store.save(44, {
+    ...expected,
+    history: { commentText: 'uncertain submitted text' }
+  });
+
+  assert.deepEqual(
+    await store.sealAndRecover(44, expected, 'unexpected_close'),
+    { sealed: true, recovered: true }
+  );
+  assert.deepEqual(
+    await store.sealAndRecover(44, expected, 'unexpected_close'),
+    { sealed: true, recovered: true }
+  );
+  assert.equal(await store.get(44), null);
 });
 
 test('listener preserves unacknowledged context when its tab closes', async () => {

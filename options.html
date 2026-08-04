@@ -29,16 +29,19 @@
           <input type="text" id="profileDisplayName" class="required-field" placeholder="例如：作者 A" autocomplete="off" required />
           <div class="identity-fields-row">
             <div class="identity-field identity-field-name">
+              <label for="userName">姓名 / 昵称</label>
               <input type="text" id="userName" class="required-field" placeholder="姓名 / 昵称，例如：CloudHu" autocomplete="off" required />
               <div class="required-hint">请填写姓名或昵称。</div>
             </div>
             <div class="identity-field">
+              <label for="userEmail">邮箱</label>
               <input type="email" id="userEmail" class="required-field" placeholder="邮箱，例如：you@test.com" autocomplete="off" required />
               <div class="required-hint">请填写有效邮箱，例如：you@test.com</div>
             </div>
             <div class="identity-field">
+              <label for="userPassword">密码（可选）</label>
               <input type="password" id="userPassword" placeholder="登录/注册时常用的密码（可选）" autocomplete="new-password" />
-              <div id="passwordConfiguredStatus" class="hint">未配置密码</div>
+              <div id="passwordConfiguredStatus" class="hint" role="status" aria-live="polite">未配置密码</div>
             </div>
           </div>
         </div>
@@ -141,12 +144,13 @@
           <div class="row">
             <button id="saveLlmConfigBtn" class="btn btn-primary" type="button">保存模型配置</button>
             <button id="testLlmConnectionBtn" class="btn btn-secondary" type="button">测试连接</button>
-            <span id="llmStatus" class="status"></span>
+            <span id="llmStatus" class="status" role="status" aria-live="polite" aria-atomic="true"></span>
           </div>
         </div>
 
         <div class="row">
-          <span id="settingsStatus" class="status">已保存</span>
+          <span id="settingsStatus" class="status" role="status" aria-live="polite" aria-atomic="true">设置加载中…</span>
+          <button id="retryOptionsLoadBtn" class="btn btn-secondary" type="button" hidden>重试加载</button>
         </div>
 
         <section
@@ -212,7 +216,8 @@
               <div class="hint">
                 允许本机控制台或 autocommentctl 读取状态、打开批次页、
                 启动、暂停、继续、同步和永久停止。默认关闭，仅接受
-                127.0.0.1 与本机令牌。
+                127.0.0.1 与本机令牌；首次配对必须用 CLI 明确授权此处
+                显示的扩展 ID。
               </div>
               <div id="localDebugStatus" class="hint" role="status" aria-live="polite">
                 正在读取状态…
@@ -238,10 +243,10 @@
         <div class="settings-card-copy">
           上传 CSV 文件，批量打开目标页面，自动发送评论并记录结果。
         </div>
-        <button id="openBatchBtn" class="btn btn-primary btn-card-action">
+        <button id="openBatchBtn" class="btn btn-primary btn-card-action" type="button">
           📋 打开批量处理
         </button>
-        <button id="openHistoryBtn" class="btn btn-secondary btn-card-action">
+        <button id="openHistoryBtn" class="btn btn-secondary btn-card-action" type="button">
           评论历史
         </button>
       </div>
@@ -258,11 +263,11 @@
           <div class="backup-actions">
             <button id="exportConfigBtn" class="btn btn-secondary" type="button">导出配置</button>
             <button id="importConfigBtn" class="btn btn-secondary" type="button">导入配置</button>
-            <input type="file" id="importConfigFileInput" class="visually-hidden-file" accept=".json" />
+            <input type="file" id="importConfigFileInput" class="visually-hidden-file" accept=".json" aria-label="选择配置 JSON 文件" />
             <button id="applyImportConfigBtn" class="btn btn-primary" type="button" hidden>确认应用导入</button>
-            <span id="importExportStatus" class="status status-warning" role="status" aria-live="polite"></span>
+            <span id="importExportStatus" class="status status-warning" role="status" aria-live="polite" aria-atomic="true"></span>
           </div>
-          <div id="importPreviewSummary" class="hint" role="status" aria-live="polite" hidden></div>
+          <div id="importPreviewSummary" class="hint" role="status" aria-live="polite" aria-atomic="true" hidden></div>
         </div>
       </section>
     </div>

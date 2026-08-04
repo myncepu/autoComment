@@ -537,11 +537,36 @@ test('requests one deduplicated permission set for batch target origins', async 
 
   assert.deepEqual(harness.permissionRequests, [{
     origins: [
+      'http://blog.example.test/*',
       'http://legacy.example.test/*',
-      'https://blog.example.test/*'
+      'https://blog.example.test/*',
+      'https://legacy.example.test/*'
     ]
   }]);
   assert.deepEqual(harness.permissionChecks, harness.permissionRequests);
+});
+
+test('requests permissions for common scheme and apex-www redirects', async () => {
+  const harness = createChromeHarness();
+  const dependencies = createChromeBatchDependencies(harness.chromeApi);
+
+  await dependencies.requestTargetPermissions([
+    'http://example.test/post',
+    'https://www.jarman.org.uk/article'
+  ]);
+
+  assert.deepEqual(harness.permissionRequests, [{
+    origins: [
+      'http://example.test/*',
+      'http://jarman.org.uk/*',
+      'http://www.example.test/*',
+      'http://www.jarman.org.uk/*',
+      'https://example.test/*',
+      'https://jarman.org.uk/*',
+      'https://www.example.test/*',
+      'https://www.jarman.org.uk/*'
+    ]
+  }]);
 });
 
 test('reports a stable error when batch target permission is denied', async () => {
@@ -626,7 +651,10 @@ test('seals submit context through the runtime without exposing Chrome to the wo
   assert.deepEqual(await dependencies.sealSubmitContext({
     tabId: 101,
     batchId: 'batch-1',
+    taskId: 'batch-1:3',
     urlIndex: 2,
+    profileId: 'profile-a',
+    promotionSiteId: 'site-a',
     attempt: 3
   }, 'pause'), {
     sealed: true,
@@ -636,7 +664,10 @@ test('seals submit context through the runtime without exposing Chrome to the wo
     type: 'BATCH_RECOVER_SUBMIT_CONTEXT',
     tabId: 101,
     batchId: 'batch-1',
+    taskId: 'batch-1:3',
     urlIndex: 2,
+    profileId: 'profile-a',
+    promotionSiteId: 'site-a',
     attempt: 3,
     reason: 'pause'
   });
