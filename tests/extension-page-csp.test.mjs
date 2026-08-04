@@ -61,3 +61,19 @@ test('history page uses packaged styles so Chrome can enforce the extension CSP'
     true
   );
 });
+
+test('external-link data page uses packaged scripts and styles', () => {
+  const html = fs.readFileSync(path.join(projectRoot, 'records.html'), 'utf8');
+  const document = new JSDOM(html).window.document;
+
+  assert.equal(document.querySelectorAll('style').length, 0);
+  assert.equal(document.querySelectorAll('[style]').length, 0);
+  assert.equal(
+    document.querySelector('link[rel="stylesheet"][href="styles/records.css"]') !== null,
+    true
+  );
+  assert.equal(
+    document.querySelector('script[type="module"][src="records.js"]') !== null,
+    true
+  );
+});

@@ -46,7 +46,7 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["lib/content-runtime-bootstrap.js", "illegal-site-filter.js", "lib/llm-content-bridge.js", "lib/batch-task-config.js", "lib/batch-handle-dispatch.js", "lib/batch-submit-context-client.js", "lib/comment-history-capture.js", "lib/batch-phase-reporter.js", "content.js"],
+      "js": ["lib/content-runtime-bootstrap.js", "illegal-site-filter.js", "lib/outlink-export-rules.js", "lib/llm-content-bridge.js", "lib/batch-task-config.js", "lib/batch-handle-dispatch.js", "lib/batch-submit-context-client.js", "lib/comment-history-capture.js", "lib/batch-phase-reporter.js", "content.js"],
       "run_at": "document_start"
     }
   ]

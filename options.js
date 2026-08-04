@@ -43,6 +43,8 @@ import {
 
 const SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY =
   'show_export_outlinks_floating_button';
+const OUTLINK_EXPORT_FILTER_RULES_STORAGE_KEY = 'outlink_export_filter_rules';
+const OUTLINK_EXPORT_HIDDEN_HOSTS_STORAGE_KEY = 'outlink_export_hidden_hosts';
 
 function element(id) {
   return document.getElementById(id);
@@ -137,6 +139,12 @@ export async function bootOptionsPage() {
     'openBatchBtn',
     'openHistoryBtn',
     'toggleExportOutlinksFloatingBtn',
+    'outlinkExcludedDomains',
+    'outlinkExcludedKeywords',
+    'outlinkHiddenHosts',
+    'saveOutlinkSettingsBtn',
+    'openOutlinkTableBtn',
+    'outlinkSettingsStatus',
     'localDebugStatus',
     'toggleLocalDebugBtn',
     'openLocalDebugBtn'
@@ -576,6 +584,56 @@ export async function bootOptionsPage() {
         4200
       );
     }
+  });
+
+  const [outlinkSyncSettings, outlinkLocalSettings] = await Promise.all([
+    chrome.storage.sync.get([OUTLINK_EXPORT_FILTER_RULES_STORAGE_KEY]),
+    chrome.storage.local.get([OUTLINK_EXPORT_HIDDEN_HOSTS_STORAGE_KEY])
+  ]);
+  const outlinkRules = globalThis.AutoCommentOutlinkRules?.normalizeRules?.(
+    outlinkSyncSettings[OUTLINK_EXPORT_FILTER_RULES_STORAGE_KEY]
+  ) || { excludedDomains: [], excludedKeywords: [] };
+  ui.outlinkExcludedDomains.value = outlinkRules.excludedDomains.join('\n');
+  ui.outlinkExcludedKeywords.value = outlinkRules.excludedKeywords.join('\n');
+  ui.outlinkHiddenHosts.value = Array.isArray(
+    outlinkLocalSettings[OUTLINK_EXPORT_HIDDEN_HOSTS_STORAGE_KEY]
+  )
+    ? outlinkLocalSettings[OUTLINK_EXPORT_HIDDEN_HOSTS_STORAGE_KEY].join('\n')
+    : '';
+
+  ui.saveOutlinkSettingsBtn.addEventListener('click', async () => {
+    ui.saveOutlinkSettingsBtn.disabled = true;
+    try {
+      const normalizeLines = globalThis.AutoCommentOutlinkRules?.normalizeRuleLines
+        || ((value) => String(value || '').split(/\r?\n/u).map((item) => item.trim()).filter(Boolean));
+      const rules = globalThis.AutoCommentOutlinkRules?.normalizeRules?.({
+        excludedDomains: ui.outlinkExcludedDomains.value,
+        excludedKeywords: ui.outlinkExcludedKeywords.value
+      }) || {
+        excludedDomains: normalizeLines(ui.outlinkExcludedDomains.value),
+        excludedKeywords: normalizeLines(ui.outlinkExcludedKeywords.value)
+      };
+      const hiddenHosts = normalizeLines(ui.outlinkHiddenHosts.value);
+      await Promise.all([
+        chrome.storage.sync.set({
+          [OUTLINK_EXPORT_FILTER_RULES_STORAGE_KEY]: rules
+        }),
+        chrome.storage.local.set({
+          [OUTLINK_EXPORT_HIDDEN_HOSTS_STORAGE_KEY]: hiddenHosts
+        })
+      ]);
+      ui.outlinkExcludedDomains.value = rules.excludedDomains.join('\n');
+      ui.outlinkExcludedKeywords.value = rules.excludedKeywords.join('\n');
+      ui.outlinkHiddenHosts.value = hiddenHosts.join('\n');
+      showStatus(ui.outlinkSettingsStatus, '外链设置已保存');
+    } catch (error) {
+      showStatus(ui.outlinkSettingsStatus, error.message || '保存失败', true);
+    } finally {
+      ui.saveOutlinkSettingsBtn.disabled = false;
+    }
+  });
+  ui.openOutlinkTableBtn.addEventListener('click', () => {
+    chrome.tabs.create({ url: chrome.runtime.getURL('records.html') });
   });
 
   let localDebugSettings = (

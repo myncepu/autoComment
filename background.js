@@ -62,9 +62,15 @@ import {
 import {
   installLocalControlPoller
 } from './lib/local-control-poller.mjs';
+import { openOutlinkRecordDb } from './lib/outlink-record-db.mjs';
+import {
+  installOutlinkRecordMessageListener
+} from './lib/outlink-record-message-listener.mjs';
 
 installLlmMessageListener(chrome);
 installActionClickHandler(chrome);
+const outlinkRecordRepository = openOutlinkRecordDb();
+installOutlinkRecordMessageListener(chrome, outlinkRecordRepository);
 const batchResultStore = createBatchResultStore(chrome.storage.local);
 const domainConfigRepository = createDomainConfigRepository(chrome.storage.local);
 const profileSecretRepository = createProfileSecretRepository(chrome.storage.local);

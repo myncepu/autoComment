@@ -368,6 +368,8 @@
   const USER_EMAIL_STORAGE_KEY = 'auto_fill_user_email';
   const PROMPT_FIELD_VALUES_STORAGE_KEY = 'auto_fill_prompt_field_values';
   const SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY = 'show_export_outlinks_floating_button';
+  const OUTLINK_EXPORT_HIDDEN_HOSTS_STORAGE_KEY = 'outlink_export_hidden_hosts';
+  const OUTLINK_EXPORT_FILTER_RULES_STORAGE_KEY = 'outlink_export_filter_rules';
 
   // ====== 批量任务设置（从 storage.local 读取）======
   const BATCH_SETTINGS_KEY = 'batch_task_settings';
@@ -4641,7 +4643,7 @@
   }
 
   // ====== 独立外链导出浮窗按钮 ======
-  // 不依赖 AI 面板自动打开设置；批量任务打开博客页时也必须能直接点击并下载 CSV。
+  // 不依赖 AI 面板自动打开设置；导出的外链统一保存到插件管理的数据表。
   function analyzePageOutlinksForExport() {
     const links = Array.from(document.querySelectorAll('a[href]'));
     const currentHost = window.location.hostname;
@@ -4684,46 +4686,165 @@
     });
   }
 
-  function exportPageOutlinksCsv() {
-    const outlinks = analyzePageOutlinksForExport();
-    const csvHost = window.location.hostname || 'unknown-host';
-    const csvContent = [
-      ['URL', 'Hostname', 'Type', 'Link Text'].join(','),
-      ...outlinks.map(l => [
-        `"${String(l.url || '').replace(/"/g, '""')}"`,
-        `"${String(l.host || '').replace(/"/g, '""')}"`,
-        l.isDofollow ? 'DoFollow' : 'NoFollow',
-        `"${String(l.text || '').replace(/"/g, '""')}"`
-      ].join(','))
-    ].join('\n');
+  function getStorageValue(area, keys) {
+    return new Promise((resolve, reject) => {
+      area.get(keys, (result) => {
+        if (chrome.runtime?.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        resolve(result || {});
+      });
+    });
+  }
 
-    const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `outlinks-${csvHost}.csv`;
-    a.style.display = 'none';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+  function setStorageValue(area, values) {
+    return new Promise((resolve, reject) => {
+      area.set(values, () => {
+        if (chrome.runtime?.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        resolve();
+      });
+    });
+  }
 
-    console.log('[AutoComment] 已导出外链 CSV:', { host: csvHost, count: outlinks.length });
+  function sendOutlinkMessage(message) {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage(message, (response) => {
+        if (chrome.runtime?.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        if (!response?.ok) {
+          reject(new Error(response?.error?.message || '外链保存失败'));
+          return;
+        }
+        resolve(response.data);
+      });
+    });
+  }
+
+  function showOutlinkExportToast(message, isError = false) {
+    document.getElementById('auto-comment-outlinks-toast')?.remove();
+    const toast = document.createElement('div');
+    toast.id = 'auto-comment-outlinks-toast';
+    toast.textContent = message;
+    toast.style.position = 'fixed';
+    toast.style.left = '18px';
+    toast.style.bottom = '132px';
+    toast.style.zIndex = '2147483647';
+    toast.style.maxWidth = '320px';
+    toast.style.padding = '9px 12px';
+    toast.style.borderRadius = '8px';
+    toast.style.background = isError ? 'rgba(153,27,27,0.96)' : 'rgba(15,118,110,0.96)';
+    toast.style.color = '#fff';
+    toast.style.fontFamily = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif";
+    toast.style.fontSize = '12px';
+    toast.style.boxShadow = '0 10px 26px rgba(15,23,42,0.3)';
+    (document.body || document.documentElement).appendChild(toast);
+    setTimeout(() => toast.remove(), 3600);
+  }
+
+  async function exportPageOutlinksToTable(button) {
+    const allOutlinks = analyzePageOutlinksForExport();
+    const settings = await getStorageValue(
+      chrome.storage.sync,
+      [OUTLINK_EXPORT_FILTER_RULES_STORAGE_KEY]
+    );
+    const filterResult = globalThis.AutoCommentOutlinkRules?.filterOutlinks
+      ? globalThis.AutoCommentOutlinkRules.filterOutlinks(
+          allOutlinks,
+          settings[OUTLINK_EXPORT_FILTER_RULES_STORAGE_KEY]
+        )
+      : { kept: allOutlinks, excluded: [] };
+    const previousText = button.textContent;
+    button.disabled = true;
+    button.textContent = '保存中…';
+    try {
+      const result = await sendOutlinkMessage({
+        type: 'OUTLINKS_SAVE',
+        payload: {
+          sourceUrl: window.location.href,
+          sourceHost: window.location.hostname,
+          sourceTitle: document.title,
+          capturedAt: Date.now(),
+          links: filterResult.kept
+        }
+      });
+      showOutlinkExportToast(
+        `已保存 ${result.total} 条外链${filterResult.excluded.length
+          ? `，过滤 ${filterResult.excluded.length} 条`
+          : ''}`
+      );
+      console.log('[AutoComment] 已保存外链到插件数据表:', {
+        host: window.location.hostname,
+        ...result,
+        excluded: filterResult.excluded.length
+      });
+    } catch (error) {
+      console.error('[AutoComment] 保存外链失败:', error);
+      showOutlinkExportToast('外链保存失败，请稍后重试', true);
+    } finally {
+      button.disabled = false;
+      button.textContent = previousText;
+    }
+  }
+
+  async function getHiddenOutlinkHosts() {
+    if (!chrome.storage?.local) return [];
+    try {
+      const result = await getStorageValue(
+        chrome.storage.local,
+        [OUTLINK_EXPORT_HIDDEN_HOSTS_STORAGE_KEY]
+      );
+      return Array.isArray(result[OUTLINK_EXPORT_HIDDEN_HOSTS_STORAGE_KEY])
+        ? result[OUTLINK_EXPORT_HIDDEN_HOSTS_STORAGE_KEY]
+            .map((host) => String(host || '').trim().toLowerCase())
+            .filter(Boolean)
+        : [];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  async function hideOutlinkMenuOnCurrentSite() {
+    const host = window.location.hostname.toLowerCase();
+    if (!host) return;
+    const hiddenHosts = await getHiddenOutlinkHosts();
+    if (!hiddenHosts.includes(host)) hiddenHosts.push(host);
+    await setStorageValue(chrome.storage.local, {
+      [OUTLINK_EXPORT_HIDDEN_HOSTS_STORAGE_KEY]: hiddenHosts
+    });
+    removeOutlinkFloatingButton();
+    showOutlinkExportToast(`已在 ${host} 隐藏导出外链菜单`);
+  }
+
+  async function openOutlinkTable() {
+    try {
+      await sendOutlinkMessage({ type: 'OUTLINKS_OPEN_PAGE' });
+    } catch (error) {
+      console.error('[AutoComment] 打开外链数据表失败:', error);
+      showOutlinkExportToast('打开外链数据表失败，请稍后重试', true);
+    }
   }
 
   function removeOutlinkFloatingButton() {
-    const existingBtn = document.getElementById('auto-comment-export-outlinks-btn');
-    if (existingBtn) {
-      existingBtn.remove();
+    const existingControl = document.getElementById('auto-comment-export-outlinks-control');
+    if (existingControl) {
+      existingControl.remove();
       console.log('[AutoComment] 独立导出外链浮窗按钮已移除');
     }
+    document.getElementById('auto-comment-export-outlinks-menu')?.remove();
   }
 
   async function applyOutlinkFloatingButtonVisibility(shouldShow) {
     const visible = typeof shouldShow === 'boolean'
       ? shouldShow
       : await getShowExportOutlinksFloatingButtonSetting();
-    if (visible) {
+    const hiddenHosts = visible ? await getHiddenOutlinkHosts() : [];
+    if (visible && !hiddenHosts.includes(window.location.hostname.toLowerCase())) {
       ensureOutlinkFloatingButton();
     } else {
       removeOutlinkFloatingButton();
@@ -4731,9 +4852,24 @@
   }
 
   function ensureOutlinkFloatingButton() {
-    if (document.getElementById('auto-comment-export-outlinks-btn')) {
+    if (document.getElementById('auto-comment-export-outlinks-control')) {
       return;
     }
+
+    const control = document.createElement('div');
+    control.id = 'auto-comment-export-outlinks-control';
+    control.style.position = 'fixed';
+    control.style.left = '18px';
+    control.style.bottom = '86px';
+    control.style.zIndex = '2147483647';
+    control.style.display = 'inline-flex';
+    control.style.alignItems = 'stretch';
+    control.style.height = '36px';
+    control.style.border = '1px solid rgba(148,163,184,0.72)';
+    control.style.borderRadius = '999px';
+    control.style.background = 'rgba(15,23,42,0.94)';
+    control.style.boxShadow = '0 10px 26px rgba(15,23,42,0.35)';
+    control.style.overflow = 'visible';
 
     const btn = document.createElement('button');
     btn.id = 'auto-comment-export-outlinks-btn';
@@ -4741,20 +4877,16 @@
     btn.textContent = '导出外链';
     btn.setAttribute('data-action', 'analyze-backlinks');
     btn.setAttribute('data-testid', 'analyze-backlinks');
-    btn.title = '导出当前页面外链 CSV';
-    btn.style.position = 'fixed';
-    btn.style.left = '18px';
-    btn.style.bottom = '86px';
-    btn.style.zIndex = '2147483647';
+    btn.title = '保存当前页面外链到插件数据表';
     btn.style.display = 'inline-flex';
     btn.style.alignItems = 'center';
     btn.style.justifyContent = 'center';
     btn.style.minWidth = '88px';
-    btn.style.height = '36px';
-    btn.style.padding = '0 14px';
-    btn.style.border = '1px solid rgba(148,163,184,0.72)';
-    btn.style.borderRadius = '999px';
-    btn.style.background = 'rgba(15,23,42,0.94)';
+    btn.style.height = '100%';
+    btn.style.padding = '0 12px 0 14px';
+    btn.style.border = 'none';
+    btn.style.borderRadius = '999px 0 0 999px';
+    btn.style.background = 'transparent';
     btn.style.color = '#f8fafc';
     btn.style.boxShadow = '0 10px 26px rgba(15,23,42,0.35)';
     btn.style.fontFamily = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif";
@@ -4767,20 +4899,99 @@
       btn.style.background = 'rgba(30,41,59,0.98)';
     });
     btn.addEventListener('mouseleave', () => {
-      btn.style.background = 'rgba(15,23,42,0.94)';
+      btn.style.background = 'transparent';
     });
-    btn.addEventListener('click', exportPageOutlinksCsv);
+    btn.addEventListener('click', () => exportPageOutlinksToTable(btn));
 
-    (document.body || document.documentElement).appendChild(btn);
+    const settingsBtn = document.createElement('button');
+    settingsBtn.id = 'auto-comment-export-outlinks-settings-btn';
+    settingsBtn.type = 'button';
+    settingsBtn.textContent = '⚙';
+    settingsBtn.title = '导出外链菜单设置';
+    settingsBtn.setAttribute('aria-label', '导出外链菜单设置');
+    settingsBtn.style.width = '34px';
+    settingsBtn.style.height = '100%';
+    settingsBtn.style.padding = '0';
+    settingsBtn.style.border = 'none';
+    settingsBtn.style.borderLeft = '1px solid rgba(148,163,184,0.36)';
+    settingsBtn.style.borderRadius = '0 999px 999px 0';
+    settingsBtn.style.background = 'transparent';
+    settingsBtn.style.color = '#cbd5e1';
+    settingsBtn.style.cursor = 'pointer';
+    settingsBtn.style.fontSize = '13px';
+
+    const menu = document.createElement('div');
+    menu.id = 'auto-comment-export-outlinks-menu';
+    menu.hidden = true;
+    menu.style.position = 'absolute';
+    menu.style.left = '0';
+    menu.style.bottom = '44px';
+    menu.style.width = '226px';
+    menu.style.padding = '6px';
+    menu.style.border = '1px solid rgba(148,163,184,0.45)';
+    menu.style.borderRadius = '10px';
+    menu.style.background = 'rgba(15,23,42,0.98)';
+    menu.style.boxShadow = '0 12px 30px rgba(15,23,42,0.42)';
+    menu.style.fontFamily = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif";
+
+    function menuButton(text, handler) {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.textContent = text;
+      item.style.display = 'block';
+      item.style.width = '100%';
+      item.style.padding = '9px 10px';
+      item.style.border = 'none';
+      item.style.borderRadius = '7px';
+      item.style.background = 'transparent';
+      item.style.color = '#e2e8f0';
+      item.style.textAlign = 'left';
+      item.style.cursor = 'pointer';
+      item.style.fontSize = '12px';
+      item.addEventListener('mouseenter', () => {
+        item.style.background = 'rgba(51,65,85,0.9)';
+      });
+      item.addEventListener('mouseleave', () => {
+        item.style.background = 'transparent';
+      });
+      item.addEventListener('click', handler);
+      return item;
+    }
+    menu.appendChild(menuButton('不在此网站显示导出外链菜单', () => {
+      hideOutlinkMenuOnCurrentSite().catch((error) => {
+        console.error('[AutoComment] 隐藏当前网站菜单失败:', error);
+        showOutlinkExportToast('保存网站隐藏设置失败', true);
+      });
+    }));
+    menu.appendChild(menuButton('打开外链数据表', openOutlinkTable));
+    settingsBtn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      menu.hidden = !menu.hidden;
+    });
+
+    control.appendChild(btn);
+    control.appendChild(settingsBtn);
+    control.appendChild(menu);
+    (document.body || document.documentElement).appendChild(control);
     console.log('[AutoComment] 独立导出外链浮窗按钮已注入');
   }
 
   if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
     chrome.storage.onChanged.addListener((changes, areaName) => {
-      if (areaName !== 'sync' || !changes[SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY]) {
-        return;
+      if (
+        areaName === 'sync'
+        && changes[SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY]
+      ) {
+        applyOutlinkFloatingButtonVisibility(
+          changes[SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY].newValue !== false
+        );
       }
-      applyOutlinkFloatingButtonVisibility(changes[SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY].newValue !== false);
+      if (
+        areaName === 'local'
+        && changes[OUTLINK_EXPORT_HIDDEN_HOSTS_STORAGE_KEY]
+      ) {
+        applyOutlinkFloatingButtonVisibility();
+      }
     });
   }
 
