@@ -52,6 +52,9 @@ import {
 } from './lib/batch-submit-context-store.mjs';
 import { isDurableBatchConfirmation } from './lib/batch-scheduler.mjs';
 import { installLocalDebugBridge } from './lib/local-debug-bridge.mjs';
+import {
+  installLocalControlPoller
+} from './lib/local-control-poller.mjs';
 
 installLlmMessageListener(chrome);
 installActionClickHandler(chrome);
@@ -158,8 +161,11 @@ const commentHistoryService = createCommentHistoryService({
 installCommentHistoryMessageListener(chrome, commentHistoryService);
 void domainConfigReady.then(() => {
   installBatchRuntimeController(chrome, secretAwareBatchRuntimeController);
-  installLocalDebugBridge(chrome, {
+  const localDebugBridge = installLocalDebugBridge(chrome, {
     batchRuntimeController
+  });
+  installLocalControlPoller(chrome, {
+    bridge: localDebugBridge.bridge
   });
   installBatchDomainConfigListener(chrome, domainConfigRepository);
   installBatchSecretVaultListener(chrome, {

@@ -7,13 +7,18 @@
   const logEntries = [];
   let polling = null;
   let inFlight = false;
+  let currentBatchId = null;
+  let stopArmedUntil = 0;
 
   const elements = Object.fromEntries([
     'connection',
     'refresh',
+    'open',
+    'start',
     'pause',
     'resume',
     'reconcile',
+    'stop',
     'backgroundStatus',
     'pageStatus',
     'eventLog',
@@ -57,12 +62,20 @@
 
   function setBusy(busy) {
     inFlight = busy;
-    for (const id of ['refresh', 'pause', 'resume', 'reconcile']) {
+    for (const id of [
+      'refresh',
+      'open',
+      'start',
+      'pause',
+      'resume',
+      'reconcile',
+      'stop'
+    ]) {
       elements[id].disabled = busy;
     }
   }
 
-  function send(command) {
+  function send(command, payload = {}) {
     if (!extensionId || !token || !globalThis.chrome?.runtime?.sendMessage) {
       return Promise.resolve({
         ok: false,
@@ -77,7 +90,8 @@
           type: 'LOCAL_DEBUG_BRIDGE_REQUEST',
           command,
           requestId,
-          token
+          token,
+          ...payload
         },
         (response) => {
           if (chrome.runtime.lastError) {
@@ -97,15 +111,16 @@
     });
   }
 
-  async function run(command, { quiet = false } = {}) {
+  async function run(command, { quiet = false, payload = {} } = {}) {
     if (inFlight) return;
     setBusy(true);
-    const response = await send(command);
+    const response = await send(command, payload);
     setBusy(false);
     if (response.ok) {
       setConnection('ok', response.page ? '扩展与批次页已连接' : '扩展已连接');
       renderDefinitionList(elements.backgroundStatus, response.background);
       renderDefinitionList(elements.pageStatus, response.page);
+      currentBatchId = response.background?.batchId || null;
       if (!quiet || response.pageError) {
         addLog(command, {
           ok: true,
@@ -121,9 +136,38 @@
   }
 
   elements.refresh.addEventListener('click', () => void run('status'));
+  elements.open.addEventListener('click', () => void run('open'));
+  elements.start.addEventListener('click', () => void run('start'));
   elements.pause.addEventListener('click', () => void run('pause'));
   elements.resume.addEventListener('click', () => void run('resume'));
   elements.reconcile.addEventListener('click', () => void run('reconcile'));
+  elements.stop.addEventListener('click', () => {
+    if (Date.now() > stopArmedUntil) {
+      stopArmedUntil = Date.now() + 5000;
+      elements.stop.textContent = '再次点击确认永久停止';
+      setTimeout(() => {
+        if (Date.now() >= stopArmedUntil) {
+          elements.stop.textContent = '永久停止…';
+        }
+      }, 5100);
+      return;
+    }
+    stopArmedUntil = 0;
+    elements.stop.textContent = '永久停止…';
+    if (!currentBatchId) {
+      addLog('stop', {
+        ok: false,
+        error: 'batch_not_initialized'
+      });
+      return;
+    }
+    void run('stop', {
+      payload: {
+        batchId: currentBatchId,
+        confirmPermanent: true
+      }
+    });
+  });
   elements.exportLog.addEventListener('click', () => {
     const blob = new Blob([JSON.stringify({
       exportedAt: new Date().toISOString(),

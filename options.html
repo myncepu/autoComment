@@ -208,10 +208,11 @@
         <div class="settings-card settings-card-neutral">
           <div class="settings-card-row">
             <div>
-              <div class="settings-card-title">本地调试桥</div>
+              <div class="settings-card-title">本地控制桥</div>
               <div class="hint">
-                允许本机调试页读取批次状态并执行暂停、继续和权威进度同步。
-                默认关闭，不提供停止批次命令。
+                允许本机控制台或 autocommentctl 读取状态、打开批次页、
+                启动、暂停、继续、同步和永久停止。默认关闭，仅接受
+                127.0.0.1 与本机令牌。
               </div>
               <div id="localDebugStatus" class="hint" role="status" aria-live="polite">
                 正在读取状态…

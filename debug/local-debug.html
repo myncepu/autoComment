@@ -10,18 +10,21 @@
     <main>
       <header>
         <div>
-          <p class="eyebrow">127.0.0.1 · 本机调试</p>
+          <p class="eyebrow">127.0.0.1 · 本机控制</p>
           <h1>Auto Comment 本地控制台</h1>
-          <p class="muted">通过受限调试桥控制当前批次页，不模拟点击扩展按钮。</p>
+          <p class="muted">通过受认证的本地桥控制当前批次页，不依赖工具栏弹窗。</p>
         </div>
         <div id="connection" class="badge waiting">正在连接</div>
       </header>
 
       <section class="actions" aria-label="批次控制">
         <button id="refresh" type="button">刷新状态</button>
+        <button id="open" type="button">打开批次页</button>
+        <button id="start" class="accent" type="button">启动/继续</button>
         <button id="pause" type="button">暂停</button>
         <button id="resume" type="button">继续</button>
         <button id="reconcile" class="accent" type="button">同步并补位</button>
+        <button id="stop" class="danger" type="button">永久停止…</button>
       </section>
 
       <section class="grid">
