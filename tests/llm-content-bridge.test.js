@@ -64,6 +64,7 @@ test('loads the bridge before content code and routes every generation through i
   assert.deepEqual(manifest.content_scripts[0].js, [
     'lib/content-runtime-bootstrap.js',
     'illegal-site-filter.js',
+    'lib/outlink-export-rules.js',
     'lib/llm-content-bridge.js',
     'lib/batch-task-config.js',
     'lib/batch-handle-dispatch.js',

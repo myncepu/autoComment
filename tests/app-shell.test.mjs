@@ -38,7 +38,15 @@ test('renders one labelled navigation landmark with relative links and an active
   assert.equal(document.querySelector('[aria-current="page"]').textContent, '评论历史');
   assert.deepEqual(
     [...document.querySelectorAll('nav a')].map((link) => link.getAttribute('href')),
-    ['batch.html', 'options.html#identity', 'options.html#promotion', 'history.html', 'options.html#settings']
+    ['batch.html', 'options.html#identity', 'options.html#promotion', 'history.html', 'records.html', 'options.html#settings']
+  );
+});
+
+test('marks the external-link data page as active', () => {
+  assert.equal(
+    getAppNavigation('chrome-extension://id/records.html')
+      .find((item) => item.active).id,
+    'outlinks'
   );
 });
 

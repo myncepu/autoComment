@@ -203,9 +203,43 @@
           <div class="settings-card-row">
             <div>
               <div class="settings-card-title">导出外链浮动按钮</div>
-              <div class="hint">控制页面左下角“导出外链”按钮是否显示。</div>
+              <div class="hint">控制页面左下角“导出外链”菜单是否在所有网站显示。</div>
             </div>
             <button id="toggleExportOutlinksFloatingBtn" class="btn btn-secondary" type="button">加载中...</button>
+          </div>
+          <div class="outlink-settings-grid">
+            <div>
+              <label for="outlinkExcludedDomains">过滤域名</label>
+              <textarea
+                id="outlinkExcludedDomains"
+                rows="4"
+                placeholder="每行一个域名，例如：&#10;facebook.com&#10;doubleclick.net"
+              ></textarea>
+              <div class="hint">命中该域名或其子域名的外链不会写入数据表。</div>
+            </div>
+            <div>
+              <label for="outlinkExcludedKeywords">过滤字符</label>
+              <textarea
+                id="outlinkExcludedKeywords"
+                rows="4"
+                placeholder="每行一个字符或关键词，例如：&#10;utm_source=&#10;/privacy"
+              ></textarea>
+              <div class="hint">外链 URL、域名或锚文本包含关键词时不会写入数据表，不区分大小写。</div>
+            </div>
+          </div>
+          <div class="field-block">
+            <label for="outlinkHiddenHosts">已隐藏菜单的网站</label>
+            <textarea
+              id="outlinkHiddenHosts"
+              rows="3"
+              placeholder="在网页的导出外链设置菜单中隐藏后，会显示在这里。"
+            ></textarea>
+            <div class="hint">每行一个网站域名；删除某行并保存，即可在该网站重新显示菜单。</div>
+          </div>
+          <div class="row">
+            <button id="saveOutlinkSettingsBtn" class="btn btn-primary" type="button">保存外链设置</button>
+            <button id="openOutlinkTableBtn" class="btn btn-secondary" type="button">打开外链数据表</button>
+            <span id="outlinkSettingsStatus" class="status" role="status" aria-live="polite"></span>
           </div>
         </div>
 
@@ -272,6 +306,7 @@
       </section>
     </div>
 
+    <script src="lib/outlink-export-rules.js"></script>
     <script type="module" src="options.js"></script>
   </body>
 </html>

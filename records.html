@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>外链数据 - Auto Register Filler</title>
+    <link rel="stylesheet" href="styles/tokens.css" />
+    <link rel="stylesheet" href="styles/app-shell.css" />
+    <link rel="stylesheet" href="styles/records.css" />
+  </head>
+  <body>
+    <header data-app-shell></header>
+    <main class="container">
+      <div class="page-heading">
+        <div>
+          <h1>外链数据</h1>
+          <p class="subtitle">网页中“导出外链”保存的数据集中存放在本机，可筛选后再导出 CSV。</p>
+        </div>
+        <a class="settings-link" href="options.html#settings">外链过滤设置</a>
+      </div>
+
+      <section class="summary-grid" aria-label="外链数据摘要">
+        <div class="summary-card">
+          <span>外链记录</span>
+          <strong id="summaryTotal">0</strong>
+        </div>
+        <div class="summary-card">
+          <span>来源网站</span>
+          <strong id="summarySources">0</strong>
+        </div>
+        <div class="summary-card">
+          <span>外链域名</span>
+          <strong id="summaryTargets">0</strong>
+        </div>
+        <div class="summary-card">
+          <span>最近导出</span>
+          <strong id="summaryLastExport" class="summary-time">—</strong>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>筛选外链</h2>
+        <form id="outlinkFilterForm" class="filter-grid">
+          <label>
+            来源网站
+            <input id="sourceHost" type="text" placeholder="blog.example.com" />
+          </label>
+          <label>
+            外链域名
+            <input id="targetHost" type="text" placeholder="external.example" />
+          </label>
+          <label>
+            URL 或锚文本
+            <input id="keyword" type="text" placeholder="关键词" />
+          </label>
+          <label>
+            链接类型
+            <select id="linkType">
+              <option value="">全部</option>
+              <option value="dofollow">DoFollow</option>
+              <option value="nofollow">NoFollow</option>
+            </select>
+          </label>
+          <div class="filter-actions">
+            <button class="btn btn-primary" type="submit">应用筛选</button>
+            <button class="btn btn-secondary" id="resetFiltersBtn" type="button">重置</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="card">
+        <div class="table-toolbar">
+          <div>
+            <h2>数据表</h2>
+            <div id="tableStatus" class="status" role="status" aria-live="polite"></div>
+          </div>
+          <div class="toolbar-actions">
+            <button class="btn btn-secondary" id="exportCsvBtn" type="button">导出筛选结果 CSV</button>
+            <button class="btn btn-danger" id="deleteSelectedBtn" type="button" disabled>删除所选</button>
+            <button class="btn btn-danger" id="clearAllBtn" type="button">清空数据表</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th><input id="selectPage" type="checkbox" aria-label="选择本页全部记录" /></th>
+                <th>最近导出</th>
+                <th>来源页面</th>
+                <th>外链</th>
+                <th>类型</th>
+                <th>锚文本</th>
+                <th>次数</th>
+              </tr>
+            </thead>
+            <tbody id="outlinkTableBody"></tbody>
+          </table>
+        </div>
+        <div class="pagination">
+          <span id="pageStatus">0 条记录</span>
+          <button class="btn btn-secondary" id="previousPageBtn" type="button" disabled>上一页</button>
+          <span id="pageLabel">第 1 页</span>
+          <button class="btn btn-secondary" id="nextPageBtn" type="button" disabled>下一页</button>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="records.js"></script>
+  </body>
+</html>

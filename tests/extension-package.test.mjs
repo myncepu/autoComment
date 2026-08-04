@@ -20,6 +20,8 @@ const expectedTopLevelEntries = [
   'icons',
   'illegal-site-filter.js',
   'lib',
+  'records.html',
+  'records.js',
   'manifest.json',
   'options.html',
   'options.js',

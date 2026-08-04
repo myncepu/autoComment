@@ -24,6 +24,8 @@ export const extensionPackageTopLevelEntries = Object.freeze([
   'manifest.json',
   'options.html',
   'options.js',
+  'records.html',
+  'records.js',
   'styles',
   'worker-pending.html'
 ]);
