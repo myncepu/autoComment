@@ -212,7 +212,7 @@ test('missing profile fields can be reported by an open panel without global sta
   assert.equal(statuses[0].color, '#f97373');
 });
 
-test('task password is requested and filled only after a password input is detected', async () => {
+test('password-protected comment forms are skipped without requesting credentials', async () => {
   const dom = new JSDOM(`<!doctype html><form id="commentform">
     <input id="author" name="author">
     <input id="email" name="email" type="email">
@@ -257,11 +257,14 @@ globalThis.ensureAllCommentFormFieldsFilled = ensureAllCommentFormFieldsFilled;`
     false
   );
 
-  assert.equal(result.success, true);
-  assert.deepEqual(plain(requests), [{}, { includePassword: true }]);
+  assert.deepEqual(plain(result), {
+    success: false,
+    missingFields: ['authentication required']
+  });
+  assert.deepEqual(plain(requests), []);
   assert.equal(
     dom.window.document.getElementById('password').value,
-    'task-only-password'
+    ''
   );
 });
 

@@ -554,7 +554,7 @@
         : '';
       return {
         name: taskConfig.profile.name,
-        email: taskConfig.profile.email,
+        email: taskConfig.promotionSite.email || taskConfig.profile.email,
         password: password || ''
       };
     }
@@ -3689,6 +3689,18 @@
     skipCommentValidation = false,
     reportStatus
   ) {
+    const likelyCommentTextarea = typeof findLikelyCommentTextarea === 'function'
+      ? findLikelyCommentTextarea({ allowGenericFallback: true })
+      : null;
+    const likelyCommentForm = likelyCommentTextarea?.form
+      || likelyCommentTextarea?.closest?.('form')
+      || (typeof document !== 'undefined'
+        ? document.querySelector('#commentform, .comment-form, .commentform')
+        : null);
+    if (likelyCommentForm?.querySelector('input[type="password"]')) {
+      console.log('[AutoComment] 评论表单需要密码或登录，按配置跳过。');
+      return { success: false, missingFields: ['authentication required'] };
+    }
     const userProfile = await getUserProfile();
     const WEBSITE = await getWebsiteUrl();
     const USERNAME = userProfile.name || '';
@@ -3824,12 +3836,8 @@
       (input) => (input.type || '').toLowerCase() === 'password'
     );
     if (passwordInputs.length > 0) {
-      const passwordProfile = await getUserProfile({ includePassword: true });
-      if (passwordProfile.password) {
-        for (const passwordInput of passwordInputs) {
-          setValueRobust(passwordInput, passwordProfile.password);
-        }
-      }
+      console.log('[AutoComment] 评论表单需要密码或登录，按配置跳过。');
+      return { success: false, missingFields: ['authentication required'] };
     }
     console.log('[AutoComment] 表单中的 input 数量:', formAllInputs.length, 'textarea 数量:', formTextareas.length);
     console.log('[AutoComment] 表单中所有 input:', formAllInputs.map(i => ({

@@ -1555,11 +1555,23 @@ globalThis.confirmBatchHistoryDurably = confirmBatchHistoryDurably;`,
   }]);
   assert.equal(storageData.batchSubmitContextsByTab['42'], undefined);
 
+  const closeRaceTarget = 'https://close-race-target.test/post';
+  const closeRacePlan = await finalizeBatchPlan({
+    ...structuredClone(assignedPlan),
+    planFingerprint: null,
+    tasks: [{
+      ...structuredClone(assignedTask),
+      targetUrl: closeRaceTarget,
+      canonicalTargetUrl: closeRaceTarget,
+      targetDomain: 'close-race-target.test',
+      sourceDomain: 'close-race-target.test'
+    }]
+  }, webcrypto);
   const closeRaceStartResponses = await dispatchConfirm({
     type: 'BATCH_SESSION_START',
     batchId: assignedIdentity.batchId,
-    plan: assignedPlan,
-    confirmation: createPlanConfirmation(assignedPlan, {
+    plan: closeRacePlan,
+    confirmation: createPlanConfirmation(closeRacePlan, {
       normalConfirmed: true,
       highRiskConfirmed: false
     }, () => fixedNow),
@@ -1592,6 +1604,7 @@ globalThis.confirmBatchHistoryDurably = confirmBatchHistoryDurably;`,
       result: 'success',
       history: {
         ...assignedHistory,
+        targetPageUrl: closeRaceTarget,
         commentText: 'close-race submitted text'
       }
     }

@@ -433,6 +433,7 @@ test('presents common persistence and configuration failures in Chinese', () => 
     ['recovery_persistence_required', /先保存恢复检查点/],
     ['recent_success_history_unavailable', /近期成功记录暂不可用/],
     ['domain_config_unavailable', /身份与推广网站配置暂不可用/],
+    ['batch_page_owned_elsewhere', /另一个批次页/],
     ['worker_stop_rejected', /停止 worker 标签页失败/],
     ['worker_resume_rejected', /恢复 worker 标签页失败/]
   ]) {

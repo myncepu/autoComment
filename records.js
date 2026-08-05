@@ -1,7 +1,14 @@
 import { bootAppShell } from './lib/app-shell.mjs';
+import {
+  normalizeOutlinkPageSize,
+  sourcePageLinkLabel
+} from './lib/outlink-record-view.mjs';
 
-const PAGE_SIZE = 50;
+const PAGE_SIZE_STORAGE_KEY = 'outlink_records_page_size';
 let pageIndex = 0;
+let pageSize = normalizeOutlinkPageSize(
+  globalThis.localStorage?.getItem(PAGE_SIZE_STORAGE_KEY)
+);
 let activeFilter = {};
 let currentRecords = [];
 const selectedIds = new Set();
@@ -46,7 +53,7 @@ function safeHttpUrl(value) {
   }
 }
 
-function createUrlCell(value, secondary) {
+function createUrlCell(value, secondary, displayText = value) {
   const cell = document.createElement('td');
   cell.className = 'url-cell';
   const url = safeHttpUrl(value);
@@ -55,7 +62,8 @@ function createUrlCell(value, secondary) {
     link.href = url;
     link.target = '_blank';
     link.rel = 'noopener noreferrer';
-    link.textContent = value;
+    link.textContent = displayText || value;
+    if (displayText && displayText !== value) link.title = value;
     cell.appendChild(link);
   } else {
     cell.textContent = value || '—';
@@ -76,7 +84,7 @@ function renderRows(records) {
   if (!records.length) {
     const row = document.createElement('tr');
     const cell = document.createElement('td');
-    cell.colSpan = 7;
+    cell.colSpan = 8;
     cell.className = 'empty-row';
     cell.textContent = '暂无符合条件的外链记录';
     row.appendChild(cell);
@@ -101,7 +109,11 @@ function renderRows(records) {
     const timeCell = document.createElement('td');
     timeCell.textContent = formatDateTime(record.lastCapturedAt);
     row.appendChild(timeCell);
-    row.appendChild(createUrlCell(record.sourceUrl, record.sourceTitle || record.sourceHost));
+    row.appendChild(createUrlCell(
+      record.sourceUrl,
+      null,
+      sourcePageLinkLabel(record)
+    ));
     row.appendChild(createUrlCell(record.url, record.host));
 
     const typeCell = document.createElement('td');
@@ -110,6 +122,31 @@ function renderRows(records) {
     type.textContent = record.isNofollow ? 'NoFollow' : 'DoFollow';
     typeCell.appendChild(type);
     row.appendChild(typeCell);
+
+    const successCell = document.createElement('td');
+    successCell.className = 'success-cell';
+    const successCount = Number(record.successCount) || 0;
+    if (successCount > 0) {
+      const badge = document.createElement('span');
+      badge.className = 'success-count';
+      badge.textContent = `成功 ${successCount} 次`;
+      const promotedDomains = Array.isArray(record.successfulPromotedDomains)
+        ? record.successfulPromotedDomains.filter(Boolean)
+        : [];
+      badge.title = promotedDomains.length
+        ? `已成功推广：${promotedDomains.join('、')}`
+        : '该博客网站有历史发布成功记录';
+      successCell.appendChild(badge);
+      if (Number.isFinite(record.lastSuccessAt)) {
+        const detail = document.createElement('span');
+        detail.className = 'success-secondary';
+        detail.textContent = `最近 ${formatDateTime(record.lastSuccessAt)}`;
+        successCell.appendChild(detail);
+      }
+    } else {
+      successCell.textContent = '—';
+    }
+    row.appendChild(successCell);
 
     const textCell = document.createElement('td');
     textCell.textContent = record.text || '—';
@@ -153,11 +190,11 @@ async function loadPage() {
     const data = await sendMessage({
       type: 'OUTLINKS_LIST',
       filter: activeFilter,
-      offset: pageIndex * PAGE_SIZE,
-      limit: PAGE_SIZE
+      offset: pageIndex * pageSize,
+      limit: pageSize
     });
     renderRows(data.records);
-    const pageCount = Math.max(1, Math.ceil(data.total / PAGE_SIZE));
+    const pageCount = Math.max(1, Math.ceil(data.total / pageSize));
     element('pageStatus').textContent = `${data.total} 条记录`;
     element('pageLabel').textContent = `第 ${pageIndex + 1} / ${pageCount} 页`;
     element('previousPageBtn').disabled = pageIndex === 0;
@@ -178,13 +215,29 @@ function csvCell(value) {
 
 function downloadCsv(records) {
   const rows = [
-    ['来源页面', '来源域名', '外链 URL', '外链域名', '类型', '锚文本', '首次导出', '最近导出', '导出次数'],
+    [
+      '来源页面',
+      '来源域名',
+      '外链 URL',
+      '外链域名',
+      '类型',
+      '发布成功次数',
+      '最近发布成功',
+      '已成功推广网站',
+      '锚文本',
+      '首次导出',
+      '最近导出',
+      '导出次数'
+    ],
     ...records.map((record) => [
       record.sourceUrl,
       record.sourceHost,
       record.url,
       record.host,
       record.isNofollow ? 'NoFollow' : 'DoFollow',
+      Number(record.successCount) || 0,
+      formatDateTime(record.lastSuccessAt),
+      (record.successfulPromotedDomains || []).join('、'),
       record.text,
       formatDateTime(record.firstCapturedAt),
       formatDateTime(record.lastCapturedAt),
@@ -204,6 +257,15 @@ function downloadCsv(records) {
 
 document.addEventListener('DOMContentLoaded', async () => {
   bootAppShell(document, { currentUrl: window.location.href });
+
+  element('pageSizeSelect').value = String(pageSize);
+  element('pageSizeSelect').addEventListener('change', (event) => {
+    pageSize = normalizeOutlinkPageSize(event.target.value);
+    globalThis.localStorage?.setItem(PAGE_SIZE_STORAGE_KEY, String(pageSize));
+    pageIndex = 0;
+    selectedIds.clear();
+    void loadPage();
+  });
 
   element('outlinkFilterForm').addEventListener('submit', (event) => {
     event.preventDefault();

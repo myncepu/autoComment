@@ -70,7 +70,6 @@ import {
 installLlmMessageListener(chrome);
 installActionClickHandler(chrome);
 const outlinkRecordRepository = openOutlinkRecordDb();
-installOutlinkRecordMessageListener(chrome, outlinkRecordRepository);
 const batchResultStore = createBatchResultStore(chrome.storage.local);
 const domainConfigRepository = createDomainConfigRepository(chrome.storage.local);
 const profileSecretRepository = createProfileSecretRepository(chrome.storage.local);
@@ -105,6 +104,9 @@ const batchRuntimeController = createBatchRuntimeController({
     commentHistoryService.listRecentSuccessfulTargetUrls({
       since: Date.now() - (24 * 60 * 60 * 1000)
     })
+  ),
+  loadSuccessfulTargetStats: () => (
+    commentHistoryService.listSuccessfulTargetStats()
   ),
   prepareStartStoragePatch: async ({
     checkpoint,
@@ -184,6 +186,10 @@ const commentHistoryService = createCommentHistoryService({
   repository: commentHistoryRepository,
   storageLocal: chrome.storage.local,
   cloudSync: cloudSyncService
+});
+
+installOutlinkRecordMessageListener(chrome, outlinkRecordRepository, {
+  successStatsProvider: () => commentHistoryService.listSuccessfulTargetStats()
 });
 
 installCommentHistoryMessageListener(chrome, commentHistoryService);

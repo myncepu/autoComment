@@ -76,4 +76,10 @@ test('external-link data page uses packaged scripts and styles', () => {
     document.querySelector('script[type="module"][src="records.js"]') !== null,
     true
   );
+  assert.deepEqual(
+    [...document.querySelectorAll('#pageSizeSelect option')].map(
+      (option) => option.value
+    ),
+    ['50', '100', '200', '500', '1000', '2000']
+  );
 });

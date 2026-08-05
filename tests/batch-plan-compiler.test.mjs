@@ -270,6 +270,89 @@ test('pre-assignment blocks do not advance smooth weights', () => {
   );
 });
 
+test('prioritizes proven blogs and avoids promotion sites already successful there', () => {
+  const plan = compileBatchPlan(input([
+    row(0, { targetUrlRaw: 'https://untested.test/post' }),
+    row(1, { targetUrlRaw: 'https://www.proven.test/post' })
+  ], {
+    successfulTargetStats: [{
+      targetHost: 'proven.test',
+      successCount: 5,
+      lastSuccessAt: 500,
+      promotions: [{
+        promotionSiteId: 'site-a',
+        promotedDomain: 'site-a.promo.test',
+        successCount: 2,
+        lastSuccessAt: 500
+      }]
+    }]
+  }));
+
+  assert.equal(plan.tasks[0].targetDomain, 'www.proven.test');
+  assert.equal(plan.tasks[0].promotionSiteId, 'site-b');
+  assert.equal(plan.tasks[0].blockReason, null);
+  assert.equal(plan.tasks[1].targetDomain, 'untested.test');
+});
+
+test('blocks explicit and fully exhausted promotion history on a target blog', () => {
+  const explicit = row(0, {
+    targetUrlRaw: 'https://proven.test/explicit',
+    profileId: 'profile-a',
+    promotionSiteId: 'site-a',
+    assignmentPairId: 'pair-a',
+    assignmentSource: 'explicit',
+    profileRefRaw: 'profile-a',
+    promotionSiteRefRaw: 'site-a'
+  });
+  const successfulTargetStats = [{
+    targetHost: 'proven.test',
+    successCount: 2,
+    promotions: [
+      { promotionSiteId: 'site-a', successCount: 1 },
+      { promotedDomain: 'site-b.promo.test', successCount: 1 }
+    ]
+  }];
+  const explicitPlan = compileBatchPlan(input([explicit], {
+    successfulTargetStats
+  }));
+  assert.equal(
+    explicitPlan.tasks[0].blockReason,
+    BATCH_SKIP_REASONS.PROMOTION_ALREADY_SUCCEEDED
+  );
+
+  const weightedPlan = compileBatchPlan(input([
+    row(1, { targetUrlRaw: 'https://proven.test/weighted' })
+  ], { successfulTargetStats }));
+  assert.equal(
+    weightedPlan.tasks[0].blockReason,
+    BATCH_SKIP_REASONS.ALL_PROMOTIONS_ALREADY_SUCCEEDED
+  );
+});
+
+test('history-blocked targets do not consume batch quota from later runnable targets', () => {
+  const plan = compileBatchPlan(input([
+    row(0, { targetUrlRaw: 'https://untested.test/post' }),
+    row(1, { targetUrlRaw: 'https://proven.test/post' })
+  ], {
+    config: configFixture({ quotas: { batch: 1 } }),
+    successfulTargetStats: [{
+      targetHost: 'proven.test',
+      successCount: 2,
+      promotions: [
+        { promotionSiteId: 'site-a', successCount: 1 },
+        { promotionSiteId: 'site-b', successCount: 1 }
+      ]
+    }]
+  }));
+
+  assert.equal(
+    plan.tasks[0].blockReason,
+    BATCH_SKIP_REASONS.ALL_PROMOTIONS_ALREADY_SUCCEEDED
+  );
+  assert.equal(plan.tasks[1].targetDomain, 'untested.test');
+  assert.equal(plan.tasks[1].blockReason, null);
+});
+
 test('freezes only referenced non-sensitive Profile and Promotion Site snapshots', () => {
   const plan = compileBatchPlan(input([row(0), row(1), row(2)]));
   const serialized = JSON.stringify(plan);
@@ -307,4 +390,149 @@ test('summarizes eligible, blocked, pair, Profile, Site, domain, and reason coun
   assert.equal(summary.byAssignmentPair['pair-b'], 1);
   assert.equal(summary.byProfile['profile-a'], 2);
   assert.equal(summary.byPromotionSite['site-b'], 1);
+});
+
+test('modern configuration rotates identities and promotion pages independently', () => {
+  const config = configFixture();
+  config.profiles.forEach((item) => { item.email = ''; });
+  config.promotionSites = [{
+    ...site('site-parent'),
+    email: 'support@promo.test',
+    pages: [
+      {
+        id: 'page-a',
+        url: 'https://promo.test/a',
+        keywords: ['Page A'],
+        content: 'Page A promotion instructions',
+        enabled: true,
+        createdAt: 1,
+        updatedAt: 1
+      },
+      {
+        id: 'page-b',
+        url: 'https://promo.test/b',
+        keywords: ['Page B'],
+        content: 'Page B promotion instructions',
+        enabled: true,
+        createdAt: 1,
+        updatedAt: 1
+      },
+      {
+        id: 'page-c',
+        url: 'https://promo.test/c',
+        keywords: ['Page C'],
+        content: 'Page C promotion instructions',
+        enabled: true,
+        createdAt: 1,
+        updatedAt: 1
+      }
+    ]
+  }];
+  config.assignmentPolicy = {
+    defaultPairId: null,
+    pairs: [],
+    quotas: config.assignmentPolicy.quotas
+  };
+  const plan = compileBatchPlan(input(
+    Array.from({ length: 6 }, (_, index) => row(index)),
+    { config }
+  ));
+
+  assert.deepEqual(plan.tasks.map(({ profileId, promotionSiteId }) => [
+    profileId,
+    promotionSiteId
+  ]), [
+    ['profile-a', 'page-a'],
+    ['profile-b', 'page-b'],
+    ['profile-a', 'page-c'],
+    ['profile-b', 'page-a'],
+    ['profile-a', 'page-b'],
+    ['profile-b', 'page-c']
+  ]);
+  assert.equal(plan.promotionSites['page-a'].email, 'support@promo.test');
+  assert.equal(plan.tasks[0].assignmentSource, 'round_robin');
+});
+
+test('modern configuration respects the identities and promotion pages selected for this batch', () => {
+  const config = configFixture();
+  config.profiles.forEach((item) => { item.email = ''; });
+  config.promotionSites = [{
+    ...site('site-parent'),
+    email: 'support@promo.test',
+    pages: ['a', 'b'].map((suffix) => ({
+      id: `page-${suffix}`,
+      url: `https://promo.test/${suffix}`,
+      keywords: [`Page ${suffix.toUpperCase()}`],
+      content: `Page ${suffix.toUpperCase()} promotion instructions`,
+      enabled: true,
+      createdAt: 1,
+      updatedAt: 1
+    }))
+  }];
+  config.assignmentPolicy = {
+    defaultPairId: null,
+    pairs: [],
+    quotas: config.assignmentPolicy.quotas
+  };
+  const plan = compileBatchPlan(input([row(0), row(1)], {
+    config,
+    selectedProfileIds: ['profile-b'],
+    selectedPromotionPageIds: ['page-b']
+  }));
+
+  assert.deepEqual(plan.tasks.map(({ profileId, promotionSiteId }) => [
+    profileId,
+    promotionSiteId
+  ]), [
+    ['profile-b', 'page-b'],
+    ['profile-b', 'page-b']
+  ]);
+});
+
+test('modern configuration blocks only an exact target-article and promotion-page pair', () => {
+  const config = configFixture();
+  config.promotionSites = [{
+    ...site('site-parent'),
+    email: 'support@promo.test',
+    pages: [{
+      id: 'page-a',
+      url: 'https://promo.test/a',
+      keywords: ['Page A'],
+      content: 'Page A promotion instructions',
+      enabled: true,
+      createdAt: 1,
+      updatedAt: 1
+    }]
+  }];
+  config.assignmentPolicy = {
+    defaultPairId: null,
+    pairs: [],
+    quotas: config.assignmentPolicy.quotas
+  };
+  const successfulTargetStats = [{
+    targetHost: 'same-blog.test',
+    successCount: 1,
+    pairs: [{
+      targetPageUrl: 'https://same-blog.test/post-a',
+      promotedWebsiteUrl: 'https://promo.test/a'
+    }]
+  }];
+  const plan = compileBatchPlan(input([
+    row(0, { targetUrlRaw: 'https://same-blog.test/post-a' }),
+    row(1, { targetUrlRaw: 'https://same-blog.test/post-b' })
+  ], {
+    config,
+    successfulTargetStats,
+    recentSuccessUrls: [
+      'https://same-blog.test/post-a',
+      'https://same-blog.test/post-b'
+    ]
+  }));
+
+  assert.equal(
+    plan.tasks[0].blockReason,
+    BATCH_SKIP_REASONS.ALL_PROMOTIONS_ALREADY_SUCCEEDED
+  );
+  assert.equal(plan.tasks[1].targetUrl, 'https://same-blog.test/post-b');
+  assert.equal(plan.tasks[1].blockReason, null);
 });

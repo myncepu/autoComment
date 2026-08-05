@@ -61,6 +61,7 @@ function createHarness({
   cleanupPreparedStart,
   currentConfigRevision = 7,
   loadRecentSuccessUrls = async () => [],
+  loadSuccessfulTargetStats = async () => [],
   recoverRemovedSubmitContext,
   tabCreateTimeoutMs
 } = {}) {
@@ -249,6 +250,7 @@ function createHarness({
     generateOwnershipEpoch: () => 'epoch-test',
     loadDomainConfig: async () => ({ revision: currentConfigRevision }),
     loadRecentSuccessUrls,
+    loadSuccessfulTargetStats,
     prepareStartStoragePatch,
     cleanupPreparedStart,
     recoverRemovedSubmitContext,
@@ -596,6 +598,59 @@ test('fails closed when recent-success history changes or is unavailable', async
   });
   assert.deepEqual(unavailable.setCalls, []);
   assert.deepEqual(unavailable.powerCalls, []);
+});
+
+test('modern round-robin plans rely on exact promotion-pair history instead of legacy recent-target history', async () => {
+  const message = await assignmentStartMessage();
+  message.plan = structuredClone(message.plan);
+  message.plan.tasks[0].assignmentSource = 'round_robin';
+  message.plan = await finalizeBatchPlan(message.plan, webcrypto);
+  message.confirmation = createPlanConfirmation(message.plan, {
+    normalConfirmed: true,
+    highRiskConfirmed: false
+  }, () => 1_000);
+  const harness = createHarness({
+    loadRecentSuccessUrls: async () => {
+      throw new Error('legacy recent-target history is unavailable');
+    }
+  });
+
+  const response = await harness.controller.handleMessage(message);
+
+  assert.equal(response.ok, true);
+});
+
+test('rejects a confirmed plan when its exact promotion page has since succeeded on the target article', async () => {
+  const changed = createHarness({
+    loadSuccessfulTargetStats: async () => [{
+      targetHost: 'target.test',
+      successCount: 1,
+      pairs: [{
+        targetPageUrl: 'https://target.test/one',
+        promotedWebsiteUrl: 'https://promo-a.test/'
+      }]
+    }]
+  });
+  const changedResponse = await changed.controller.handleMessage(
+    await assignmentStartMessage()
+  );
+  assert.deepEqual(changedResponse, {
+    ok: false,
+    error: 'target_promotion_success_history_changed'
+  });
+  assert.deepEqual(changed.setCalls, []);
+  assert.deepEqual(changed.powerCalls, []);
+
+  const unavailable = createHarness({
+    loadSuccessfulTargetStats: async () => {
+      throw new Error('database unavailable');
+    }
+  });
+  assert.deepEqual(
+    await unavailable.controller.handleMessage(await assignmentStartMessage()),
+    { ok: false, error: 'outlink_success_history_unavailable' }
+  );
+  assert.deepEqual(unavailable.setCalls, []);
 });
 
 test('reports batch ownership only to the exact active content tab', async () => {
@@ -1102,7 +1157,13 @@ test('a stale reloaded document cannot tear down the batch now owned by its repl
 });
 
 test('a second batch-page tab cannot normalize or clean the owned running batch', async () => {
-  const harness = createHarness();
+  const harness = createHarness({
+    existingTabs: [{
+      id: 70,
+      windowId: 42,
+      url: 'chrome-extension://extension-id/batch.html'
+    }]
+  });
   const ownerPage = batchPageSender({
     documentId: 'batch-document-owner'
   });
@@ -1137,6 +1198,34 @@ test('a second batch-page tab cannot normalize or clean the owned running batch'
   assert.deepEqual(harness.data.batchRuntimeCheckpoint, before);
   assert.deepEqual(harness.removedTabs, []);
   assert.deepEqual(harness.operationLog, []);
+});
+
+test('a new batch page recovers when the saved page owner tab no longer exists', async () => {
+  const harness = createHarness();
+  const stalePage = batchPageSender({
+    documentId: 'batch-document-stale'
+  });
+  const replacementPage = batchPageSender({
+    documentId: 'batch-document-replacement',
+    tab: {
+      ...batchPageSender().tab,
+      id: 71
+    }
+  });
+  await harness.controller.handleMessage(startMessage(1), stalePage);
+
+  const response = await harness.controller.handleMessage({
+    type: 'BATCH_SESSION_LOAD_FOR_PAGE'
+  }, replacementPage);
+
+  assert.equal(response.ok, true);
+  assert.equal(response.checkpoint.status, 'paused_recovery');
+  assert.equal(response.checkpoint.batchPageOwnership.tabId, 71);
+  assert.equal(
+    response.checkpoint.batchPageOwnership.documentId,
+    'batch-document-replacement'
+  );
+  assert.deepEqual(response.pageOwnership, { batchId: 'batch-1' });
 });
 
 test('an unrelated batch page cannot tear down a batch owned by another tab', async () => {

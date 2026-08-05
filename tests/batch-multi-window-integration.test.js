@@ -403,6 +403,25 @@ async function createProductionHarness(options = {}) {
     if (options.runtimeGates?.[type]) {
       await options.runtimeGates[type].promise;
     }
+    if (type === 'OUTLINKS_LIST') {
+      const query = String(payload.filter?.keyword || '').toLowerCase();
+      const matching = (options.outlinkRecords || []).filter((record) => (
+        !query || `${record.url}\n${record.host}\n${record.sourceUrl}`
+          .toLowerCase()
+          .includes(query)
+      ));
+      const offset = Number(payload.offset) || 0;
+      const limit = Number(payload.limit) || 50;
+      return {
+        ok: true,
+        data: {
+          records: clone(matching.slice(offset, offset + limit)),
+          total: matching.length,
+          offset,
+          limit
+        }
+      };
+    }
     return runtimeController.handleMessage(
       { type, ...clone(payload) },
       pageSender
@@ -1643,6 +1662,72 @@ test('empty production boot composes profile-ready preflight wizard into a v3 st
   assert.equal(current.source.parsedUrls.length, 3);
   assert.equal(JSON.stringify(current).includes('test-only-key'), false);
   assert.ok(harness.draftWrites.length > 0);
+});
+
+test('new batch can select saved outlinks and start through the same v3 plan', async (t) => {
+  const harness = await createProductionHarness({
+    checkpoint: null,
+    domainConfig: planningDomainConfig(),
+    createBatchId: () => 'batch-from-saved-outlinks',
+    outlinkRecords: [{
+      id: 'saved-one',
+      url: 'https://saved-blog.test/post',
+      host: 'saved-blog.test',
+      sourceUrl: 'https://app.ahrefs.com/report',
+      sourceHost: 'app.ahrefs.com',
+      isDofollow: true,
+      lastCapturedAt: 123
+    }]
+  });
+  t.after(() => harness.page.destroy());
+
+  click(harness.document, '[data-action="new-batch"]');
+  click(harness.document, '[data-action="wizard-next"]');
+  const sourceMode = harness.document.querySelector(
+    '[name="sourceMode"][value="outlinks"]'
+  );
+  sourceMode.checked = true;
+  sourceMode.dispatchEvent(new harness.dom.window.Event('change', {
+    bubbles: true
+  }));
+  await waitFor(
+    () => harness.document.querySelectorAll('[name="outlinkRecordSelection"]').length === 1,
+    'saved outlink picker row'
+  );
+
+  const selection = harness.document.querySelector('[name="outlinkRecordSelection"]');
+  selection.checked = true;
+  selection.dispatchEvent(new harness.dom.window.Event('change', {
+    bubbles: true
+  }));
+  await waitFor(
+    () => harness.document.querySelector('[data-plan-summary]')?.textContent.includes('可执行 1'),
+    'saved outlink plan preview'
+  );
+
+  click(harness.document, '[data-action="wizard-next"]');
+  click(harness.document, '[data-action="wizard-next"]');
+  const confirmation = harness.document.querySelector('[name="normalConfirmed"]');
+  confirmation.checked = true;
+  confirmation.dispatchEvent(new harness.dom.window.Event('change', {
+    bubbles: true
+  }));
+  await waitFor(
+    () => harness.document.querySelector('[data-action="wizard-start"]')?.disabled === false,
+    'saved outlink plan confirmation'
+  );
+  click(harness.document, '[data-action="wizard-start"]');
+
+  await waitFor(
+    () => harness.storageLocal.data.batchRuntimeCheckpoint?.batchId === 'batch-from-saved-outlinks',
+    'saved outlink checkpoint'
+  );
+  const current = harness.storageLocal.data.batchRuntimeCheckpoint;
+  assert.equal(current.version, 3);
+  assert.equal(current.source.parsedUrls.length, 1);
+  assert.equal(current.source.parsedUrls[0].url, 'https://saved-blog.test/post');
+  assert.equal(current.source.parsedUrls[0].sourceDomain, 'app.ahrefs.com');
+  assert.ok(harness.runtimeMessages.some(({ type }) => type === 'OUTLINKS_LIST'));
 });
 
 test('null planning configuration stays explicit and blocks the legacy wizard path', async (t) => {

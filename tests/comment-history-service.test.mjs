@@ -1630,3 +1630,17 @@ test('delegates the recent successful target URL cutoff to the repository', asyn
   ]);
   assert.deepEqual(calls, [{ since: 123 }]);
 });
+
+test('delegates successful target statistics to the repository', async () => {
+  const expected = [{ targetHost: 'target.test', successCount: 2 }];
+  const service = createCommentHistoryService({
+    repository: {
+      async listSuccessfulTargetStats() {
+        return expected;
+      }
+    },
+    storageLocal: createStorage()
+  });
+
+  assert.deepEqual(await service.listSuccessfulTargetStats(), expected);
+});
