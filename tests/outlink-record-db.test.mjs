@@ -85,6 +85,9 @@ test('lists, summarizes, filters, deletes, and clears records', async (t) => {
   assert.equal(filtered.total, 1);
   assert.equal(filtered.records[0].host, 'two.test');
 
+  const boundedPage = await repository.list({ limit: 5000 });
+  assert.equal(boundedPage.limit, 2000);
+
   assert.deepEqual(
     await repository.deleteRecords([filtered.records[0].id]),
     { deleted: 1 }
@@ -92,4 +95,41 @@ test('lists, summarizes, filters, deletes, and clears records', async (t) => {
   assert.equal((await repository.summary()).total, 1);
   await repository.clear();
   assert.equal((await repository.summary()).total, 0);
+});
+
+test('annotates and prioritizes blogs with confirmed publishing success', async (t) => {
+  const repository = await openRepo(t);
+  await repository.saveExport({
+    sourceUrl: 'https://source.test/post',
+    capturedAt: 200,
+    links: [{ url: 'https://newest.test/post' }]
+  });
+  await repository.saveExport({
+    sourceUrl: 'https://source.test/post',
+    capturedAt: 100,
+    links: [{ url: 'https://www.proven.test/post' }]
+  });
+
+  const successStats = [{
+    targetHost: 'proven.test',
+    successCount: 4,
+    lastSuccessAt: 500,
+    promotions: [{
+      promotionSiteId: 'site-a',
+      promotedDomain: 'promo.test',
+      successCount: 4,
+      lastSuccessAt: 500
+    }]
+  }];
+  const page = await repository.list({ successStats });
+
+  assert.deepEqual(page.records.map(({ host }) => host), [
+    'www.proven.test',
+    'newest.test'
+  ]);
+  assert.equal(page.records[0].successCount, 4);
+  assert.equal(page.records[0].lastSuccessAt, 500);
+  assert.deepEqual(page.records[0].successfulPromotionSiteIds, ['site-a']);
+  assert.deepEqual(page.records[0].successfulPromotedDomains, ['promo.test']);
+  assert.equal(page.records[1].successCount, 0);
 });

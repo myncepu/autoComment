@@ -40,6 +40,16 @@ import {
   optionsErrorMessage,
   stableOptionsErrorCode
 } from './lib/options-page-reliability.mjs';
+import {
+  identityGenerationRequest,
+  parseGeneratedIdentities,
+  parseGeneratedPromotionAnalysis,
+  parseGeneratedPromotionPrompt,
+  promotionEmailForUrl,
+  promotionPageAnalysisRequest,
+  promotionPageOriginPattern,
+  promotionPromptGenerationRequest
+} from './lib/options-ai-generator.mjs';
 
 const SHOW_EXPORT_OUTLINKS_FLOATING_BUTTON_STORAGE_KEY =
   'show_export_outlinks_floating_button';
@@ -101,11 +111,21 @@ export async function bootOptionsPage() {
     'saveProfileBtn',
     'clearPasswordBtn',
     'deleteProfileBtn',
+    'identityGenerateCount',
+    'generateIdentitiesBtn',
+    'saveGeneratedIdentitiesBtn',
+    'identityGeneratorStatus',
+    'generatedIdentityPreview',
     'promotionSiteSelect',
     'newPromotionSiteBtn',
     'promotionSiteName',
+    'websiteEmail',
     'websiteUrl',
+    'promotionPageKeywords',
     'websiteContent',
+    'analyzePromotionPageBtn',
+    'promotionAnalysisStatus',
+    'generatePromotionPromptBtn',
     'promotionSiteEnabled',
     'savePromotionSiteBtn',
     'deletePromotionSiteBtn',
@@ -177,6 +197,7 @@ export async function bootOptionsPage() {
     settingsAdapter: safeSettingsAdapter
   });
   let snapshot = await domainController.snapshot();
+  const legacyProfileEmail = snapshot.profiles.find(({ email }) => email)?.email || '';
   bootAppShell(document, { currentUrl: window.location.href });
   const focusCurrentSection = () => (
     focusOptionsSection(document, window.location.hash)
@@ -186,6 +207,8 @@ export async function bootOptionsPage() {
   let editingProfileId = snapshot.profiles[0]?.id ?? null;
   let editingSiteId = snapshot.promotionSites[0]?.id ?? null;
   let editingPairId = snapshot.pairs[0]?.id ?? null;
+  let generatedIdentities = [];
+  let promotionAnalysisSequence = 0;
 
   function replaceOptions(select, items, selectedId, label) {
     select.replaceChildren();
@@ -227,13 +250,41 @@ export async function bootOptionsPage() {
     ui.deleteProfileBtn.disabled = !profile;
   }
 
+  function legacyPage(site) {
+    if (!site) return null;
+    return {
+      id: `${site.id}-page-home`,
+      url: site.url,
+      keywords: [site.name],
+      content: site.content,
+      enabled: site.enabled,
+      createdAt: site.createdAt,
+      updatedAt: site.updatedAt
+    };
+  }
+
+  function pageForSite(site) {
+    return site?.pages?.[0] || legacyPage(site);
+  }
+
+  function parseKeywords(value) {
+    return [...new Set(String(value || '')
+      .split(/[\n,，]/u)
+      .map((item) => item.trim())
+      .filter(Boolean))];
+  }
+
   function renderSite() {
     const site = siteById(editingSiteId);
+    const page = pageForSite(site);
     ui.promotionSiteName.value = site?.name || '';
-    ui.websiteUrl.value = site?.url || '';
-    ui.websiteContent.value = site?.content || '';
+    ui.websiteEmail.value = site?.email || legacyProfileEmail;
+    ui.websiteUrl.value = page?.url || '';
+    ui.promotionPageKeywords.value = (page?.keywords || []).join('\n');
+    ui.websiteContent.value = page?.content || '';
     ui.promotionSiteEnabled.checked = site?.enabled ?? true;
     ui.deletePromotionSiteBtn.disabled = !site;
+    ui.promotionAnalysisStatus.textContent = '';
   }
 
   function renderPair() {
@@ -268,7 +319,10 @@ export async function bootOptionsPage() {
       ui.promotionSiteSelect,
       snapshot.promotionSites,
       editingSiteId,
-      ({ name, enabled }) => `${name}${enabled ? '' : '（停用）'}`
+      (site) => {
+        const page = pageForSite(site);
+        return `${site.name} · ${page?.url || site.url}${site.enabled ? '' : '（停用）'}`;
+      }
     );
     replaceOptions(
       ui.pairProfileSelect,
@@ -351,8 +405,7 @@ export async function bootOptionsPage() {
     async () => {
       const displayName = ui.profileDisplayName.value.trim();
       const name = ui.userName.value.trim();
-      const email = ui.userEmail.value.trim();
-      if (!displayName || !name || !email) {
+      if (!displayName || !name) {
         throw codedOptionsError('missing_profile_fields');
       }
       const profileId = editingProfileId || generatedId('profile');
@@ -361,14 +414,8 @@ export async function bootOptionsPage() {
         id: profileId,
         displayName,
         name,
-        email
+        email: ''
       });
-      if (ui.userPassword.value !== '') {
-        await domainController.savePassword(
-          editingProfileId,
-          ui.userPassword.value
-        );
-      }
       return domainController.snapshot();
     },
     'Profile 已保存'
@@ -381,7 +428,7 @@ export async function bootOptionsPage() {
     '密码已清除'
   ));
   ui.deleteProfileBtn.addEventListener('click', () => {
-    if (!confirm('确认删除此 Profile？已被 Pair 使用时不会删除。')) return;
+    if (!confirm('确认删除此身份？')) return;
     void runConfigCommand(
       () => domainController.deleteProfile(editingProfileId),
       'Profile 已删除'
@@ -395,30 +442,298 @@ export async function bootOptionsPage() {
   ui.newPromotionSiteBtn.addEventListener('click', () => {
     editingSiteId = generatedId('site');
     renderSite();
-    ui.promotionSiteName.focus();
+    ui.websiteEmail.value = '';
+    ui.websiteUrl.focus();
   });
   ui.savePromotionSiteBtn.addEventListener('click', () => runConfigCommand(
     () => {
       const siteId = editingSiteId || generatedId('site');
       editingSiteId = siteId;
+      const existing = siteById(siteId);
+      const existingPage = pageForSite(existing);
+      const at = Date.now();
+      const page = {
+        id: existingPage?.id || generatedId('page'),
+        url: ui.websiteUrl.value.trim(),
+        keywords: parseKeywords(ui.promotionPageKeywords.value),
+        content: ui.websiteContent.value.trim(),
+        enabled: ui.promotionSiteEnabled.checked,
+        createdAt: existingPage?.createdAt ?? at,
+        updatedAt: at
+      };
       return domainController.savePromotionSite({
         id: siteId,
         name: ui.promotionSiteName.value.trim(),
-        url: ui.websiteUrl.value.trim(),
-        content: ui.websiteContent.value.trim(),
+        email: ui.websiteEmail.value.trim(),
+        pages: [page],
+        url: page.url,
+        content: page.content,
         enabled: ui.promotionSiteEnabled.checked
       });
     },
-    'Promotion Site 已保存'
+    '推广页面已保存'
   ));
   ui.deletePromotionSiteBtn.addEventListener('click', () => {
-    if (!confirm('确认删除此 Promotion Site？已被 Pair 使用时不会删除。')) {
+    if (!confirm('确认删除此推广页面？')) {
       return;
     }
     void runConfigCommand(
       () => domainController.deletePromotionSite(editingSiteId),
-      'Promotion Site 已删除'
+      '推广页面已删除'
     );
+  });
+
+  async function requestModel({ systemPrompt, userPrompt }) {
+    const response = await chrome.runtime.sendMessage({
+      type: 'LLM_GENERATE_COPY',
+      payload: { systemPrompt, userPrompt }
+    });
+    if (!response?.success || typeof response.text !== 'string') {
+      throw codedOptionsError(response?.error?.code || 'model_generation_failed');
+    }
+    return response.text;
+  }
+
+  function fillPromotionEmailFromUrl() {
+    try {
+      ui.websiteEmail.value = promotionEmailForUrl(ui.websiteUrl.value);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async function ensurePromotionPagePermission(pageUrl, interactive) {
+    if (typeof chrome.permissions?.contains !== 'function') return true;
+    const origins = [promotionPageOriginPattern(pageUrl)];
+    if (await chrome.permissions.contains({ origins })) return true;
+    if (!interactive || typeof chrome.permissions.request !== 'function') {
+      return false;
+    }
+    return chrome.permissions.request({ origins });
+  }
+
+  async function fetchPromotionPageContext(pageUrl) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15_000);
+    try {
+      const response = await fetch(pageUrl, {
+        credentials: 'omit',
+        redirect: 'follow',
+        signal: controller.signal
+      });
+      if (!response.ok) throw codedOptionsError('promotion_page_fetch_failed');
+      const contentLength = Number(response.headers.get('content-length'));
+      if (Number.isFinite(contentLength) && contentLength > 2_000_000) {
+        throw codedOptionsError('promotion_page_too_large');
+      }
+      const html = (await response.text()).slice(0, 500_000);
+      const page = new DOMParser().parseFromString(html, 'text/html');
+      page.querySelectorAll('script, style, noscript, svg, template')
+        .forEach((element) => element.remove());
+      return {
+        title: page.title,
+        description: page.querySelector('meta[name="description"]')
+          ?.getAttribute('content') || '',
+        bodyText: (page.body?.innerText || page.body?.textContent || '')
+          .replace(/\s+/gu, ' ')
+          .trim()
+          .slice(0, 16_000)
+      };
+    } catch (error) {
+      if (error?.code) throw error;
+      throw codedOptionsError('promotion_page_fetch_failed');
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  async function analyzePromotionPage({ interactive = false } = {}) {
+    const pageUrl = ui.websiteUrl.value.trim();
+    if (!fillPromotionEmailFromUrl()) {
+      showStatus(
+        ui.promotionAnalysisStatus,
+        '请先填写有效的 HTTP 或 HTTPS 推广页面 URL。',
+        true,
+        5000
+      );
+      return;
+    }
+    let permissionGranted;
+    try {
+      permissionGranted = await ensurePromotionPagePermission(
+        pageUrl,
+        interactive
+      );
+    } catch (_) {
+      permissionGranted = false;
+    }
+    if (!permissionGranted) {
+      showStatus(
+        ui.promotionAnalysisStatus,
+        '邮箱已自动生成。点击“AI 分析并生成”授权读取该页面。',
+        false,
+        10_000
+      );
+      return;
+    }
+
+    const sequence = ++promotionAnalysisSequence;
+    ui.analyzePromotionPageBtn.disabled = true;
+    showStatus(
+      ui.promotionAnalysisStatus,
+      '正在读取并分析推广页面…',
+      false,
+      60_000
+    );
+    try {
+      const pageContext = await fetchPromotionPageContext(pageUrl);
+      const analysis = parseGeneratedPromotionAnalysis(await requestModel(
+        promotionPageAnalysisRequest({ pageUrl, ...pageContext })
+      ));
+      if (sequence !== promotionAnalysisSequence
+          || pageUrl !== ui.websiteUrl.value.trim()) return;
+      ui.promotionSiteName.value = analysis.name;
+      ui.promotionPageKeywords.value = analysis.keywords.join('\n');
+      ui.websiteContent.value = analysis.prompt;
+      showStatus(
+        ui.promotionAnalysisStatus,
+        `分析完成：已生成 ${analysis.keywords.length} 个关键词和评论提示词。`,
+        false,
+        6000
+      );
+    } catch (error) {
+      showStatus(
+        ui.promotionAnalysisStatus,
+        optionsErrorMessage(
+          error,
+          '页面分析失败，请确认网址可访问并检查模型配置后重试。'
+        ),
+        true,
+        6000
+      );
+    } finally {
+      if (sequence === promotionAnalysisSequence) {
+        ui.analyzePromotionPageBtn.disabled = false;
+      }
+    }
+  }
+
+  ui.websiteUrl.addEventListener('input', () => {
+    fillPromotionEmailFromUrl();
+  });
+  ui.websiteUrl.addEventListener('change', () => {
+    void analyzePromotionPage({ interactive: true });
+  });
+  ui.analyzePromotionPageBtn.addEventListener('click', () => {
+    void analyzePromotionPage({ interactive: true });
+  });
+
+  function renderGeneratedIdentities() {
+    ui.generatedIdentityPreview.replaceChildren();
+    generatedIdentities.forEach((identity, index) => {
+      const row = document.createElement('div');
+      row.className = 'generated-identity-row';
+      const displayName = document.createElement('input');
+      displayName.type = 'text';
+      displayName.value = identity.displayName;
+      displayName.setAttribute('aria-label', `身份 ${index + 1} 显示名`);
+      displayName.addEventListener('input', () => {
+        generatedIdentities[index].displayName = displayName.value;
+      });
+      const name = document.createElement('input');
+      name.type = 'text';
+      name.value = identity.name;
+      name.setAttribute('aria-label', `身份 ${index + 1} 姓名`);
+      name.addEventListener('input', () => {
+        generatedIdentities[index].name = name.value;
+      });
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'btn btn-secondary danger';
+      remove.textContent = '移除';
+      remove.addEventListener('click', () => {
+        generatedIdentities.splice(index, 1);
+        renderGeneratedIdentities();
+      });
+      row.append(displayName, name, remove);
+      ui.generatedIdentityPreview.appendChild(row);
+    });
+    ui.saveGeneratedIdentitiesBtn.disabled = generatedIdentities.length === 0;
+  }
+
+  ui.generateIdentitiesBtn.addEventListener('click', async () => {
+    ui.generateIdentitiesBtn.disabled = true;
+    showStatus(ui.identityGeneratorStatus, '正在生成英文身份…', false, 60_000);
+    try {
+      const request = identityGenerationRequest(ui.identityGenerateCount.value);
+      generatedIdentities = parseGeneratedIdentities(
+        await requestModel(request),
+        request.count
+      );
+      renderGeneratedIdentities();
+      showStatus(
+        ui.identityGeneratorStatus,
+        `已生成 ${generatedIdentities.length} 个身份，可编辑后保存。`
+      );
+    } catch (error) {
+      showStatus(
+        ui.identityGeneratorStatus,
+        optionsErrorMessage(error, '身份生成失败，请检查模型配置后重试。'),
+        true,
+        4200
+      );
+    } finally {
+      ui.generateIdentitiesBtn.disabled = false;
+    }
+  });
+
+  ui.saveGeneratedIdentitiesBtn.addEventListener('click', () => runConfigCommand(
+    async () => {
+      const items = generatedIdentities.map((identity) => ({
+        displayName: identity.displayName.trim(),
+        name: identity.name.trim()
+      }));
+      if (items.some(({ displayName, name }) => !displayName || !name)) {
+        throw codedOptionsError('missing_profile_fields');
+      }
+      for (const identity of items) {
+        await domainController.saveProfile({
+          id: generatedId('profile'),
+          ...identity,
+          email: ''
+        });
+      }
+      generatedIdentities = [];
+      renderGeneratedIdentities();
+      return domainController.snapshot();
+    },
+    'AI 身份已批量保存'
+  ));
+
+  ui.generatePromotionPromptBtn.addEventListener('click', async () => {
+    ui.generatePromotionPromptBtn.disabled = true;
+    showStatus(ui.settingsStatus, '正在生成推广提示词…', false, 60_000);
+    try {
+      const request = promotionPromptGenerationRequest({
+        websiteName: ui.promotionSiteName.value,
+        pageUrl: ui.websiteUrl.value,
+        keywords: parseKeywords(ui.promotionPageKeywords.value)
+      });
+      ui.websiteContent.value = parseGeneratedPromotionPrompt(
+        await requestModel(request)
+      );
+      showStatus(ui.settingsStatus, '推广提示词已生成，请检查后保存页面。');
+    } catch (error) {
+      showStatus(
+        ui.settingsStatus,
+        optionsErrorMessage(error, '提示词生成失败，请检查模型配置后重试。'),
+        true,
+        4200
+      );
+    } finally {
+      ui.generatePromotionPromptBtn.disabled = false;
+    }
   });
 
   ui.pairSelect.addEventListener('change', () => {

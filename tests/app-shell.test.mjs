@@ -10,16 +10,16 @@ function shellDocument(url = 'https://localhost/history.html') {
   ).window.document;
 }
 
-test('maps options hashes to distinct active navigation items for extension and web URLs', () => {
+test('maps every options section to the single settings navigation item', () => {
   assert.equal(
     getAppNavigation('chrome-extension://id/options.html#identity')
       .find((item) => item.active).id,
-    'identity'
+    'settings'
   );
   assert.equal(
     getAppNavigation('http://localhost/options.html#promotion')
       .find((item) => item.active).id,
-    'promotion'
+    'settings'
   );
   assert.equal(
     getAppNavigation('http://localhost/options.html#settings')
@@ -38,7 +38,11 @@ test('renders one labelled navigation landmark with relative links and an active
   assert.equal(document.querySelector('[aria-current="page"]').textContent, '评论历史');
   assert.deepEqual(
     [...document.querySelectorAll('nav a')].map((link) => link.getAttribute('href')),
-    ['batch.html', 'options.html#identity', 'options.html#promotion', 'history.html', 'records.html', 'options.html#settings']
+    ['batch.html', 'history.html', 'records.html', 'options.html']
+  );
+  assert.deepEqual(
+    [...document.querySelectorAll('nav a')].map((link) => link.textContent),
+    ['批次', '评论历史', '外链数据', '设置']
   );
 });
 

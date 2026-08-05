@@ -206,6 +206,43 @@ test('creates the version 3 stores and assignment indexes while preserving prior
   assert.equal(comments.index('by_batch_task').unique, true);
 });
 
+test('aggregates successful target and promotion-site statistics', async (t) => {
+  const { repo } = await openRepo(t);
+  await repo.upsertRecord(makeBundle({
+    id: 'batch-stats:0',
+    submittedAt: 100,
+    targetDomain: 'www.blog.test',
+    promotedDomain: 'promo.test',
+    promotionSiteId: 'site-a'
+  }));
+  await repo.upsertRecord(makeBundle({
+    id: 'batch-stats:1',
+    submittedAt: 200,
+    targetDomain: 'blog.test',
+    promotedDomain: 'promo.test',
+    promotionSiteId: 'site-a'
+  }));
+  await repo.upsertRecord(makeBundle({
+    id: 'batch-stats:2',
+    submittedAt: 150,
+    targetDomain: 'other.test',
+    promotedDomain: 'second.test',
+    promotionSiteId: 'site-b'
+  }));
+
+  const stats = await repo.listSuccessfulTargetStats();
+  assert.equal(stats[0].targetHost, 'blog.test');
+  assert.equal(stats[0].successCount, 2);
+  assert.equal(stats[0].lastSuccessAt, 200);
+  assert.deepEqual(stats[0].promotions, [{
+    promotionSiteId: 'site-a',
+    promotedDomain: 'promo.test',
+    successCount: 2,
+    lastSuccessAt: 200
+  }]);
+  assert.equal(stats[1].targetHost, 'other.test');
+});
+
 test('filters history by Profile and Promotion Site and lists recent successful targets', async (t) => {
   const { repo } = await openRepo(t);
   await repo.upsertRecord(makeBundle({

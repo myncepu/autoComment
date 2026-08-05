@@ -348,6 +348,71 @@ textarea {
   width: 5.5rem;
 }
 
+.ai-generator-card {
+  margin-top: 18px;
+}
+
+.ai-generator-card h3 {
+  margin: 0 0 10px;
+  font-size: 14px;
+}
+
+.ai-generator-controls input[type='number'] {
+  width: 96px;
+}
+
+.generated-identity-preview {
+  display: grid;
+  gap: 8px;
+  max-height: 360px;
+  margin-top: 12px;
+  overflow-y: auto;
+}
+
+.generated-identity-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) minmax(160px, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.field-label-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.promotion-url-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.promotion-url-row .btn {
+  min-height: 38px;
+  white-space: nowrap;
+}
+
+.promotion-analysis-status {
+  display: block;
+  min-height: 18px;
+  margin-top: 8px;
+  line-height: 1.5;
+}
+
+@media (max-width: 640px) {
+  .generated-identity-row {
+    grid-template-columns: 1fr;
+  }
+
+  .promotion-url-row {
+    grid-template-columns: 1fr;
+  }
+}
+
 .quota-row {
   align-items: flex-end;
 }

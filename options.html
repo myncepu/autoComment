@@ -13,12 +13,12 @@
     <div class="container">
       <h1>Auto Register Filler 设置</h1>
       <div class="subtitle">
-        在这里配置自有模型 API、推广网站信息和自动填表信息。
+        在这里配置自有模型 API、推广页面和自动填表信息。
       </div>
 
       <section id="identity" class="settings-section" aria-labelledby="identity-heading">
         <h2 id="identity-heading" data-section-heading tabindex="-1">身份配置</h2>
-        <div class="hint">每个 Profile 独立保存姓名和邮箱；密码只保存在本机，不会导出或同步。</div>
+        <div class="hint">身份只保存显示名和姓名/昵称；邮箱由具体推广页面提供。</div>
         <div class="row settings-selector-row">
           <label for="profileSelect" class="inline-control-label">Profile</label>
           <select id="profileSelect" class="settings-selector"></select>
@@ -33,12 +33,12 @@
               <input type="text" id="userName" class="required-field" placeholder="姓名 / 昵称，例如：CloudHu" autocomplete="off" required />
               <div class="required-hint">请填写姓名或昵称。</div>
             </div>
-            <div class="identity-field">
+            <div class="identity-field" hidden>
               <label for="userEmail">邮箱</label>
               <input type="email" id="userEmail" class="required-field" placeholder="邮箱，例如：you@test.com" autocomplete="off" required />
               <div class="required-hint">请填写有效邮箱，例如：you@test.com</div>
             </div>
-            <div class="identity-field">
+            <div class="identity-field" hidden>
               <label for="userPassword">密码（可选）</label>
               <input type="password" id="userPassword" placeholder="登录/注册时常用的密码（可选）" autocomplete="new-password" />
               <div id="passwordConfiguredStatus" class="hint" role="status" aria-live="polite">未配置密码</div>
@@ -47,37 +47,64 @@
         </div>
         <div class="row">
           <button id="saveProfileBtn" class="btn btn-primary" type="button">保存 Profile</button>
-          <button id="clearPasswordBtn" class="btn btn-secondary" type="button">清除密码</button>
+          <button id="clearPasswordBtn" class="btn btn-secondary" type="button" hidden>清除密码</button>
           <button id="deleteProfileBtn" class="btn btn-secondary danger" type="button">删除</button>
+        </div>
+        <div class="settings-card ai-generator-card">
+          <h3>AI 批量生成英文身份</h3>
+          <div class="row ai-generator-controls">
+            <label for="identityGenerateCount">生成数量</label>
+            <input id="identityGenerateCount" type="number" min="1" max="100" value="20" />
+            <button id="generateIdentitiesBtn" class="btn btn-secondary" type="button">AI 生成</button>
+            <button id="saveGeneratedIdentitiesBtn" class="btn btn-primary" type="button" disabled>保存生成结果</button>
+          </div>
+          <div id="identityGeneratorStatus" class="status" role="status" aria-live="polite"></div>
+          <div id="generatedIdentityPreview" class="generated-identity-preview"></div>
         </div>
       </section>
 
       <section id="promotion" class="settings-section" aria-labelledby="promotion-heading">
-        <h2 id="promotion-heading" data-section-heading tabindex="-1">推广网站</h2>
-        <div class="hint">每个 Promotion Site 有独立 URL、描述和启用状态。</div>
+        <h2 id="promotion-heading" data-section-heading tabindex="-1">推广页面</h2>
+        <div class="hint">每条配置对应一个精确推广 URL。输入网址后会自动生成邮箱，并由 AI 分析页面、生成关键词和评论提示词。</div>
         <div class="row settings-selector-row">
-          <label for="promotionSiteSelect" class="inline-control-label">Promotion Site</label>
+          <label for="promotionSiteSelect" class="inline-control-label">推广页面</label>
           <select id="promotionSiteSelect" class="settings-selector"></select>
-          <button id="newPromotionSiteBtn" class="btn btn-secondary" type="button">新建</button>
+          <button id="newPromotionSiteBtn" class="btn btn-secondary" type="button">新增页面</button>
         </div>
         <div class="field-block">
-          <label for="promotionSiteName">网站名称</label>
-          <input type="text" id="promotionSiteName" class="required-field" placeholder="例如：产品官网" required />
+          <label for="websiteUrl" class="required-label required-label-compact">推广页面精确 URL</label>
+          <div class="promotion-url-row">
+            <input
+              type="url"
+              id="websiteUrl"
+              class="required-field"
+              placeholder="https://example.com/product"
+              autocomplete="off"
+              required
+            />
+            <button id="analyzePromotionPageBtn" class="btn btn-secondary" type="button">AI 分析并生成</button>
+          </div>
+          <div class="required-hint">首次分析某个域名时，Chrome 可能会请求读取该网站的权限。</div>
+          <div id="promotionAnalysisStatus" class="status promotion-analysis-status" role="status" aria-live="polite"></div>
         </div>
         <div class="field-block">
-          <label for="websiteUrl" class="required-label required-label-compact">你的网站链接</label>
-          <input
-            type="url"
-            id="websiteUrl"
-            class="required-field"
-            placeholder="https://test.com"
-            autocomplete="off"
-            required
-          />
-          <div class="required-hint">请填写你的网站链接，例如：https://test.com</div>
+          <label for="promotionSiteName">页面 / 产品名称（AI 自动生成）</label>
+          <input type="text" id="promotionSiteName" class="required-field" placeholder="AI 分析后自动填写" required />
         </div>
         <div class="field-block">
-          <label for="websiteContent" class="required-label required-label-compact">你的网站内容</label>
+          <label for="websiteEmail" class="required-label required-label-compact">评论邮箱（按域名自动生成）</label>
+          <input id="websiteEmail" type="email" class="required-field" placeholder="support@example.com" autocomplete="off" required />
+          <div class="required-hint">默认使用 support@当前域名，也可以在保存前修改。</div>
+        </div>
+        <div class="field-block">
+          <label for="promotionPageKeywords" class="required-label required-label-compact">主打关键词（可填写多个）</label>
+          <textarea id="promotionPageKeywords" class="required-field" rows="2" placeholder="每行一个关键词，或使用逗号分隔" autocomplete="off" required></textarea>
+        </div>
+        <div class="field-block">
+          <div class="field-label-actions">
+            <label for="websiteContent" class="required-label required-label-compact">评论生成提示词</label>
+            <button id="generatePromotionPromptBtn" class="btn btn-secondary" type="button">仅重新生成提示词</button>
+          </div>
           <textarea
             id="websiteContent"
             class="required-field"
@@ -86,19 +113,19 @@
             autocomplete="off"
             required
           ></textarea>
-          <div class="required-hint">请填写你的网站内容，这会用于生成评论文案。</div>
+          <div class="required-hint">根据推广页面 URL 和关键词生成；保存前可以人工修改。</div>
         </div>
         <label class="row checkbox-row">
           <input id="promotionSiteEnabled" type="checkbox" checked />
-          启用此 Promotion Site
+          启用此推广页面
         </label>
         <div class="row">
-          <button id="savePromotionSiteBtn" class="btn btn-primary" type="button">保存网站</button>
-          <button id="deletePromotionSiteBtn" class="btn btn-secondary danger" type="button">删除</button>
+          <button id="savePromotionSiteBtn" class="btn btn-primary" type="button">保存推广页面</button>
+          <button id="deletePromotionSiteBtn" class="btn btn-secondary danger" type="button">删除页面</button>
         </div>
       </section>
 
-      <section id="assignment" class="settings-section" aria-labelledby="assignment-heading">
+      <section id="assignment" class="settings-section" aria-labelledby="assignment-heading" hidden>
         <h2 id="assignment-heading" data-section-heading tabindex="-1">批次分配策略</h2>
         <div class="hint">Pair 是不可拆分的 Profile + Promotion Site 组合；权重用于未显式分配的 CSV 行。</div>
         <div class="row settings-selector-row">
@@ -291,8 +318,8 @@
             <span class="settings-card-title settings-card-title-warning">配置备份与恢复</span>
           </div>
           <div class="hint backup-hint">
-            配置包包含 Profile、推广网站、分配策略、非敏感模型设置和批处理默认值；
-            API Key、Profile 密码与云同步密钥不会导出。
+            配置包包含身份、推广页面、非敏感模型设置和批处理默认值；
+            API Key 与云同步密钥不会导出。
           </div>
           <div class="backup-actions">
             <button id="exportConfigBtn" class="btn btn-secondary" type="button">导出配置</button>

@@ -5,7 +5,7 @@ import { JSDOM } from 'jsdom';
 
 const root = new URL('../', import.meta.url);
 
-test('options page exposes Profile, Site, Pair, default, quota, and explicit import controls', () => {
+test('options page exposes identity AI, promotion pages, and explicit import controls', () => {
   const html = fs.readFileSync(new URL('options.html', root), 'utf8');
   const document = new JSDOM(html).window.document;
   const requiredIds = [
@@ -17,6 +17,11 @@ test('options page exposes Profile, Site, Pair, default, quota, and explicit imp
     'passwordConfiguredStatus',
     'promotionSiteSelect',
     'promotionSiteName',
+    'websiteEmail',
+    'promotionPageKeywords',
+    'analyzePromotionPageBtn',
+    'promotionAnalysisStatus',
+    'generatePromotionPromptBtn',
     'websiteUrl',
     'websiteContent',
     'promotionSiteEnabled',
@@ -41,6 +46,16 @@ test('options page exposes Profile, Site, Pair, default, quota, and explicit imp
     assert.ok(document.getElementById(id), `missing #${id}`);
   }
   assert.equal(document.getElementById('userPassword').value, '');
+  assert.equal(document.getElementById('userPassword').closest('.identity-field').hidden, true);
+  assert.equal(document.getElementById('assignment').hidden, true);
+  assert.ok(document.getElementById('generateIdentitiesBtn'));
+  assert.ok(document.getElementById('saveGeneratedIdentitiesBtn'));
+  assert.equal(document.getElementById('promotionPageSelect'), null);
+  assert.equal(document.getElementById('newPromotionPageBtn'), null);
+  assert.match(
+    document.getElementById('promotion').textContent,
+    /每条配置对应一个精确推广 URL/u
+  );
   assert.equal(document.getElementById('applyImportConfigBtn').hidden, true);
   assert.doesNotMatch(
     document.getElementById('settingsStatus').textContent,

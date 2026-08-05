@@ -89,6 +89,7 @@
                 <th>来源页面</th>
                 <th>外链</th>
                 <th>类型</th>
+                <th>发布成功</th>
                 <th>锚文本</th>
                 <th>次数</th>
               </tr>
@@ -98,6 +99,17 @@
         </div>
         <div class="pagination">
           <span id="pageStatus">0 条记录</span>
+          <label class="page-size-control" for="pageSizeSelect">
+            每页
+            <select id="pageSizeSelect">
+              <option value="50">50 行</option>
+              <option value="100">100 行</option>
+              <option value="200">200 行</option>
+              <option value="500">500 行</option>
+              <option value="1000">1000 行</option>
+              <option value="2000">2000 行</option>
+            </select>
+          </label>
           <button class="btn btn-secondary" id="previousPageBtn" type="button" disabled>上一页</button>
           <span id="pageLabel">第 1 页</span>
           <button class="btn btn-secondary" id="nextPageBtn" type="button" disabled>下一页</button>

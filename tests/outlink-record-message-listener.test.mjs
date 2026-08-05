@@ -97,3 +97,49 @@ test('content navigation delegates to the service worker without exposing the pa
   assert.equal(OUTLINK_RECORDS_PAGE, 'records.html');
   assert.equal(webResources.includes(OUTLINK_RECORDS_PAGE), false);
 });
+
+test('joins success statistics into lists and exposes the same aggregate to batch planning', async () => {
+  let listener;
+  const calls = [];
+  const stats = [{ targetHost: 'proven.test', successCount: 2 }];
+  const chromeApi = {
+    runtime: {
+      id: 'extension-test',
+      getURL: (path) => `chrome-extension://extension-test/${path}`,
+      onMessage: {
+        addListener(value) {
+          listener = value;
+        }
+      }
+    },
+    tabs: { async create() {} }
+  };
+  installOutlinkRecordMessageListener(chromeApi, {
+    async list(input) {
+      calls.push(input);
+      return { records: [], total: 0 };
+    }
+  }, {
+    successStatsProvider: async () => stats
+  });
+  const sender = { id: chromeApi.runtime.id };
+
+  const listResponse = await dispatch(listener, {
+    type: OUTLINK_MESSAGE_TYPES.LIST,
+    filter: { keyword: 'proven' },
+    offset: 10,
+    limit: 20
+  }, sender);
+  assert.equal(listResponse.ok, true);
+  assert.deepEqual(calls, [{
+    filter: { keyword: 'proven' },
+    offset: 10,
+    limit: 20,
+    successStats: stats
+  }]);
+
+  const statsResponse = await dispatch(listener, {
+    type: OUTLINK_MESSAGE_TYPES.SUCCESS_STATS
+  }, sender);
+  assert.deepEqual(statsResponse, { ok: true, data: stats });
+});

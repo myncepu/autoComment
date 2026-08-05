@@ -182,7 +182,7 @@ test('rejects malformed versions, revisions, entity fields, and timestamps', () 
   assert.equal(validationError((value) => { value.promotionSites[0].content = ' '; }), 'invalid_promotion_site');
 });
 
-test('rejects duplicate profile display names and duplicate site names case-insensitively', () => {
+test('rejects duplicate profile display names while allowing the same product name on different pages', () => {
   assert.equal(validationError((value) => {
     value.profiles.push({
       ...value.profiles[0],
@@ -195,9 +195,10 @@ test('rejects duplicate profile display names and duplicate site names case-inse
     value.promotionSites.push({
       ...value.promotionSites[0],
       id: 'site-b',
-      name: '产品官网 a'
+      name: '产品官网 a',
+      url: 'https://product.example/another-page'
     });
-  }), 'duplicate_promotion_site_name');
+  }), undefined);
 });
 
 test('rejects duplicate entity IDs', () => {
@@ -208,6 +209,41 @@ test('rejects duplicate entity IDs', () => {
   assert.equal(validationError((value) => {
     value.promotionSites.push({ ...value.promotionSites[0], name: '产品官网 B' });
   }), 'duplicate_promotion_site_id');
+});
+
+test('rejects duplicate URLs across legacy sites and every modern promotion page', () => {
+  assert.equal(validationError((value) => {
+    value.promotionSites.push({
+      ...value.promotionSites[0],
+      id: 'site-b',
+      name: '产品官网 B'
+    });
+  }), 'duplicate_promotion_page_url');
+
+  const value = validConfig();
+  value.profiles[0].email = '';
+  value.promotionSites[0] = {
+    ...value.promotionSites[0],
+    email: 'support@product.example',
+    pages: [{
+      id: 'page-a',
+      url: 'https://product.example/repeated',
+      keywords: ['Page A'],
+      content: 'Page A instructions',
+      enabled: true,
+      createdAt: 1,
+      updatedAt: 1
+    }, {
+      id: 'page-b',
+      url: 'https://product.example/repeated',
+      keywords: ['Page B'],
+      content: 'Page B instructions',
+      enabled: true,
+      createdAt: 1,
+      updatedAt: 1
+    }]
+  };
+  assert.equal(validateDomainConfig(value).error, 'duplicate_promotion_page_url');
 });
 
 test('rejects non-http promotion URLs', () => {
@@ -289,4 +325,42 @@ test('recursively rejects sensitive field names without exposing their values', 
   assert.doesNotThrow(() => assertNoSensitiveFields({
     content: 'A sentence can mention a password without being a password field.'
   }));
+});
+
+test('accepts identities without email and normalizes old multi-page websites into page records', () => {
+  const value = validConfig();
+  value.profiles[0].email = '';
+  value.promotionSites[0] = {
+    ...value.promotionSites[0],
+    email: 'support@product.example',
+    pages: [{
+      id: 'page-home',
+      url: 'https://product.example/',
+      keywords: ['Product', 'browser tool'],
+      content: 'Use at most one relevant link to the exact promoted page.',
+      enabled: true,
+      createdAt: 1,
+      updatedAt: 1
+    }, {
+      id: 'page-video',
+      url: 'https://product.example/video',
+      keywords: ['AI video'],
+      content: 'Describe the AI video page when it is contextually relevant.',
+      enabled: true,
+      createdAt: 1,
+      updatedAt: 1
+    }]
+  };
+
+  const result = validateDomainConfig(value);
+  assert.equal(result.ok, true);
+  assert.equal(result.value.profiles[0].email, '');
+  assert.equal(result.value.promotionSites.length, 2);
+  assert.equal(result.value.promotionSites[0].pages.length, 1);
+  assert.equal(result.value.promotionSites[1].pages.length, 1);
+  assert.equal(result.value.promotionSites[0].id, 'site-a');
+  assert.equal(result.value.promotionSites[1].id, 'site-a--page-video');
+  assert.equal(result.value.promotionSites[1].url, 'https://product.example/video');
+  assert.equal(result.value.promotionSites[0].email, 'support@product.example');
+  assert.equal(result.value.promotionSites[1].email, 'support@product.example');
 });

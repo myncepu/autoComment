@@ -603,6 +603,147 @@ test('renders native file import states and only lets duplicate rows be overridd
   assert.equal(document.querySelector('[data-preflight-row="8"] button'), null);
 });
 
+test('selects saved outlinks with search, pagination, and cross-page selection controls', () => {
+  const document = wizardDocument();
+  const sourceModes = [];
+  const loads = [];
+  const selections = [];
+  const view = createBatchWizardView(document, {
+    onSourceModeChange(mode) {
+      sourceModes.push(mode);
+    },
+    onOutlinkLoad(request) {
+      loads.push(request);
+    },
+    onOutlinkSelectionChange(records) {
+      selections.push(records);
+    }
+  });
+
+  view.open(validDraftFixture({ step: 2 }));
+  change(document, '[name="sourceMode"][value="outlinks"]', 'outlinks', true);
+  assert.deepEqual(sourceModes, ['outlinks']);
+
+  const records = [
+    {
+      id: 'one',
+      url: 'https://one.example.test/post',
+      host: 'one.example.test',
+      sourceHost: 'app.ahrefs.com',
+      isDofollow: true
+    },
+    {
+      id: 'two',
+      url: 'https://two.example.test/post',
+      host: 'two.example.test',
+      sourceHost: 'source.example.test',
+      isDofollow: false
+    }
+  ];
+  view.render(validDraftFixture({
+    step: 2,
+    sourceMode: 'outlinks',
+    outlinkSource: {
+      query: '',
+      page: 0,
+      pageSize: 50,
+      total: 75,
+      records,
+      selectedRecords: [],
+      loading: false,
+      error: ''
+    }
+  }));
+
+  assert.equal(document.querySelector('input[type="file"]'), null);
+  assert.equal(document.querySelectorAll('[name="outlinkRecordSelection"]').length, 2);
+  assert.match(document.querySelector('[data-outlink-selection-summary]').textContent, /已选择 0/);
+  assert.match(document.querySelector('[data-outlink-page-label]').textContent, /第 1 \/ 2 页/);
+
+  change(document, '[name="outlinkQuery"]', 'example');
+  click(document, '[data-action="outlink-search"]');
+  assert.deepEqual(loads.at(-1), { query: 'example', page: 0 });
+
+  view.render(validDraftFixture({
+    step: 2,
+    sourceMode: 'outlinks',
+    outlinkSource: {
+      query: '',
+      page: 0,
+      pageSize: 50,
+      total: 75,
+      records,
+      selectedRecords: [],
+      loading: false,
+      error: ''
+    }
+  }));
+  click(document, '[data-action="outlink-select-page"]');
+  assert.deepEqual(
+    selections.at(-1).map(({ url }) => url),
+    records.map(({ url }) => url)
+  );
+  assert.match(document.querySelector('[data-outlink-selection-summary]').textContent, /已选择 2/);
+
+  click(document, '[data-action="outlink-clear-selection"]');
+  assert.deepEqual(selections.at(-1), []);
+});
+
+test('selects identities and promotion pages independently without rendering Pair controls', () => {
+  const document = wizardDocument();
+  const selections = [];
+  const view = createBatchWizardView(document, {
+    onAllocationSelectionChange(selection) {
+      selections.push(selection);
+    }
+  });
+  view.open(validDraftFixture({
+    step: 1,
+    domainConfig: {
+      revision: 3,
+      profiles: [
+        { id: 'profile-a', displayName: 'Alex Morgan' },
+        { id: 'profile-b', displayName: 'Jamie Taylor' }
+      ],
+      promotionSites: [{
+        id: 'site-a',
+        name: 'Product',
+        enabled: true,
+        pages: [{
+          id: 'page-a',
+          url: 'https://product.test/a',
+          keywords: ['Page A'],
+          enabled: true
+        }, {
+          id: 'page-b',
+          url: 'https://product.test/b',
+          keywords: ['Page B'],
+          enabled: true
+        }]
+      }],
+      assignmentPolicy: {
+        defaultPairId: '',
+        pairs: [],
+        quotas: {
+          batch: 100,
+          perProfile: 50,
+          perPromotionSite: 50,
+          perTargetDomain: 3
+        }
+      }
+    }
+  }));
+
+  assert.equal(document.querySelectorAll('[name="selectedProfileIds"]').length, 2);
+  assert.equal(document.querySelectorAll('[name="selectedPromotionPageIds"]').length, 2);
+  assert.match(document.querySelector('[data-wizard-step="1"]').textContent, /不再使用 Pair/u);
+  change(document, '[name="selectedPromotionPageIds"][value="page-a"]', undefined, false);
+  assert.deepEqual(selections.at(-1), {
+    selectedProfileIds: ['profile-a', 'profile-b'],
+    selectedPromotionPageIds: ['page-b']
+  });
+});
+
 test('clamps execution settings and enforces auto-submit implies auto-generate', () => {
   const document = wizardDocument();
   const drafts = [];

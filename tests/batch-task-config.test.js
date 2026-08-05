@@ -75,6 +75,29 @@ test('accepts exact safe snapshots and rejects secrets in BATCH_HANDLE', () => {
   assert.doesNotMatch(JSON.stringify(context), /password|secret/i);
 });
 
+test('accepts a site-bound email when the identity has no email', () => {
+  const taskConfig = loadTaskConfig();
+  const context = taskConfig.acceptHandle(validHandle({
+    profile: {
+      id: 'profile-a',
+      displayName: 'Alex Morgan',
+      name: 'Alex Morgan',
+      email: ''
+    },
+    promotionSite: {
+      id: 'site-a',
+      name: 'Product · Inner page',
+      url: 'https://promo-a.test/inner-page',
+      content: 'Use at most one relevant link to the exact page.',
+      email: 'support@promo-a.test'
+    },
+    assignmentSource: 'round_robin'
+  }));
+
+  assert.equal(context.profile.email, '');
+  assert.equal(context.promotionSite.email, 'support@promo-a.test');
+});
+
 test('rejects unknown fields, mismatched ids, credentials, and stale attempts', () => {
   const taskConfig = loadTaskConfig();
   const invalid = [

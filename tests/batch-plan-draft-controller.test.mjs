@@ -217,6 +217,12 @@ test('mapping or config changes invalidate the prior finalized plan and confirma
   await controller.setConfig(updated);
   assert.equal(controller.snapshot().plan.configRevision, 8);
   assert.equal(controller.snapshot().confirmation, null);
+
+  const cleared = controller.clearSource();
+  assert.equal(cleared.parsed, null);
+  assert.equal(cleared.mapping, null);
+  assert.equal(cleared.plan, null);
+  assert.equal(cleared.summary, null);
 });
 
 test('never exposes values from sensitive CSV columns in draft snapshots', async () => {

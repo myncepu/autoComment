@@ -206,15 +206,18 @@ test('saves an assignment policy only when all references and defaults are valid
   assert.equal((await repository.load()).revision, 3);
 });
 
-test('refuses to delete entities referenced by assignment pairs', async () => {
+test('deletes entities and cleans obsolete legacy assignment pairs', async () => {
   const area = storageArea({ [DOMAIN_CONFIG_KEY]: populatedConfig() });
   const repository = createDomainConfigRepository(area);
 
-  await assert.rejects(() => repository.deleteProfile('profile-a'),
-    (error) => error.code === 'profile_in_use');
-  await assert.rejects(() => repository.deletePromotionSite('site-a'),
-    (error) => error.code === 'promotion_site_in_use');
-  assert.equal((await repository.load()).revision, 0);
+  await repository.deleteProfile('profile-a');
+  const afterProfile = await repository.load();
+  assert.deepEqual(afterProfile.profiles, []);
+  assert.deepEqual(afterProfile.assignmentPolicy.pairs, []);
+  assert.equal(afterProfile.assignmentPolicy.defaultPairId, null);
+  await repository.deletePromotionSite('site-a');
+  assert.deepEqual((await repository.load()).promotionSites, []);
+  assert.equal((await repository.load()).revision, 2);
 });
 
 test('deletes unreferenced entities and rejects missing IDs without writes', async () => {

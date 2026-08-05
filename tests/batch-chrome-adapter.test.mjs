@@ -604,14 +604,32 @@ test('keeps the model key out of profile state and supports durable local compat
     apiKey: 'runtime-only-api-key'
   });
   assert.deepEqual(await dependencies.draftStorage.get(), { step: 2 });
-  await dependencies.draftStorage.set({ step: 3 });
+  await dependencies.draftStorage.set({
+    step: 3,
+    outlinkSource: {
+      query: 'blog',
+      records: [{ url: 'https://ephemeral.test/' }],
+      selectedRecords: [{ url: 'https://selected.test/' }],
+      loading: true,
+      error: 'temporary'
+    }
+  });
   await dependencies.draftStorage.remove();
   assert.deepEqual(await dependencies.loadLegacyResults(), {
     batchId: 'legacy',
     results: [{ result: 'success' }]
   });
   assert.deepEqual(harness.localSets.at(-1), {
-    batchDraftV1: { step: 3 }
+    batchDraftV1: {
+      step: 3,
+      outlinkSource: {
+        query: 'blog',
+        records: [],
+        selectedRecords: [{ url: 'https://selected.test/' }],
+        loading: false,
+        error: ''
+      }
+    }
   });
   assert.deepEqual(harness.localRemoves.at(-1), ['batchDraftV1']);
 });
@@ -729,4 +747,22 @@ test('fails closed when recent-success history cannot be read', async () => {
     dependencies.loadRecentSuccessUrls(),
     (error) => error.code === 'recent_success_history_unavailable'
   );
+});
+
+test('loads successful target statistics for duplicate-promotion prevention', async () => {
+  const harness = createChromeHarness();
+  const expected = [{ targetHost: 'proven.test', successCount: 2 }];
+  harness.chromeApi.runtime.sendMessage = async (message) => {
+    harness.runtimeMessages.push(structuredClone(message));
+    if (message.type === 'OUTLINKS_SUCCESS_STATS') {
+      return { ok: true, data: expected };
+    }
+    return { ok: true, checkpoint: null };
+  };
+  const dependencies = createChromeBatchDependencies(harness.chromeApi);
+
+  assert.deepEqual(await dependencies.loadSuccessfulTargetStats(), expected);
+  assert.deepEqual(harness.runtimeMessages, [{
+    type: 'OUTLINKS_SUCCESS_STATS'
+  }]);
 });
